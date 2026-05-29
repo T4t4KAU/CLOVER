@@ -1,0 +1,15 @@
+{
+  "case_id": "069_Taxonomy_0027",
+  "dataset_id": "069_Taxonomy",
+  "source_dataset_dir": "datasets/databench/069_Taxonomy",
+  "source_task_spec": "datasets/databench/069_Taxonomy/task_specs/069_Taxonomy_0027.json",
+  "source_table": "datasets/databench/069_Taxonomy/table.csv",
+  "question": "List counts of non-null values for each Tier column.",
+  "answer_type": "list[number]",
+  "expected_answer": "[703, 663, 316, 60]",
+  "columns_used": "[]",
+  "column_types": "[]",
+  "table_size_bytes": 47109,
+  "example_id": "case_9",
+  "example_dir": "examples/table_reasoning/case_9"
+}

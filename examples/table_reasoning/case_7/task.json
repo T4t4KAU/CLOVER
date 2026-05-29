@@ -1,0 +1,15 @@
+{
+  "task_type": "table_reasoning",
+  "question": "What are the top 5 special defense stats in the dataset?",
+  "sources": [
+    {
+      "id": 0,
+      "type": "table",
+      "file": "table.csv"
+    }
+  ],
+  "answer": {
+    "name": "answer",
+    "type": "list[number]"
+  }
+}

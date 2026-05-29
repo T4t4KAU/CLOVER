@@ -1,0 +1,123 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# pipenv / poetry / pdm
+Pipfile.lock
+poetry.lock
+pdm.lock
+.pdm.toml
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables
+.env.*
+!.env.example
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+
+# Local config
+local_settings.py
+settings.local.py
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Flask
+instance/
+.webassets-cache
+
+# Django
+*.pot
+*.pyc
+staticfiles/
+media/
+
+# FastAPI / general cache
+.cache/
+tmp/
+temp/
+
+# Docker overrides
+docker-compose.override.yml
+
+model_config/
+benchmark/
+datasets/
+
+# Example/evaluation generated outputs
+examples/**/.databench_eval_root/
+examples/**/runs/

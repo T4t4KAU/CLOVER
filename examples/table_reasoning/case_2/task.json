@@ -1,0 +1,15 @@
+{
+  "task_type": "table_reasoning",
+  "question": "Specify the bottom 2 average monthly searches for URLs with the highest rankings.",
+  "sources": [
+    {
+      "id": 0,
+      "type": "table",
+      "file": "table.csv"
+    }
+  ],
+  "answer": {
+    "name": "answer",
+    "type": "list[number]"
+  }
+}

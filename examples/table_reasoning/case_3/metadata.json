@@ -1,0 +1,15 @@
+{
+  "case_id": "026_Predicting_0018",
+  "dataset_id": "026_Predicting",
+  "source_dataset_dir": "datasets/databench/026_Predicting",
+  "source_task_spec": "datasets/databench/026_Predicting/task_specs/026_Predicting_0018.json",
+  "source_table": "datasets/databench/026_Predicting/table.csv",
+  "question": "Enumerate the fixed acidity levels of the top 5 wines with the highest quality ratings.",
+  "answer_type": "list[number]",
+  "expected_answer": "['7.9', '10.3', '5.6', '12.6', '11.3']",
+  "columns_used": "['quality', 'fixed acidity']",
+  "column_types": "['number[uint8]', 'number[double]']",
+  "table_size_bytes": 91976,
+  "example_id": "case_3",
+  "example_dir": "examples/table_reasoning/case_3"
+}

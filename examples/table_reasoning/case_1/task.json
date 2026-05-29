@@ -1,0 +1,15 @@
+{
+  "task_type": "table_reasoning",
+  "question": "Name the 3 happiness values for the 3 unhappiest people in the happiness scale.",
+  "sources": [
+    {
+      "id": 0,
+      "type": "table",
+      "file": "table.csv"
+    }
+  ],
+  "answer": {
+    "name": "answer",
+    "type": "list[number]"
+  }
+}

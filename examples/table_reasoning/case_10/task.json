@@ -1,0 +1,15 @@
+{
+  "task_type": "table_reasoning",
+  "question": "Is there any applicant who got a grade better than 330 in their graduate record examination?",
+  "sources": [
+    {
+      "id": 0,
+      "type": "table",
+      "file": "table.csv"
+    }
+  ],
+  "answer": {
+    "name": "answer",
+    "type": "boolean"
+  }
+}

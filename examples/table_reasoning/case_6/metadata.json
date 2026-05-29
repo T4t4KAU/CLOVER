@@ -1,0 +1,15 @@
+{
+  "case_id": "042_Predict_0008",
+  "dataset_id": "042_Predict",
+  "source_dataset_dir": "datasets/databench/042_Predict",
+  "source_task_spec": "datasets/databench/042_Predict/task_specs/042_Predict_0008.json",
+  "source_table": "datasets/databench/042_Predict/table.csv",
+  "question": "What is the most common mother's job among students who want to take higher education?",
+  "answer_type": "category",
+  "expected_answer": "other",
+  "columns_used": "['higher', 'Mjob']",
+  "column_types": "['category', 'category']",
+  "table_size_bytes": 41983,
+  "example_id": "case_6",
+  "example_dir": "examples/table_reasoning/case_6"
+}

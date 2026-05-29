@@ -1,0 +1,15 @@
+{
+  "task_type": "table_reasoning",
+  "question": "What is the most common mother's job among students who want to take higher education?",
+  "sources": [
+    {
+      "id": 0,
+      "type": "table",
+      "file": "table.csv"
+    }
+  ],
+  "answer": {
+    "name": "answer",
+    "type": "category"
+  }
+}

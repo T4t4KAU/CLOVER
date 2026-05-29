@@ -1,0 +1,15 @@
+{
+  "case_id": "072_Admissions_0000",
+  "dataset_id": "072_Admissions",
+  "source_dataset_dir": "datasets/databench/072_Admissions",
+  "source_task_spec": "datasets/databench/072_Admissions/task_specs/072_Admissions_0000.json",
+  "source_table": "datasets/databench/072_Admissions/table.csv",
+  "question": "Is there any applicant who got a grade better than 330 in their graduate record examination?",
+  "answer_type": "boolean",
+  "expected_answer": "True",
+  "columns_used": "[]",
+  "column_types": "[]",
+  "table_size_bytes": 16803,
+  "example_id": "case_10",
+  "example_dir": "examples/table_reasoning/case_10"
+}

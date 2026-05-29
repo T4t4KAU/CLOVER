@@ -1,0 +1,15 @@
+{
+  "case_id": "025_Data_0019",
+  "dataset_id": "025_Data",
+  "source_dataset_dir": "datasets/databench/025_Data",
+  "source_task_spec": "datasets/databench/025_Data/task_specs/025_Data_0019.json",
+  "source_table": "datasets/databench/025_Data/table.csv",
+  "question": "Specify the bottom 2 average monthly searches for URLs with the highest rankings.",
+  "answer_type": "list[number]",
+  "expected_answer": "[50, 50]",
+  "columns_used": "['Ranking', 'Avg. monthly searches']",
+  "column_types": "['number[uint8]', 'number[uint8]']",
+  "table_size_bytes": 6225,
+  "example_id": "case_2",
+  "example_dir": "examples/table_reasoning/case_2"
+}

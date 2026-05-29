@@ -1,0 +1,15 @@
+{
+  "case_id": "051_Pokemon_0016",
+  "dataset_id": "051_Pokemon",
+  "source_dataset_dir": "datasets/databench/051_Pokemon",
+  "source_task_spec": "datasets/databench/051_Pokemon/task_specs/051_Pokemon_0016.json",
+  "source_table": "datasets/databench/051_Pokemon/table.csv",
+  "question": "What are the top 5 special defense stats in the dataset?",
+  "answer_type": "list[number]",
+  "expected_answer": "[250, 230, 200, 160, 160]",
+  "columns_used": "['sp_defense']",
+  "column_types": "['number[uint8]']",
+  "table_size_bytes": 59658,
+  "example_id": "case_7",
+  "example_dir": "examples/table_reasoning/case_7"
+}

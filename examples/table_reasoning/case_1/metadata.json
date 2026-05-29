@@ -1,0 +1,15 @@
+{
+  "case_id": "003_Love_0017",
+  "dataset_id": "003_Love",
+  "source_dataset_dir": "datasets/databench/003_Love",
+  "source_task_spec": "datasets/databench/003_Love/task_specs/003_Love_0017.json",
+  "source_table": "datasets/databench/003_Love/table.csv",
+  "question": "Name the 3 happiness values for the 3 unhappiest people in the happiness scale.",
+  "answer_type": "list[number]",
+  "expected_answer": "[2, 2, 2]",
+  "columns_used": "['Happiness scale']",
+  "column_types": "['number[uint8]']",
+  "table_size_bytes": 90980,
+  "example_id": "case_1",
+  "example_dir": "examples/table_reasoning/case_1"
+}

@@ -1,0 +1,15 @@
+{
+  "case_id": "034_World_0007",
+  "dataset_id": "034_World",
+  "source_dataset_dir": "datasets/databench/034_World",
+  "source_task_spec": "datasets/databench/034_World/task_specs/034_World_0007.json",
+  "source_table": "datasets/databench/034_World/table.csv",
+  "question": "What's the minimum Social support score among the countries?",
+  "answer_type": "number",
+  "expected_answer": "0.319459856",
+  "columns_used": "['Regional indicator', 'Social support']",
+  "column_types": "['category', 'number[double]']",
+  "table_size_bytes": 38087,
+  "example_id": "case_4",
+  "example_dir": "examples/table_reasoning/case_4"
+}

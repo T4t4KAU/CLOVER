@@ -1,0 +1,15 @@
+{
+  "case_id": "038_Stroke_0003",
+  "dataset_id": "038_Stroke",
+  "source_dataset_dir": "datasets/databench/038_Stroke",
+  "source_task_spec": "datasets/databench/038_Stroke/task_specs/038_Stroke_0003.json",
+  "source_table": "datasets/databench/038_Stroke/table.csv",
+  "question": "Is the average glucose level higher for males than females?",
+  "answer_type": "boolean",
+  "expected_answer": "True",
+  "columns_used": "['gender', 'avg_glucose_level']",
+  "column_types": "['category', 'number[double]']",
+  "table_size_bytes": 327009,
+  "example_id": "case_5",
+  "example_dir": "examples/table_reasoning/case_5"
+}

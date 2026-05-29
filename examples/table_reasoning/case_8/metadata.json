@@ -1,0 +1,15 @@
+{
+  "case_id": "056_Emoji_0013",
+  "dataset_id": "056_Emoji",
+  "source_dataset_dir": "datasets/databench/056_Emoji",
+  "source_task_spec": "datasets/databench/056_Emoji/task_specs/056_Emoji_0013.json",
+  "source_table": "datasets/databench/056_Emoji/table.csv",
+  "question": "Identify the top 3 foods with the least amount of sugar.",
+  "answer_type": "list[category]",
+  "expected_answer": "['chestnut', 'pancakes', 'cheese']",
+  "columns_used": "['Total Sugar (g)', 'name']",
+  "column_types": "['number[double]', 'category']",
+  "table_size_bytes": 12829,
+  "example_id": "case_8",
+  "example_dir": "examples/table_reasoning/case_8"
+}
