@@ -1,0 +1,14 @@
+{
+  "provider": "doubao",
+  "api_type": "responses",
+  "api_key_env": "DOUBAO_API_KEY",
+  "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "model": "doubao-seed-2-0-pro-260215",
+  "timeout": 180,
+  "max_retries": 2,
+  "http2": false,
+  "trust_env": true,
+  "sleep_after_request_seconds": 0,
+  "max_output_tokens": 12000,
+  "temperature": 0
+}

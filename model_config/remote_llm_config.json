@@ -1,0 +1,14 @@
+{
+  "provider": "openai",
+  "api_type": "responses",
+  "api_key_env": "OPENAI_API_KEY",
+  "base_url": "https://api.openai.com/v1",
+  "model": "gpt-5.2",
+  "timeout": 180,
+  "max_retries": 2,
+  "http2": false,
+  "trust_env": true,
+  "sleep_after_request_seconds": 0,
+  "max_output_tokens": 12000,
+  "temperature": 0
+}

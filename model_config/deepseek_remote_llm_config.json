@@ -1,0 +1,19 @@
+{
+  "provider": "deepseek",
+  "api_type": "chat_completions",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-pro",
+  "timeout": 180,
+  "max_retries": 2,
+  "http2": false,
+  "trust_env": true,
+  "sleep_after_request_seconds": 0,
+  "max_tokens": 12000,
+  "extra_body": {
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "temperature": 0
+}

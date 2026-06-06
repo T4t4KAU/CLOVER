@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clover-agent-runtime"
+version = "0.1.0"
+description = "A cloud-edge agent runtime for cost-efficient data reasoning."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Wenxuan Huang" },
+  { name = "Zexi Ouyang" }
+]
+dependencies = [
+  "datasets>=2.18.0",
+  "huggingface-hub>=0.23.0",
+  "httpx>=0.28.0",
+  "jinja2>=3.1.0",
+  "mlx-lm==0.29.1",
+  "openai>=2.0.0",
+  "pandas>=2.0.0",
+  "pyarrow>=15.0.0",
+  "PyMuPDF>=1.24.0",
+  "sqlglot>=25.0.0",
+  "transformers>=4.51.0,<5"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.5.0"
+]
+modelscope = [
+  "modelscope>=1.20.0"
+]
+
+[tool.setuptools.packages.find]
+include = ["clover*", "benchmarks*"]
+exclude = ["tests*", "docs*", "model_config*", "assets*"]
+
+[tool.setuptools.package-data]
+"clover.supervisor" = ["templates/**/*.md"]
+"clover.executor.agents" = ["templates/**/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
