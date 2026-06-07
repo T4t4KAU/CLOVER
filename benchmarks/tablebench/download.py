@@ -299,9 +299,7 @@ def convert_tablebench_rows(
                     "Pass --overwrite to replace it."
                 )
             shutil.rmtree(dataset_dir)
-
-        task_specs_dir = dataset_dir / "task_specs"
-        task_specs_dir.mkdir(parents=True, exist_ok=True)
+        dataset_dir.mkdir(parents=True, exist_ok=True)
 
         frame = _table_frame(table_rows[0]["table"])
         table_path = dataset_dir / "table.csv"
@@ -311,10 +309,6 @@ def convert_tablebench_rows(
         for case_index, row in enumerate(table_rows):
             case_record = _case_record(row, table_id, case_index)
             case_records.append(case_record)
-            _write_json(
-                task_specs_dir / f"{case_record['case_id']}.json",
-                _task_spec_from_case(case_record),
-            )
             if case_record.get("qtype"):
                 qtype_counts[str(case_record["qtype"])] += 1
             if case_record.get("qsubtype"):
@@ -531,43 +525,6 @@ def _case_record(row: dict[str, Any], table_id: str, case_index: int) -> dict[st
         if value is not None:
             record[field] = _json_ready(value)
     return record
-
-
-def _task_spec_from_case(case: dict[str, Any]) -> dict[str, Any]:
-    task = {
-        "task_type": "table_reasoning.analyze",
-        "question": case["question"],
-        "sources": [
-            {
-                "id": 0,
-                "type": "table",
-                "file": "table.csv",
-            }
-        ],
-        "answer": {
-            "name": "answer",
-            "type": case["type"],
-        },
-    }
-    metadata = {
-        key: case[key]
-        for key in ("qtype", "qsubtype", "chart_type", "original_id")
-        if case.get(key) is not None
-    }
-    if metadata:
-        task["hints"] = _reasoning_context(metadata)
-    return task
-
-
-def _reasoning_context(metadata: dict[str, Any]) -> dict[str, Any]:
-    context = {}
-    if metadata.get("qtype") is not None:
-        context["category"] = metadata["qtype"]
-    if metadata.get("qsubtype") is not None:
-        context["subcategory"] = metadata["qsubtype"]
-    if metadata.get("chart_type") is not None:
-        context["chart_type"] = metadata["chart_type"]
-    return context
 
 
 def _table_frame(table: Any) -> Any:

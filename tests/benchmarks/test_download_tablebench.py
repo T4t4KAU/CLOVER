@@ -54,22 +54,144 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
                     encoding="utf-8"
                 ).splitlines()
             ]
-            task_spec = json.loads(
-                (dataset_dir / "task_specs" / "case-a.json").read_text(
-                    encoding="utf-8"
-                )
-            )
+            task_specs_exists = (dataset_dir / "task_specs").exists()
             table_text = (dataset_dir / "table.csv").read_text(encoding="utf-8")
-            task = load_tablebench_task(root, dataset_id, case_id="case-a")
+            with patch(
+                "clover.resource.dsl_builder._generate_builder_slm_text",
+                return_value=type(
+                    "FakeResult",
+                    (),
+                    {
+                        "text": json.dumps(
+                            {
+                                "tool": "build_table_dsl",
+                                "arguments": {"source_id": 0},
+                            }
+                        ),
+                        "response_payload": {
+                            "usage": {"prompt_tokens": 9, "completion_tokens": 4}
+                        },
+                    },
+                )(),
+            ):
+                task = load_tablebench_task(
+                    root,
+                    dataset_id,
+                    case_id="case-a",
+                    dsl_builder_slm_config={
+                        "api_type": "chat_completions",
+                        "model": "fake",
+                    },
+                )
 
         self.assertEqual(summary["dataset_count"], 1)
         self.assertEqual(summary["case_count"], 2)
         self.assertEqual(cases[0]["type"], "number")
         self.assertEqual(cases[1]["type"], "boolean")
-        self.assertEqual(task_spec["task_type"], "table_reasoning.analyze")
-        self.assertEqual(task_spec["sources"][0]["file"], "table.csv")
+        self.assertFalse(task_specs_exists)
+        self.assertEqual(task.task_dsl["task_type"], "table_reasoning.analyze")
+        self.assertEqual(task.task_dsl["sources"][0]["file"], "table.csv")
+        self.assertEqual(task.task_dsl["answer"]["type"], "number")
+        self.assertEqual(
+            task.task_dsl["hints"],
+            {"category": "NumericalReasoning", "subcategory": "Aggregation"},
+        )
         self.assertEqual(task.metadata["qtype"], "NumericalReasoning")
+        self.assertEqual(task.metadata["dsl_builder"]["mode"], "builder_agent")
+        self.assertNotIn("task_spec_path", task.metadata)
+        self.assertNotIn("benchmark_task_spec_path", task.metadata)
         self.assertIn("region,sales", table_text)
+
+    def test_load_tablebench_task_can_use_builder_agent_to_select_tool(self) -> None:
+        rows = [
+            {
+                "id": "case-a",
+                "qtype": "FactChecking",
+                "qsubtype": "Comparison",
+                "question": "Which nation has a total of 13 medals?",
+                "answer": "Borduria",
+                "table": {
+                    "columns": ["Rank", "Nation", "Gold", "Silver", "Total"],
+                    "data": [
+                        ["1", "Aland", "18", "30", "57"],
+                        ["4", "Borduria", "4", "3", "13"],
+                    ],
+                },
+                "split": "TQA_test",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "tablebench"
+            summary = convert_tablebench_rows(rows=rows, output_root=root)
+            dataset_id = summary["datasets"][0]["dataset_id"]
+            with patch(
+                "clover.resource.dsl_builder._generate_builder_slm_text",
+                return_value=type(
+                    "FakeResult",
+                    (),
+                    {
+                        "text": json.dumps(
+                            {
+                                "tool": "build_table_dsl",
+                                "arguments": {"source_id": 0},
+                            }
+                        ),
+                        "response_payload": {
+                            "usage": {"prompt_tokens": 9, "completion_tokens": 4}
+                        },
+                    },
+                )(),
+            ):
+                task = load_tablebench_task(
+                    root,
+                    dataset_id,
+                    case_id="case-a",
+                    dsl_builder_slm_config={
+                        "api_type": "chat_completions",
+                        "model": "fake",
+                    },
+                )
+
+        self.assertEqual(task.metadata["dsl_builder"]["mode"], "builder_agent")
+        self.assertEqual(
+            task.metadata["dsl_builder"]["tool_call"]["tool"],
+            "build_table_dsl",
+        )
+        self.assertEqual(
+            task.metadata["dsl_builder"]["token_usage"]["total_tokens"],
+            13,
+        )
+        self.assertEqual(
+            task.task_dsl["hints"],
+            {"category": "FactChecking", "subcategory": "Comparison"},
+        )
+        self.assertNotIn("columns", task.task_dsl["hints"])
+        self.assertIn(
+            "columns",
+            task.metadata["dsl_builder"]["diagnostics"]["hints"],
+        )
+
+    def test_builder_agent_mode_requires_slm_config(self) -> None:
+        rows = [
+            {
+                "id": "case-a",
+                "question": "Which nation has a total of 13 medals?",
+                "answer": "Borduria",
+                "table": {"columns": ["Nation"], "data": [["Borduria"]]},
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "tablebench"
+            summary = convert_tablebench_rows(rows=rows, output_root=root)
+            dataset_id = summary["datasets"][0]["dataset_id"]
+            with self.assertRaisesRegex(ValueError, "requires dsl_builder_slm_config"):
+                load_tablebench_task(
+                    root,
+                    dataset_id,
+                    case_id="case-a",
+                )
 
     def test_filters_by_qtype_and_limit(self) -> None:
         rows = [

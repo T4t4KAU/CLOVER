@@ -10,7 +10,7 @@ from benchmarks.costing import (
 
 
 class EvalCostingTest(unittest.TestCase):
-    def test_estimates_openai_text_cost_with_cached_input(self) -> None:
+    def test_estimates_openai_text_cost_ignores_cached_input_discount(self) -> None:
         estimate = estimate_openai_text_cost(
             {
                 "input_tokens": 1_000_000,
@@ -23,11 +23,16 @@ class EvalCostingTest(unittest.TestCase):
         )
 
         self.assertEqual(estimate["pricing_model"], "gpt-5.2")
-        self.assertEqual(estimate["usage"]["billable_input_tokens"], 900_000)
-        self.assertAlmostEqual(estimate["cost_usd"]["input"], 1.575)
-        self.assertAlmostEqual(estimate["cost_usd"]["cached_input"], 0.0175)
+        self.assertEqual(estimate["usage"]["cached_input_tokens"], 100_000)
+        self.assertEqual(estimate["usage"]["billable_input_tokens"], 1_000_000)
+        self.assertEqual(
+            estimate["usage"]["cache_discount_ignored_input_tokens"],
+            100_000,
+        )
+        self.assertAlmostEqual(estimate["cost_usd"]["input"], 1.75)
+        self.assertAlmostEqual(estimate["cost_usd"]["cached_input"], 0.0)
         self.assertAlmostEqual(estimate["cost_usd"]["output"], 7.0)
-        self.assertAlmostEqual(estimate["cost_usd"]["total"], 8.5925)
+        self.assertAlmostEqual(estimate["cost_usd"]["total"], 8.75)
 
     def test_uses_openai_remote_model_when_known(self) -> None:
         estimate = estimate_openai_text_cost(
@@ -61,11 +66,15 @@ class EvalCostingTest(unittest.TestCase):
 
         self.assertEqual(estimate["provider"], "deepseek")
         self.assertEqual(estimate["pricing_model"], "deepseek-v4-pro")
-        self.assertEqual(estimate["usage"]["billable_input_tokens"], 900_000)
-        self.assertAlmostEqual(estimate["cost_usd"]["input"], 0.3915)
-        self.assertAlmostEqual(estimate["cost_usd"]["cached_input"], 0.0003625)
+        self.assertEqual(estimate["usage"]["billable_input_tokens"], 1_000_000)
+        self.assertEqual(
+            estimate["usage"]["cache_discount_ignored_input_tokens"],
+            100_000,
+        )
+        self.assertAlmostEqual(estimate["cost_usd"]["input"], 0.435)
+        self.assertAlmostEqual(estimate["cost_usd"]["cached_input"], 0.0)
         self.assertAlmostEqual(estimate["cost_usd"]["output"], 0.435)
-        self.assertAlmostEqual(estimate["cost_usd"]["total"], 0.8268625)
+        self.assertAlmostEqual(estimate["cost_usd"]["total"], 0.87)
 
     def test_normalizes_missing_usage_fields(self) -> None:
         self.assertEqual(

@@ -921,6 +921,7 @@ def _normalize_summary(
         "local_slm_calls": summary.get("local_slm_calls"),
         "remote_tokens": _token_total(summary.get("remote_token_usage")),
         "local_slm_tokens": _token_total(summary.get("local_slm_token_usage")),
+        "builder_agent_tokens": _token_total(summary.get("builder_agent_token_usage")),
         "cloud_api_cost_usd": remote_cost_total,
         "edge_energy_joules": edge_cost["energy_joules"],
         "edge_energy_cost_usd": edge_cost["cost_usd"],

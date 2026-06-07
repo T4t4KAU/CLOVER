@@ -24,6 +24,7 @@ from benchmarks.databench.static_tool_eval import (
     write_jsonl,
 )
 from benchmarks.tablebench.adapter import (
+    TABLEBENCH_DSL_MODE_BUILDER_AGENT,
     TablebenchTask,
     iter_tablebench_dataset_dirs,
     load_tablebench_task,
@@ -63,6 +64,9 @@ class _PreparedTableBenchCase:
     qtype: str | None
     qsubtype: str | None
     source_file: str
+    dsl_builder_mode: str
+    task_answer_type: str | None
+    dsl_builder: dict[str, Any]
 
 
 def run_tablebench_eval(
@@ -132,6 +136,10 @@ def run_tablebench_eval(
             raise ValueError("max_pending_slm_sequences must be positive")
         if eval_batch_size is not None and eval_batch_size <= 0:
             raise ValueError("eval_batch_size must be positive")
+        if local_slm_config is None:
+            raise ValueError(
+                "TableBench eval requires local_slm_config for BuilderAgent DSL construction"
+            )
         validation_mode = str(validation_mode or "none").strip().lower()
         progress_bar = progress_factory(len(selected_cases)) if progress_factory else None
         try:
@@ -259,6 +267,7 @@ def _run_tablebench_cases(
                 sample_index=sample_index,
                 runtime_case_id=runtime_case_id,
                 case_dir=case_dir,
+                dsl_builder_slm_config=local_slm_config,
             )
         except Exception as exc:  # noqa: BLE001 - isolate startup failures.
             _mark_case_failure(
@@ -291,6 +300,8 @@ def _run_tablebench_cases(
                 "answer_type": prepared.answer_type,
                 "qtype": prepared.qtype,
                 "qsubtype": prepared.qsubtype,
+                "dsl_builder_mode": prepared.dsl_builder_mode,
+                "task_answer_type": prepared.task_answer_type,
             },
         )
         specs_by_source_file[prepared.source_file].append(spec)
@@ -362,11 +373,13 @@ def _prepare_case(
     sample_index: int,
     runtime_case_id: str,
     case_dir: Path,
+    dsl_builder_slm_config: dict[str, Any] | None,
 ) -> _PreparedTableBenchCase:
     task = load_tablebench_task(
         tablebench_root=tablebench_root,
         dataset_id=sampled_case["dataset_id"],
         case_id=sampled_case["case_id"],
+        dsl_builder_slm_config=dsl_builder_slm_config,
     )
     preprocess_result = preprocess_task_dsl(task.task_dsl, base_dir=task.base_dir)
     source_file = _source_file_from_task(task)
@@ -383,6 +396,12 @@ def _prepare_case(
         qtype=task.metadata.get("qtype"),
         qsubtype=task.metadata.get("qsubtype"),
         source_file=source_file,
+        dsl_builder_mode=str(
+            task.metadata.get("dsl_builder", {}).get("mode")
+            or TABLEBENCH_DSL_MODE_BUILDER_AGENT
+        ),
+        task_answer_type=task.task_dsl.get("answer", {}).get("type"),
+        dsl_builder=dict(task.metadata.get("dsl_builder", {})),
     )
 
 
@@ -514,8 +533,11 @@ def _update_record_from_prepared_case(
     record.update(
         {
             "answer_type": prepared.answer_type,
+            "task_answer_type": prepared.task_answer_type,
             "qtype": prepared.qtype,
             "qsubtype": prepared.qsubtype,
+            "dsl_builder_mode": prepared.dsl_builder_mode,
+            "dsl_builder": json_ready(_dsl_builder_record_summary(prepared.dsl_builder)),
             "question": prepared.task.task_dsl["question"],
             "expected_raw": prepared.expected_raw,
             "expected_standard_text": json_ready(prepared.expected_raw),
@@ -612,6 +634,35 @@ def _write_startup_artifacts(prepared: _PreparedTableBenchCase) -> None:
     write_json(prepared.case_dir / "local_dsl.json", prepared.preprocess_result["local_dsl"])
     write_json(prepared.case_dir / "remote_dsl.json", prepared.preprocess_result["remote_dsl"])
     write_json(prepared.case_dir / "context.json", prepared.preprocess_result["context"])
+    write_json(prepared.case_dir / "dsl_builder.json", json_ready(prepared.dsl_builder))
+
+
+def _dsl_builder_record_summary(dsl_builder: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = dsl_builder.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    tool_call = dsl_builder.get("tool_call")
+    if not isinstance(tool_call, dict):
+        tool_call = {}
+    return {
+        "mode": dsl_builder.get("mode"),
+        "source": dsl_builder.get("source"),
+        "tool": tool_call.get("tool") or diagnostics.get("tool"),
+        "task_answer_type": dsl_builder.get("task_answer_type"),
+        "target_column": diagnostics.get("target_column"),
+        "token_usage": dsl_builder.get("token_usage"),
+    }
+
+
+def _sum_dsl_builder_token_usage(records: list[dict[str, Any]]) -> dict[str, int]:
+    total = {key: 0 for key in TOKEN_KEYS}
+    for record in records:
+        usage = (record.get("dsl_builder") or {}).get("token_usage")
+        if not isinstance(usage, dict):
+            continue
+        for key in TOKEN_KEYS:
+            total[key] += int(usage.get(key, 0) or 0)
+    return total
 
 
 def build_summary(
@@ -673,6 +724,20 @@ def build_summary(
         if isinstance(record.get("error"), dict) and record.get("error")
     )
     answer_types = Counter(record.get("answer_type") for record in records)
+    task_answer_types = Counter(record.get("task_answer_type") for record in records)
+    task_answer_type_matches = sum(
+        1
+        for record in records
+        if record.get("answer_type") == record.get("task_answer_type")
+    )
+    dsl_builder_modes = Counter(record.get("dsl_builder_mode") for record in records)
+    builder_agent_token_usage = _sum_dsl_builder_token_usage(records)
+    builder_agent_calls = sum(
+        1
+        for record in records
+        if (record.get("dsl_builder") or {}).get("mode")
+        == TABLEBENCH_DSL_MODE_BUILDER_AGENT
+    )
     mismatches_by_type = Counter(
         record.get("answer_type")
         for record in records
@@ -722,6 +787,7 @@ def build_summary(
         "slm_scheduler": _slm_scheduler_summary(local_slm_config),
         "eval_batch_size": eval_batch_size,
         "profile_baseline": profile_baseline,
+        "dsl_builder_mode": TABLEBENCH_DSL_MODE_BUILDER_AGENT,
         "remote_llm": _config_summary(remote_config),
         "local_slm": _config_summary(local_slm_config),
         "remote_calls": summary_profile.get("remote_calls", 0),
@@ -748,6 +814,12 @@ def build_summary(
         "scores_by_qtype": _score_groups(records, "qtype"),
         "scores_by_qsubtype": _score_groups(records, "qsubtype"),
         "answer_types": _counter_as_strings(answer_types),
+        "task_answer_types": _counter_as_strings(task_answer_types),
+        "task_answer_type_matches": task_answer_type_matches,
+        "task_answer_type_accuracy": safe_divide(task_answer_type_matches, total),
+        "dsl_builder_modes": _counter_as_strings(dsl_builder_modes),
+        "builder_agent_calls": builder_agent_calls,
+        "builder_agent_token_usage": builder_agent_token_usage,
         "mismatches_by_type": _counter_as_strings(mismatches_by_type),
         "qtypes": _string_counter(records, "qtype"),
         "qsubtypes": _string_counter(records, "qsubtype"),
@@ -803,6 +875,8 @@ def mismatch_record(record: dict[str, Any]) -> dict[str, Any]:
         "qtype": record.get("qtype"),
         "qsubtype": record.get("qsubtype"),
         "answer_type": record.get("answer_type"),
+        "task_answer_type": record.get("task_answer_type"),
+        "dsl_builder_mode": record.get("dsl_builder_mode"),
         "metric": record.get("tablebench_metric"),
         "score": record.get("tablebench_score"),
         "question": record.get("question"),
@@ -828,6 +902,8 @@ def base_case_record(
         "case_id": sampled_case["case_id"],
         "case_index": sampled_case.get("case_index"),
         "answer_type": sampled_case.get("answer_type"),
+        "task_answer_type": None,
+        "dsl_builder_mode": None,
         "qtype": sampled_case.get("qtype"),
         "qsubtype": sampled_case.get("qsubtype"),
         "tablebench_metric": tablebench_metric_name(

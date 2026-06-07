@@ -97,7 +97,7 @@ def estimate_openai_text_cost(
             remote_config=remote_config,
             assumptions=[
                 "DeepSeek API text-token prices are used for the configured remote model.",
-                "cached_input_tokens are charged at the cache-hit rate when available.",
+                "cached_input_tokens are recorded for diagnostics only; benchmark cost ignores cache discounts.",
                 "reasoning_tokens are diagnostics and are not added again beyond output_tokens.",
             ],
         )
@@ -118,7 +118,7 @@ def estimate_openai_text_cost(
         remote_config=remote_config,
         assumptions=[
             "Standard OpenAI API text-token prices are used as a reference.",
-            "cached_input_tokens are charged at the cached-input rate when available.",
+            "cached_input_tokens are recorded for diagnostics only; benchmark cost ignores cache discounts.",
             "reasoning_tokens are diagnostics and are not added again beyond output_tokens.",
         ],
     )
@@ -144,10 +144,10 @@ def _estimate_text_cost(
     )
     input_tokens = usage["input_tokens"]
     cached_input_tokens = min(usage["cached_input_tokens"], input_tokens)
-    billable_input_tokens = max(0, input_tokens - cached_input_tokens)
+    billable_input_tokens = input_tokens
     output_tokens = usage["output_tokens"]
     input_usd = _token_cost(billable_input_tokens, pricing.input_per_1m)
-    cached_input_usd = _token_cost(cached_input_tokens, cached_rate)
+    cached_input_usd = 0.0
     output_usd = _token_cost(output_tokens, pricing.output_per_1m)
     total_usd = input_usd + cached_input_usd + output_usd
     return {
@@ -169,6 +169,7 @@ def _estimate_text_cost(
         "usage": {
             **usage,
             "billable_input_tokens": billable_input_tokens,
+            "cache_discount_ignored_input_tokens": cached_input_tokens,
         },
         "cost_usd": {
             "input": _round_usd(input_usd),
