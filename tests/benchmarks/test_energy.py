@@ -30,6 +30,90 @@ class EnergyProfilerIntelTest(unittest.TestCase):
 
         self.assertAlmostEqual(joules, 30.0)
 
+    def test_power_summary_reports_memory_and_rapl_details(self) -> None:
+        summary = energy.PowerSummary(
+            samples=1,
+            elapsed_seconds=2.0,
+            cpu_joules=10.0,
+            gpu_joules=4.0,
+            ane_joules=0.0,
+            memory_joules=3.0,
+            cpu_core_joules=6.0,
+            cpu_uncore_joules=4.0,
+            rapl_domains={"package": 10.0, "core": 6.0, "dram": 3.0},
+        )
+
+        payload = summary.to_dict()
+
+        self.assertEqual(payload["memory_joules"], 3.0)
+        self.assertEqual(payload["total_joules"], 17.0)
+        self.assertEqual(payload["memory_avg_watts"], 1.5)
+        self.assertEqual(payload["cpu_core_joules"], 6.0)
+        self.assertEqual(payload["cpu_uncore_joules"], 4.0)
+        self.assertEqual(payload["rapl_domains"]["dram"], 3.0)
+
+    def test_intel_sampler_splits_rapl_domains(self) -> None:
+        class FakeRapl:
+            def read_j(self) -> dict[str, float]:
+                return {"package": 100.0, "core": 60.0, "dram": 30.0}
+
+            def delta_j(
+                self,
+                start: dict[str, float],
+                end: dict[str, float],
+            ) -> dict[str, float]:
+                del start, end
+                return {
+                    "package": 10.0,
+                    "core": 6.0,
+                    "dram": 3.0,
+                    "psys": 14.0,
+                }
+
+        with patch.object(energy, "_IntelRaplDomainMeters", FakeRapl):
+            sampler = energy._IntelEnergySampler(
+                interval_s=0.001,
+                include_nvml=False,
+            )
+            summary = sampler.measure_window(0.0)
+
+        self.assertEqual(summary.cpu_joules, 10.0)
+        self.assertEqual(summary.memory_joules, 3.0)
+        self.assertEqual(summary.cpu_core_joules, 6.0)
+        self.assertEqual(summary.cpu_uncore_joules, 4.0)
+        self.assertEqual(summary.psys_joules, 14.0)
+
+    def test_collects_nvml_only_energy_samples(self) -> None:
+        class FakeNvmlSampler:
+            def __init__(self, *, interval_s: float) -> None:
+                self.interval_s = interval_s
+
+            def measure_window(self, seconds: float, stop_event: object | None = None) -> energy.PowerSummary:
+                del seconds, stop_event
+                return energy.PowerSummary(
+                    samples=1,
+                    elapsed_seconds=0.5,
+                    cpu_joules=0.0,
+                    gpu_joules=7.0,
+                    ane_joules=0.0,
+                )
+
+            def close(self) -> None:
+                pass
+
+        with patch.object(energy, "_NvmlEnergySampler", FakeNvmlSampler):
+            summary = energy._collect_fixed_sample_count(
+                sample_ms=100,
+                sample_count=2,
+                backend=energy.NVIDIA_NVML_BACKEND,
+                password=None,
+            )
+
+        self.assertEqual(summary.samples, 2)
+        self.assertEqual(summary.cpu_joules, 0.0)
+        self.assertEqual(summary.gpu_joules, 14.0)
+        self.assertEqual(energy._samplers_for_backend(energy.NVIDIA_NVML_BACKEND), "nvidia_nvml")
+
     def test_detects_linux_rapl_cpu_only_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             energy_path = Path(tmp) / "energy_uj"
@@ -71,6 +155,22 @@ class EnergyProfilerIntelTest(unittest.TestCase):
         self.assertTrue(platform_info.supported)
         self.assertEqual(platform_info.backend, energy.INTEL_RAPL_NVML_BACKEND)
 
+    def test_detects_linux_nvml_only_backend_without_rapl(self) -> None:
+        with (
+            patch.object(energy.platform, "system", return_value="Linux"),
+            patch.object(energy.platform, "machine", return_value="x86_64"),
+            patch.object(energy.platform, "release", return_value="6.0"),
+            patch.object(energy.platform, "version", return_value="#1"),
+            patch.object(energy.platform, "processor", return_value=""),
+            patch.object(energy, "_linux_cpu_brand", return_value="Intel(R) Xeon"),
+            patch.object(energy, "_find_rapl_energy_path", return_value=None),
+            patch.object(energy, "_nvml_available", return_value=True),
+        ):
+            platform_info = energy.detect_hardware_platform()
+
+        self.assertTrue(platform_info.supported)
+        self.assertEqual(platform_info.backend, energy.NVIDIA_NVML_BACKEND)
+
     def test_linux_without_rapl_is_unsupported(self) -> None:
         with (
             patch.object(energy.platform, "system", return_value="Linux"),
@@ -80,6 +180,7 @@ class EnergyProfilerIntelTest(unittest.TestCase):
             patch.object(energy.platform, "processor", return_value=""),
             patch.object(energy, "_linux_cpu_brand", return_value="Intel(R) Xeon"),
             patch.object(energy, "_find_rapl_energy_path", return_value=None),
+            patch.object(energy, "_nvml_available", return_value=False),
         ):
             platform_info = energy.detect_hardware_platform()
 

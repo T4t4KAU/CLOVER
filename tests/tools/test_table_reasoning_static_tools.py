@@ -42,6 +42,7 @@ class TableReasoningStaticToolsTest(unittest.TestCase):
                 "SetOp",
                 "RepeatUnion",
                 "FormatAnswer",
+                "AnalyzeEvidence",
             },
         )
 

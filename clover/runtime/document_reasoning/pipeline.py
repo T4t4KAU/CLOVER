@@ -1,4 +1,4 @@
-"""Document reasoning task lifecycle primitives."""
+"""Document reasoning compatibility entry point and mixed-runtime helpers."""
 
 from __future__ import annotations
 
@@ -32,14 +32,12 @@ from clover.runtime.final_answer import finalize_answer
 from clover.runtime.pipeline import (
     CaseResult,
     InflightCallResult,
-    InflightStage,
     PipelineProfiler,
 )
 from clover.runtime.round_loop import (
     RoundLoopResult,
     RoundLoopState,
     RoundLoopStep,
-    RuntimeLoop,
 )
 from clover.runtime.task import (
     DocumentTaskItem,
@@ -48,7 +46,6 @@ from clover.runtime.task import (
     TASK_DAG_READY,
     TASK_EXECUTING,
     TASK_FAILED,
-    TASK_PENDING_REMOTE,
     TASK_SUPERVISOR_REVIEW,
     TASK_SUCCESS,
     build_runtime_task_items,
@@ -116,105 +113,6 @@ class _DocumentRemoteJob:
     action: str
     work_item: _DocumentRoundWorkItem
     payload: dict[str, Any]
-
-
-@dataclass
-class _DocumentRuntimeAdapter:
-    pending_remote: list[_DocumentRemoteJob]
-    remote_stage: InflightStage[_DocumentRemoteJob, Any]
-    code_items: list[_DocumentRoundWorkItem]
-    local_items: list[_DocumentRoundWorkItem]
-    case_results: list[CaseResult]
-    finalized: set[str]
-    round_steps: dict[str, list[RoundLoopStep]]
-    round_results: dict[str, RoundLoopResult]
-    compact_observations: dict[str, dict[int, dict[str, Any]]]
-    supervisor: SupervisorAgent
-    local_slm_config: dict[str, Any] | None
-    slm_client: Any | None
-    local_slm_dispatcher: LocalSlmSequenceDispatcher | None
-    max_parallel_execution_units: int
-    max_parallel_slm_node_jobs: int
-    max_parallel_slm_sequences: int
-    max_pending_slm_sequences: int
-    node_timeout_seconds: float | None
-    max_retries: int
-    profiler: PipelineProfiler
-
-    def submit_remote_prefetch(self) -> None:
-        _submit_document_remote_prefetch(
-            pending_remote=self.pending_remote,
-            remote_stage=self.remote_stage,
-            supervisor=self.supervisor,
-        )
-
-    def drain_remote(self, *, wait_for_one: bool) -> int:
-        return _drain_document_remote_jobs(
-            pending_remote=self.pending_remote,
-            remote_stage=self.remote_stage,
-            code_items=self.code_items,
-            case_results=self.case_results,
-            finalized=self.finalized,
-            round_steps=self.round_steps,
-            round_results=self.round_results,
-            compact_observations=self.compact_observations,
-            max_retries=self.max_retries,
-            profiler=self.profiler,
-            wait_for_one=wait_for_one,
-        )
-
-    def parse_commands(self) -> None:
-        _parse_document_commands(
-            code_items=self.code_items,
-            local_items=self.local_items,
-            pending_remote=self.pending_remote,
-            case_results=self.case_results,
-            finalized=self.finalized,
-            round_steps=self.round_steps,
-            round_results=self.round_results,
-            compact_observations=self.compact_observations,
-            max_retries=self.max_retries,
-            profiler=self.profiler,
-        )
-
-    def has_ready_barriers(self) -> bool:
-        return False
-
-    def advance_barriers(self) -> bool:
-        return False
-
-    def execute_local_once(self) -> bool:
-        return _execute_document_plan_batch(
-            local_items=self.local_items,
-            pending_remote=self.pending_remote,
-            case_results=self.case_results,
-            finalized=self.finalized,
-            round_steps=self.round_steps,
-            round_results=self.round_results,
-            compact_observations=self.compact_observations,
-            local_slm_config=self.local_slm_config,
-            slm_client=self.slm_client,
-            local_slm_dispatcher=self.local_slm_dispatcher,
-            max_parallel_execution_units=self.max_parallel_execution_units,
-            max_parallel_slm_node_jobs=self.max_parallel_slm_node_jobs,
-            max_parallel_slm_sequences=self.max_parallel_slm_sequences,
-            max_pending_slm_sequences=self.max_pending_slm_sequences,
-            node_timeout_seconds=self.node_timeout_seconds,
-            max_retries=self.max_retries,
-            profiler=self.profiler,
-        )
-
-    def has_pending_remote(self) -> bool:
-        return bool(self.pending_remote)
-
-    def has_remote_inflight(self) -> bool:
-        return bool(self.remote_stage)
-
-    def has_commands(self) -> bool:
-        return bool(self.code_items)
-
-    def has_local_work(self) -> bool:
-        return bool(self.local_items)
 
 
 def build_document_task_items(
@@ -293,105 +191,6 @@ def run_document_reasoning_system(
         profile=mixed_result.profile,
     )
 
-    profiler = PipelineProfiler()
-    supervisor = SupervisorAgent(remote_config=remote_config, client=client)
-    task_items = build_document_task_items(
-        case_specs,
-        case_result_callback=case_result_callback,
-    )
-    case_results: list[CaseResult] = []
-    finalized: set[str] = set()
-    round_results: dict[str, RoundLoopResult] = {}
-    round_steps: dict[str, list[RoundLoopStep]] = {}
-    compact_observations: dict[str, dict[int, dict[str, Any]]] = {}
-    pending_remote: list[_DocumentRemoteJob] = []
-    code_items: list[_DocumentRoundWorkItem] = []
-    local_items: list[_DocumentRoundWorkItem] = []
-
-    for task in task_items.values():
-        task.status = TASK_PENDING_REMOTE
-        work_item = _DocumentRoundWorkItem(task=task, state=RoundLoopState())
-        pending_remote.append(_document_decompose_job(work_item))
-
-    local_slm_dispatcher = LocalSlmSequenceDispatcher(
-        slm_config=local_slm_config,
-        client=slm_client,
-        max_parallel_sequences=max_parallel_slm_sequences,
-        max_pending_sequences=max_pending_slm_sequences,
-    )
-    try:
-        with InflightStage[_DocumentRemoteJob, Any](
-            stage_name="supervisor_remote",
-            max_workers=remote_concurrency,
-            profiler=profiler,
-        ) as remote_stage:
-            RuntimeLoop(
-                _DocumentRuntimeAdapter(
-                    pending_remote=pending_remote,
-                    remote_stage=remote_stage,
-                    code_items=code_items,
-                    local_items=local_items,
-                    case_results=case_results,
-                    finalized=finalized,
-                    round_steps=round_steps,
-                    round_results=round_results,
-                    compact_observations=compact_observations,
-                    supervisor=supervisor,
-                    local_slm_config=local_slm_config,
-                    slm_client=slm_client,
-                    local_slm_dispatcher=local_slm_dispatcher,
-                    max_parallel_execution_units=max_parallel_execution_units,
-                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-                    max_parallel_slm_sequences=max_parallel_slm_sequences,
-                    max_pending_slm_sequences=max_pending_slm_sequences,
-                    node_timeout_seconds=node_timeout_seconds,
-                    max_retries=max_retries,
-                    profiler=profiler,
-                ),
-            ).run()
-    finally:
-        local_slm_dispatcher.close()
-
-    return DocumentReasoningSystemResult(
-        case_results=_ordered_case_results(case_results, task_items),
-        task_items=task_items,
-        round_results=round_results,
-        profile=_profile_with_summary(profiler),
-    )
-
-
-def _ordered_case_results(
-    results: list[CaseResult],
-    task_items: dict[str, DocumentTaskItem],
-) -> list[CaseResult]:
-    order = {
-        (task.case_id, task.answer_key): index
-        for index, task in enumerate(task_items.values())
-    }
-    return sorted(
-        results,
-        key=lambda result: order.get((result.case_id, result.answer_key), len(order)),
-    )
-
-
-
-def _submit_document_remote_prefetch(
-    *,
-    pending_remote: list[_DocumentRemoteJob],
-    remote_stage: InflightStage[_DocumentRemoteJob, Any],
-    supervisor: SupervisorAgent,
-) -> None:
-    while pending_remote and remote_stage.has_capacity:
-        job = pending_remote.pop(0)
-        remote_stage.submit(
-            job,
-            lambda job=job: _run_document_remote_job(
-                supervisor=supervisor,
-                job=job,
-            ),
-            items=1,
-        )
-
 
 def _run_document_remote_job(
     *,
@@ -403,38 +202,6 @@ def _run_document_remote_job(
     if job.action == "synthesize":
         return supervisor.synthesize(**job.payload)
     raise ValueError(f"Unsupported document remote action: {job.action!r}")
-
-
-def _drain_document_remote_jobs(
-    *,
-    pending_remote: list[_DocumentRemoteJob],
-    remote_stage: InflightStage[_DocumentRemoteJob, Any],
-    code_items: list[_DocumentRoundWorkItem],
-    case_results: list[CaseResult],
-    finalized: set[str],
-    round_steps: dict[str, list[RoundLoopStep]],
-    round_results: dict[str, RoundLoopResult],
-    compact_observations: dict[str, dict[int, dict[str, Any]]],
-    max_retries: int,
-    profiler: PipelineProfiler,
-    wait_for_one: bool,
-) -> int:
-    return remote_stage.drain_ready(
-        lambda job, result: _finish_document_remote_job(
-            job=job,
-            call_result=result,
-            pending_remote=pending_remote,
-            code_items=code_items,
-            case_results=case_results,
-            finalized=finalized,
-            round_steps=round_steps,
-            round_results=round_results,
-            compact_observations=compact_observations,
-            max_retries=max_retries,
-            profiler=profiler,
-        ),
-        wait_for_one=wait_for_one,
-    )
 
 
 def _finish_document_remote_job(

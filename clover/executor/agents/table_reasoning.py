@@ -10,7 +10,10 @@ import pandas as pd
 
 from clover.executor.agents.base import BaseNodeAgent, FastPathDecision
 from clover.executor.agents.loop import AgentLoopExecutionError, run_sandbox_agent_loop
-from clover.executor.agents.template_tree import render_agent_loop_prompt
+from clover.executor.agents.template_tree import (
+    render_agent_loop_prompt,
+    render_table_empty_filter_repair_prompt,
+)
 from clover.executor.python_function import (
     PythonFunctionParseError,
     parse_python_function_action,
@@ -155,7 +158,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         if _agent_loop_disabled(self.context.slm_config):
             return False
         return (
-            self.context.task_type == TABLE_REASONING_ANALYZE_TASK_TYPE
+            _supports_empty_filter_repair(self.context.task_type)
             and self.node.get("op") == "Filter"
             and _is_empty_table_output(output)
         )
@@ -171,7 +174,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         del decision, error
         return (
             trigger == "fast_path_empty_output"
-            and self.context.task_type == TABLE_REASONING_ANALYZE_TASK_TYPE
+            and _supports_empty_filter_repair(self.context.task_type)
             and self.node.get("op") == "Filter"
             and _is_empty_table_output(output)
         )
@@ -187,6 +190,16 @@ class TableReasoningNodeAgent(BaseNodeAgent):
             result = _run_inspect_evidence_node(self)
             self.agent_loop_trace = result.trace
             return result.output
+        use_empty_filter_repair = _use_empty_filter_repair_prompt(
+            task_type=self.context.task_type,
+            node=self.node,
+            trigger=trigger,
+        )
+        prompt_kind = (
+            "table_reasoning_empty_filter_repair"
+            if use_empty_filter_repair
+            else "table_reasoning_agent_loop"
+        )
         try:
             result = run_sandbox_agent_loop(
                 context=self.context,
@@ -196,13 +209,21 @@ class TableReasoningNodeAgent(BaseNodeAgent):
                 trigger=trigger,
                 error=error,
                 max_iterations=self.context.agent_loop_max_iterations,
-                render_prompt=lambda view, iteration: render_agent_loop_prompt(
-                    task_type=self.context.task_type,
-                    view=view,
-                    iteration=iteration,
+                render_prompt=lambda view, iteration, steps: (
+                    render_table_empty_filter_repair_prompt(
+                        view=view,
+                        iteration=iteration,
+                        steps=steps,
+                    )
+                    if use_empty_filter_repair
+                    else render_agent_loop_prompt(
+                        task_type=self.context.task_type,
+                        view=view,
+                        iteration=iteration,
+                    )
                 ),
                 parse_action=_extract_action_json,
-                prompt_kind="table_reasoning_agent_loop",
+                prompt_kind=prompt_kind,
             )
         except AgentLoopExecutionError as exc:
             self.agent_loop_trace = exc.trace
@@ -265,6 +286,26 @@ def _materialized_frames(values: Any) -> list[pd.DataFrame]:
 
 def _optional_text(value: Any) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def _use_empty_filter_repair_prompt(
+    *,
+    task_type: str,
+    node: dict[str, Any],
+    trigger: str,
+) -> bool:
+    return (
+        trigger == "fast_path_empty_output"
+        and _supports_empty_filter_repair(task_type)
+        and node.get("op") == "Filter"
+    )
+
+
+def _supports_empty_filter_repair(task_type: str) -> bool:
+    return task_type in {
+        TABLE_REASONING_ANALYZE_TASK_TYPE,
+        TABLE_REASONING_QUERY_TASK_TYPE,
+    }
 
 
 def _extract_action_json(text: str) -> dict[str, Any]:

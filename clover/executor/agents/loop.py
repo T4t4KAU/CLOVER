@@ -14,12 +14,13 @@ from clover.executor.local_slm import (
 )
 from clover.executor.agents.template_tree import template_leaf_key_for_local_slm_prompt
 from clover.executor.node_views import NodeView
+from clover.executor.result import json_ready
 from clover.executor.sandbox.core import AgentSandbox
 from clover.executor.slm_dispatcher import LocalSlmSequenceRequest
 from clover.supervisor.client import extract_token_usage
 
 
-PromptRenderer = Callable[[NodeView, int], str]
+PromptRenderer = Callable[[NodeView, int, list[dict[str, Any]]], str]
 ActionParser = Callable[[str], dict[str, Any]]
 
 
@@ -72,13 +73,14 @@ def run_sandbox_agent_loop(
     )
     observations: list[dict[str, Any]] = []
     trace_steps: list[dict[str, Any]] = []
+    prompt_steps: list[dict[str, Any]] = []
     last_error_message: str | None = None
     sandbox.start(decision=decision, trigger=trigger, error=error)
 
     try:
         for iteration in range(iterations):
             view = sandbox.view(observations)
-            prompt = render_prompt(view, iteration + 1)
+            prompt = render_prompt(view, iteration + 1, prompt_steps)
             sequence_result = _generate_local_slm_sequence(
                 context=context,
                 node=node,
@@ -99,6 +101,9 @@ def run_sandbox_agent_loop(
                     "error": {"message": last_error_message},
                 }
                 observations.append(observation)
+                prompt_steps.append(
+                    _prompt_step(action=None, observation=observation)
+                )
                 trace_steps.append(
                     _trace_step(
                         iteration=iteration,
@@ -113,6 +118,12 @@ def run_sandbox_agent_loop(
                 continue
 
             action_result = sandbox.run_action(action)
+            prompt_steps.append(
+                _prompt_step(
+                    action=action,
+                    observation=action_result.observation,
+                )
+            )
             trace_steps.append(
                 _trace_step(
                     iteration=iteration,
@@ -240,3 +251,22 @@ def _trace_step(
     if sequence_trace is not None:
         step["sequence"] = dict(sequence_trace)
     return step
+
+
+def _prompt_step(
+    *,
+    action: dict[str, Any] | None,
+    observation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "action": _prompt_action(action) if isinstance(action, dict) else None,
+        "observation": json_ready(observation) if observation is not None else None,
+    }
+
+
+def _prompt_action(action: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {"action": action.get("action")}
+    code = action.get("code")
+    if isinstance(code, str):
+        payload["code"] = code
+    return payload

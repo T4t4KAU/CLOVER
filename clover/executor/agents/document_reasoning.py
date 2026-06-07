@@ -76,8 +76,12 @@ class DocumentReasoningNodeAgent(BaseNodeAgent):
         return result.output
 
 
-def _render_document_prompt(view: NodeView, iteration: int) -> str:
-    del iteration
+def _render_document_prompt(
+    view: NodeView,
+    iteration: int,
+    steps: list[dict[str, Any]],
+) -> str:
+    del iteration, steps
     return render_document_worker_prompt(
         chunk_text=str(view.world.get("chunk_text", "")),
         local_instruction=view.task,

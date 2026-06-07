@@ -146,23 +146,22 @@ def synthesis_payload(
 ) -> dict[str, Any]:
     """Build the filtered observation payload sent to Supervisor synthesis."""
 
-    # Supervisor synthesis only needs the user-facing local result. Executor traces and
-    # intermediate table summaries are internal debug artifacts and can dwarf
-    # the actual answer payload in batched runs.
     task_type = _synthesis_task_type(task_dsl=task_dsl, local_dsl=local_dsl)
-    table_analyze = _is_table_analyze_dsl(local_dsl or task_dsl)
-    if table_analyze and not _observation_failed(observation):
+    if is_table_task_type(task_type):
         return strip_sensitive_prompt_fields(
-            _table_analyze_payload(
+            _table_evidence_payload(
                 local_dsl=local_dsl,
                 task_dsl=task_dsl,
                 observation=observation,
                 current_command=current_command,
             )
         )
+    # Document synthesis only needs the user-facing local result. Executor traces and
+    # intermediate worker details are internal debug artifacts and can dwarf
+    # the actual answer payload in batched runs.
     include_sources = (
         task_type != DOCUMENT_REASONING_TASK_TYPE
-        and (_observation_failed(observation) or table_analyze)
+        and _observation_failed(observation)
     )
     payload: dict[str, Any] = {
         "task": _task_summary(
@@ -376,7 +375,7 @@ def _source_summary(source: dict[str, Any]) -> list[dict[str, Any]]:
     return summaries
 
 
-def _table_analyze_payload(
+def _table_evidence_payload(
     *,
     local_dsl: dict[str, Any] | None,
     task_dsl: dict[str, Any] | None,
@@ -384,17 +383,50 @@ def _table_analyze_payload(
     current_command: Any,
 ) -> dict[str, Any]:
     source = local_dsl or task_dsl or {}
-    payload: dict[str, Any] = {
-        "q": source.get("question"),
-        "ty": _answer_type(source),
-        "t": _table_columns_map(source),
-        "act": _current_actions_list(current_command),
-        "obs": _table_analyze_observations(observation),
-    }
+    if _is_table_batch_task(source):
+        payload: dict[str, Any] = {
+            "qs": _batch_questions(source),
+            "ev": _table_evidence_observations(observation),
+        }
+    else:
+        payload = {
+            "q": source.get("question"),
+            "ty": _answer_type(source),
+            "ev": _table_evidence_observations(observation),
+        }
+    ctx = _table_repair_context(
+        source=source,
+        observation=observation,
+        current_command=current_command,
+    )
+    if ctx:
+        payload["ctx"] = ctx
     mem = source.get("mem")
     if mem:
         payload["mem"] = _compact_table_memory(mem)
     return json_ready(payload)
+
+
+def _batch_questions(source: dict[str, Any]) -> list[dict[str, Any]]:
+    questions = source.get("questions")
+    answers = source.get("answers")
+    if not isinstance(questions, list) or not isinstance(answers, list):
+        return []
+    output = []
+    for index, answer in enumerate(answers):
+        if not isinstance(answer, dict):
+            continue
+        item: dict[str, Any] = {}
+        name = answer.get("name")
+        if isinstance(name, str) and name:
+            item["id"] = name
+        answer_type = answer.get("type")
+        if isinstance(answer_type, str) and answer_type:
+            item["ty"] = answer_type
+        if index < len(questions):
+            item["q"] = questions[index]
+        output.append(item)
+    return output
 
 
 def _answer_type(source: dict[str, Any]) -> str | None:
@@ -443,6 +475,9 @@ def _compact_action_dict(value: dict[str, Any]) -> dict[str, Any]:
     op = value.get("op")
     if isinstance(op, str) and op:
         action["op"] = op
+    kind = value.get("kind")
+    if isinstance(kind, str) and kind:
+        action["kind"] = kind
     q = value.get("q") or value.get("sql")
     if isinstance(q, str) and q:
         action["q"] = q
@@ -470,15 +505,89 @@ def _current_sql_list(current_command: Any) -> list[str]:
     return []
 
 
-def _table_analyze_observations(observation: Any) -> list[Any]:
+def _table_evidence_observations(observation: Any) -> list[Any]:
     if not isinstance(observation, dict):
-        return [{"i": 0, "ok": True, "res": _table_result_value(observation)}]
+        return [_table_object_observation(observation)]
     obs = observation.get("obs")
     if isinstance(obs, list):
         return [_compact_action_observation(item) for item in obs]
     if observation.get("error"):
         return [{"i": 0, "ok": False, "err": _compact_error(observation.get("error"))}]
-    return [{"i": 0, "ok": True, "res": _table_result_value(observation)}]
+    return [_table_object_observation(observation)]
+
+
+def _table_object_observation(observation: Any) -> dict[str, Any]:
+    if hasattr(observation, "ok"):
+        ok = bool(getattr(observation, "ok"))
+        output: dict[str, Any] = {"ok": ok}
+        if ok:
+            answer = getattr(observation, "answer", None)
+            if answer is not None:
+                output["answer"] = json_ready(answer)
+            outputs = getattr(observation, "outputs", None)
+            if isinstance(outputs, dict) and outputs:
+                output["outputs"] = _compact_result_payload(outputs)
+        else:
+            output["err"] = _compact_error(getattr(observation, "error", None))
+        return output
+    if isinstance(observation, dict):
+        ok = observation.get("ok")
+        output = {"ok": bool(ok) if ok is not None else True}
+        if "answer" in observation and observation.get("answer") is not None:
+            output["answer"] = json_ready(observation.get("answer"))
+        if "outputs" in observation and isinstance(observation.get("outputs"), dict):
+            output["outputs"] = _compact_result_payload(observation.get("outputs"))
+        if "ev" in observation:
+            output["ev"] = _compact_result_payload(observation.get("ev"))
+        if output["ok"] is False:
+            output["err"] = _compact_error(observation.get("error"))
+        if len(output) > 1 or output["ok"] is False:
+            return output
+    return {"ok": True, "res": _table_result_value(observation)}
+
+
+def _table_repair_context(
+    *,
+    source: dict[str, Any],
+    observation: Any,
+    current_command: Any,
+) -> dict[str, Any]:
+    if not _table_evidence_needs_repair(observation):
+        return {}
+    ctx: dict[str, Any] = {}
+    actions = _current_actions_list(current_command)
+    if actions:
+        ctx["act"] = actions
+    columns = _table_columns_map(source)
+    if columns:
+        ctx["t"] = columns
+    return ctx
+
+
+def _table_evidence_needs_repair(observation: Any) -> bool:
+    if _observation_failed(observation):
+        return True
+    if isinstance(observation, dict):
+        obs = observation.get("obs")
+        if isinstance(obs, list):
+            return any(_action_observation_needs_repair(item) for item in obs)
+    return False
+
+
+def _action_observation_needs_repair(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("ok") is False or value.get("err") is not None:
+        return True
+    result = value.get("res")
+    if isinstance(result, dict):
+        rows = result.get("rows")
+        count = result.get("n")
+        if isinstance(rows, list) and not rows:
+            return True
+        if count == 0:
+            return True
+    return False
 
 
 def _compact_action_observation(value: Any) -> dict[str, Any]:
@@ -489,6 +598,8 @@ def _compact_action_observation(value: Any) -> dict[str, Any]:
         output["i"] = value.get("i")
     if isinstance(value.get("op"), str):
         output["op"] = value.get("op")
+    if isinstance(value.get("kind"), str):
+        output["kind"] = value.get("kind")
     if "ok" in value:
         output["ok"] = bool(value.get("ok"))
     if "res" in value:

@@ -10,18 +10,23 @@ from clover.executor.slm_scheduler import (
 from clover.executor.agents.template_tree import (
     DOCUMENT_WORKER_LEAF_KEY,
     NODE_AGENT_SLM_TEMPLATE_LEAVES,
+    TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY,
     TABLE_BOOLEAN_LEAF_KEY,
     TABLE_EVIDENCE_LEAF_KEY,
+    TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY,
     TABLE_NUMBER_LEAF_KEY,
+    TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY,
     TABLE_STRING_LEAF_KEY,
     TemplateNode,
     build_slm_template_scheduler_tree,
     collect_slm_template_leaf_specs,
+    render_table_empty_filter_repair_prompt,
     render_table_evidence_prompt,
     slm_template_leaf_specs,
     template_paths_for_leaf_key,
     template_paths_for_task_type,
 )
+from clover.executor.node_views import NodeView
 
 
 def _spec(name: str) -> TemplateLeafSpec:
@@ -141,6 +146,17 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
         self.assertIn(
             (
                 "agent:data",
+                "family:table_reasoning",
+                "interface:solve_python",
+                "tool:pandas_env",
+                "contract:number",
+                "mode:empty_filter_repair",
+            ),
+            tree.leaf_keys(),
+        )
+        self.assertIn(
+            (
+                "agent:data",
                 "family:document_reasoning",
                 "interface:chunk_worker",
                 "tool:text_excerpt",
@@ -166,6 +182,15 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
             TABLE_NUMBER_LEAF_KEY: ("common/root.md", "table_reasoning/agent_loop.md"),
             TABLE_STRING_LEAF_KEY: ("common/root.md", "table_reasoning/agent_loop.md"),
             TABLE_BOOLEAN_LEAF_KEY: ("common/root.md", "table_reasoning/agent_loop.md"),
+            TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY: (
+                "table_reasoning/empty_filter_repair.md",
+            ),
+            TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY: (
+                "table_reasoning/empty_filter_repair.md",
+            ),
+            TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY: (
+                "table_reasoning/empty_filter_repair.md",
+            ),
             TABLE_EVIDENCE_LEAF_KEY: ("table_reasoning/evidence.md",),
             DOCUMENT_WORKER_LEAF_KEY: ("document_reasoning/worker.md",),
         }
@@ -196,6 +221,37 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
         self.assertLess(prompt.index("# DEBUG.py"), prompt.index("JSON only."))
         self.assertLess(prompt.index("JSON only."), prompt.index("# EVIDENCE.py"))
         self.assertLess(prompt.index("# EVIDENCE.py"), prompt.index("# FEEDBACK"))
+
+    def test_empty_filter_repair_prompt_keeps_case_payload_at_tail(self) -> None:
+        view = NodeView(
+            kind="table_reasoning.filter",
+            language="python",
+            task='def solve(df):\n    """Return matching rows."""\n    pass',
+            world={
+                "inputs": {"df": {"rows": 2, "cols": ["name"]}},
+                "diag": {
+                    "inputs": {
+                        "df": {
+                            "values": {
+                                "name": [
+                                    {"v": "Formula Renault", "n": 1},
+                                ],
+                            },
+                        },
+                    },
+                },
+            },
+        )
+
+        prompt = render_table_empty_filter_repair_prompt(
+            view=view,
+            iteration=1,
+            steps=[],
+        )
+
+        self.assertLess(prompt.index("Repair with the smallest change."), prompt.index("Case:"))
+        self.assertIn('"sig":"def solve(df):"', prompt)
+        self.assertIn('"evidence":{"name":["Formula Renault"]}', prompt)
 
     def test_static_template_tree_orders_siblings_by_static_delta_tokens(self) -> None:
         tree = TemplateNode(

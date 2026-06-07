@@ -38,7 +38,7 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("Evidence plan:", prompt)
         self.assertIn("Terminal answer:", prompt)
         self.assertIn("Choose one mutually exclusive action form", prompt)
-        self.assertIn("`acts` may contain only `sql` or `inspect` actions", prompt)
+        self.assertIn("`acts` may contain only `sql`, `inspect`, or `analyze` actions", prompt)
         self.assertIn('Never put `{"op":"answer"}` inside `acts`', prompt)
 
     def test_synthesis_payload_strips_evaluation_labels(self) -> None:
@@ -68,11 +68,78 @@ class SupervisorTest(unittest.TestCase):
             observation=local_result,
         )
 
-        self.assertEqual(payload["observations"]["answer"], 2)
-        self.assertNotIn("expected_answer", payload["task"])
-        self.assertNotIn("metadata", payload["task"])
-        self.assertNotIn("expected_answer", payload["observations"])
-        self.assertNotIn("metadata", payload["observations"])
+        self.assertEqual(payload["ev"][0]["answer"], 2)
+        self.assertNotIn("task", payload)
+        self.assertNotIn("observations", payload)
+        self.assertNotIn("expected_answer", json.dumps(payload))
+        self.assertNotIn("metadata", json.dumps(payload))
+
+    def test_table_synthesis_payload_uses_evidence_only(self) -> None:
+        local_dsl = {
+            **_local_dsl(),
+            "profile": "analyze",
+            "hints": {"category": "NumericalReasoning"},
+        }
+        observation = {
+            "ok": True,
+            "answer": None,
+            "obs": [
+                {
+                    "i": 0,
+                    "op": "sql",
+                    "ok": True,
+                    "q": 'SELECT "value" FROM "table_1"',
+                    "res": {"n": 1, "cols": ["value"], "rows": [{"value": 2}]},
+                }
+            ],
+        }
+
+        payload = synthesis_payload(
+            local_dsl=local_dsl,
+            observation=observation,
+            current_command={"acts": [{"op": "sql", "q": 'SELECT "value" FROM "table_1"'}]},
+        )
+
+        self.assertEqual(payload["q"], "How many rows are present?")
+        self.assertEqual(payload["ty"], "number")
+        self.assertEqual(payload["ev"][0]["res"]["rows"], [[2]])
+        self.assertNotIn("ctx", payload)
+        self.assertNotIn("task_type", json.dumps(payload))
+        self.assertNotIn("profile", json.dumps(payload))
+        self.assertNotIn("hints", json.dumps(payload))
+        self.assertNotIn("/home/user/private/table.csv", json.dumps(payload))
+
+    def test_table_synthesis_payload_keeps_small_context_for_failed_evidence(self) -> None:
+        observation = {
+            "ok": True,
+            "answer": None,
+            "obs": [
+                {
+                    "i": 0,
+                    "op": "sql",
+                    "ok": True,
+                    "q": 'SELECT "value" FROM "table_1" WHERE "value" = 99',
+                    "res": {"n": 0, "cols": ["value"], "rows": []},
+                }
+            ],
+        }
+
+        payload = synthesis_payload(
+            local_dsl=_local_dsl(),
+            observation=observation,
+            current_command={
+                "acts": [
+                    {
+                        "op": "sql",
+                        "q": 'SELECT "value" FROM "table_1" WHERE "value" = 99',
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(payload["ev"][0]["res"]["n"], 0)
+        self.assertEqual(payload["ctx"]["t"], {"table_1": ["value"]})
+        self.assertEqual(payload["ctx"]["act"][0]["op"], "sql")
 
     def test_parses_answer_and_action_decisions(self) -> None:
         answer_decision = parse_supervisor_decision('{"op":"answer","a":2}')
@@ -137,6 +204,16 @@ class SupervisorTest(unittest.TestCase):
             action_group.actions[1].seed,
             'SELECT "year", "sales" FROM "table_1";',
         )
+        analyze_action = parse_supervisor_decision(
+            '{"acts":[{"op":"analyze","kind":"correlation",'
+            '"seed":"SELECT \\"year\\", \\"sales\\" FROM \\"table_1\\";"}]}'
+        )
+        self.assertEqual(analyze_action.actions[0].op, "analyze")
+        self.assertEqual(analyze_action.actions[0].kind, "correlation")
+        self.assertEqual(
+            analyze_action.actions[0].seed,
+            'SELECT "year", "sales" FROM "table_1";',
+        )
 
     def test_rejects_remote_evidence_action(self) -> None:
         with self.assertRaises(SupervisorParseError):
@@ -181,7 +258,7 @@ class SupervisorTest(unittest.TestCase):
             [message["role"] for message in request_messages],
             ["user"],
         )
-        self.assertIn("Observation payload:", request_messages[0]["content"])
+        self.assertIn("Evidence payload:", request_messages[0]["content"])
 
     def test_document_synthesis_prompt_uses_worker_evidence_only(self) -> None:
         observation = _document_execution_result()

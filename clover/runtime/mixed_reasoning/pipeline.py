@@ -644,6 +644,7 @@ def _execute_mixed_local_once(adapter: _MixedRuntimeAdapter) -> bool:
             max_parallel_slm_node_jobs=adapter.max_parallel_slm_node_jobs,
             max_parallel_slm_sequences=adapter.max_parallel_slm_sequences,
             max_pending_slm_sequences=adapter.max_pending_slm_sequences,
+            validation_mode=adapter.validation_mode,
             profiler=adapter.profiler,
         )
         _enqueue_table_actions(adapter.local_items, followups)

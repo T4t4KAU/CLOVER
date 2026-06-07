@@ -11,6 +11,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from clover.executor.node_views import NodeView
+from clover.executor.agents.table_repair_prompt import empty_filter_repair_case_json
 from clover.executor.result import json_ready
 from clover.executor.slm_scheduler import TemplateLeafSpec, ThreadedPrefixTemplateTree
 from clover.executor.token_count import configured_tokenizer_name, count_tokens
@@ -71,6 +72,30 @@ TABLE_BOOLEAN_LEAF_KEY = (
     "contract:boolean",
     "mode:initial",
 )
+TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY = (
+    "agent:data",
+    "family:table_reasoning",
+    "interface:solve_python",
+    "tool:pandas_env",
+    "contract:number",
+    "mode:empty_filter_repair",
+)
+TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY = (
+    "agent:data",
+    "family:table_reasoning",
+    "interface:solve_python",
+    "tool:pandas_env",
+    "contract:string",
+    "mode:empty_filter_repair",
+)
+TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY = (
+    "agent:data",
+    "family:table_reasoning",
+    "interface:solve_python",
+    "tool:pandas_env",
+    "contract:boolean",
+    "mode:empty_filter_repair",
+)
 TABLE_EVIDENCE_LEAF_KEY = (
     "agent:data",
     "family:table_reasoning",
@@ -100,8 +125,6 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                     children=(
                         TemplateNode(
                             name="interface:solve_python",
-                            template="common/root.md",
-                            additional_templates=("table_reasoning/agent_loop.md",),
                             children=(
                                 TemplateNode(
                                     name="tool:pandas_env",
@@ -111,9 +134,24 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                             children=(
                                                 TemplateNode(
                                                     name="mode:initial",
+                                                    template="common/root.md",
+                                                    additional_templates=(
+                                                        "table_reasoning/agent_loop.md",
+                                                    ),
                                                     leaf_description=(
                                                         "Table solve with numeric "
                                                         "output contract."
+                                                    ),
+                                                ),
+                                                TemplateNode(
+                                                    name="mode:empty_filter_repair",
+                                                    template=(
+                                                        "table_reasoning/"
+                                                        "empty_filter_repair.md"
+                                                    ),
+                                                    leaf_description=(
+                                                        "Table empty Filter repair "
+                                                        "with numeric output contract."
                                                     ),
                                                 ),
                                             ),
@@ -123,9 +161,24 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                             children=(
                                                 TemplateNode(
                                                     name="mode:initial",
+                                                    template="common/root.md",
+                                                    additional_templates=(
+                                                        "table_reasoning/agent_loop.md",
+                                                    ),
                                                     leaf_description=(
                                                         "Table solve with string or "
                                                         "entity output contract."
+                                                    ),
+                                                ),
+                                                TemplateNode(
+                                                    name="mode:empty_filter_repair",
+                                                    template=(
+                                                        "table_reasoning/"
+                                                        "empty_filter_repair.md"
+                                                    ),
+                                                    leaf_description=(
+                                                        "Table empty Filter repair "
+                                                        "with string output contract."
                                                     ),
                                                 ),
                                             ),
@@ -135,9 +188,24 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                             children=(
                                                 TemplateNode(
                                                     name="mode:initial",
+                                                    template="common/root.md",
+                                                    additional_templates=(
+                                                        "table_reasoning/agent_loop.md",
+                                                    ),
                                                     leaf_description=(
                                                         "Table solve with boolean "
                                                         "output contract."
+                                                    ),
+                                                ),
+                                                TemplateNode(
+                                                    name="mode:empty_filter_repair",
+                                                    template=(
+                                                        "table_reasoning/"
+                                                        "empty_filter_repair.md"
+                                                    ),
+                                                    leaf_description=(
+                                                        "Table empty Filter repair "
+                                                        "with boolean output contract."
                                                     ),
                                                 ),
                                             ),
@@ -225,6 +293,26 @@ def render_agent_loop_prompt(
     )
 
 
+def render_table_empty_filter_repair_prompt(
+    *,
+    view: NodeView,
+    iteration: int,
+    steps: list[dict[str, Any]] | None = None,
+) -> str:
+    """Render the compact table Filter repair prompt used after empty output."""
+
+    del iteration
+    return _render_templates(
+        template_paths_for_leaf_key(TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY),
+        context={
+            "CASE_JSON": empty_filter_repair_case_json(
+                view=view,
+                steps=steps or [],
+            ),
+        },
+    )
+
+
 def render_document_worker_prompt(
     *,
     chunk_text: str,
@@ -286,6 +374,8 @@ def template_leaf_key_for_local_slm_prompt(
         return TABLE_EVIDENCE_LEAF_KEY
     if prompt_kind == "table_reasoning_agent_loop":
         return _table_reasoning_leaf_key_for_node(node or {})
+    if prompt_kind == "table_reasoning_empty_filter_repair":
+        return _table_reasoning_empty_filter_repair_leaf_key_for_node(node or {})
     raise ValueError(f"Unsupported local SLM prompt kind: {prompt_kind!r}")
 
 
@@ -359,6 +449,17 @@ def _table_reasoning_leaf_key_for_node(node: dict[str, Any]) -> tuple[str, ...]:
     if selected in {"string", "entity", "list"}:
         return TABLE_STRING_LEAF_KEY
     return TABLE_NUMBER_LEAF_KEY
+
+
+def _table_reasoning_empty_filter_repair_leaf_key_for_node(
+    node: dict[str, Any],
+) -> tuple[str, ...]:
+    initial_leaf = _table_reasoning_leaf_key_for_node(node)
+    if initial_leaf == TABLE_BOOLEAN_LEAF_KEY:
+        return TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY
+    if initial_leaf == TABLE_STRING_LEAF_KEY:
+        return TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY
+    return TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY
 
 
 def _template_paths_for_nodes(nodes: tuple[TemplateNode, ...]) -> tuple[str, ...]:

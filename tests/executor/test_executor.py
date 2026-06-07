@@ -196,15 +196,67 @@ class ExecutorTest(unittest.TestCase):
         )
         first_request = client.chat.completions.requests[0]
         first_prompt = first_request["messages"][-1]["content"]
-        self.assertIn('"task"', first_prompt)
-        self.assertIn("def solve(df)", first_prompt)
+        self.assertIn("Case:", first_prompt)
+        self.assertIn('"sig":"def solve(df):"', first_prompt)
+        self.assertIn('"goal"', first_prompt)
         self.assertIn('"cols"', first_prompt)
-        self.assertIn('"diag"', first_prompt)
-        self.assertIn('"head"', first_prompt)
+        self.assertIn('"evidence"', first_prompt)
+        self.assertNotIn('"task"', first_prompt)
+        self.assertNotIn('"diag"', first_prompt)
+        self.assertNotIn('"head"', first_prompt)
         self.assertNotIn('"preview"', first_prompt)
         self.assertNotIn("dep_0", first_prompt)
         self.assertNotIn("T0", first_prompt)
         self.assertNotIn("T1", first_prompt)
+        self.assertIn("winnipeg", first_prompt)
+
+    def test_query_empty_filter_can_be_completed_by_agent_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                "city,height,floors\n"
+                "winnipeg,44,11\n"
+                "winnipeg,50,13\n"
+                "toronto,60,20\n",
+                encoding="utf-8",
+            )
+            client = _FakeChatClient(
+                [
+                    (
+                        '{"s":"'
+                        "def solve(df):\\n"
+                        "    return df[(df['city'] == 'Winnipeg') & (df['floors'] > 10)]"
+                        '"}'
+                    ),
+                    (
+                        '{"s":"'
+                        "def solve(df):\\n"
+                        "    mask = df['city'].str.lower().eq('winnipeg') & (df['floors'] > 10)\\n"
+                        "    return df.loc[mask].copy()"
+                        '"}'
+                    ),
+                ]
+            )
+
+            result = _execute_plan(
+                _city_average_plan(table_path, task_type="table_reasoning.query"),
+                slm_config={
+                    "api_type": "chat_completions",
+                    "model": "fake-slm",
+                    "temperature": 0,
+                },
+                slm_client=client,
+                agent_loop_max_iterations=3,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.answer, 47)
+        filter_trace = result.traces[1]
+        self.assertEqual(filter_trace["execution_path"], "agent_loop")
+        self.assertEqual(filter_trace["agent_loop_trigger"], "fast_path_empty_output")
+        first_prompt = client.chat.completions.requests[0]["messages"][-1]["content"]
+        self.assertIn("Case:", first_prompt)
+        self.assertIn('"sig":"def solve(df):"', first_prompt)
         self.assertIn("winnipeg", first_prompt)
 
     def test_analyze_unknown_column_error_recovers_with_agent_loop(self) -> None:

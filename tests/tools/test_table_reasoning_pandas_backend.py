@@ -112,6 +112,77 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
 
         self.assertEqual(outputs["answer"], 2)
 
+    def test_executes_analyze_evidence_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                "x,y\n"
+                "1,2\n"
+                "2,4\n"
+                "3,6\n",
+                encoding="utf-8",
+            )
+
+            outputs = execute_table_reasoning_plan(
+                {
+                    "task_type": "table_reasoning.analyze",
+                    "resources": [_resource(table_path)],
+                    "nodes": [
+                        _scan_node("N0", "T0"),
+                        {
+                            "id": "N1",
+                            "op": "AnalyzeEvidence",
+                            "dependency": ["T0"],
+                            "input": [],
+                            "params": {"kind": "correlation"},
+                            "output": "evidence",
+                        },
+                    ],
+                    "edges": [],
+                }
+            )
+
+        self.assertEqual(outputs["evidence"]["kind"], "correlation")
+        self.assertEqual(outputs["evidence"]["metrics"][0]["x"], "x")
+        self.assertEqual(outputs["evidence"]["metrics"][0]["y"], "y")
+        self.assertEqual(outputs["evidence"]["metrics"][0]["pearson"], 1)
+
+    def test_statistical_analyze_evidence_includes_row_and_column_extrema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                "name,a,b,c\n"
+                "alpha,1,1,1\n"
+                "beta,1,5,9\n"
+                "gamma,3,5,7\n",
+                encoding="utf-8",
+            )
+
+            outputs = execute_table_reasoning_plan(
+                {
+                    "task_type": "table_reasoning.analyze",
+                    "resources": [_resource(table_path)],
+                    "nodes": [
+                        _scan_node("N0", "T0"),
+                        {
+                            "id": "N1",
+                            "op": "AnalyzeEvidence",
+                            "dependency": ["T0"],
+                            "input": [],
+                            "params": {"kind": "statistical"},
+                            "output": "evidence",
+                        },
+                    ],
+                    "edges": [],
+                }
+            )
+
+        extrema = outputs["evidence"]["extrema"]
+        self.assertEqual(extrema["row_std"]["min"][0]["label"], "alpha")
+        self.assertEqual(extrema["row_std"]["max"][0]["label"], "beta")
+        self.assertEqual(extrema["col_std"]["min"][0]["col"], "a")
+        self.assertEqual(extrema["col_std"]["max"][0]["col"], "c")
+
     def test_executes_group_sort_limit_project_plan_from_sql(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"

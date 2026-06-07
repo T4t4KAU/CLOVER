@@ -162,6 +162,7 @@ class PandasTableReasoningExecutor:
             "SetOp": self._set_op,
             "RepeatUnion": self._repeat_union,
             "FormatAnswer": self._format_answer,
+            "AnalyzeEvidence": self._analyze_evidence,
         }
         try:
             handler = handlers[op]
@@ -492,6 +493,18 @@ class PandasTableReasoningExecutor:
         if answer_type in {"string", "category"}:
             return None if value is None else str(value)
         return value
+
+    def _analyze_evidence(self, call: dict[str, Any]) -> dict[str, Any]:
+        table = _primary_table(call)
+        frame = table.frame.copy()
+        kind = str(call["params"].get("kind") or "").strip().lower()
+        if kind in {"stat", "stats", "statistics"}:
+            kind = "statistical"
+        if kind not in {"statistical", "correlation"}:
+            raise PandasExecutionError(f"Unsupported AnalyzeEvidence kind: {kind!r}")
+        if kind == "statistical":
+            return _statistical_evidence(frame)
+        return _correlation_evidence(frame)
 
     def _execute_subplan(
         self,
@@ -896,6 +909,169 @@ def _as_table(value: Any) -> PandasTable:
     if isinstance(value, pd.DataFrame):
         return PandasTable(value)
     raise PandasExecutionError(f"Expected pandas table output, got {type(value).__name__}")
+
+
+def _statistical_evidence(frame: pd.DataFrame) -> dict[str, Any]:
+    numeric_columns = _analysis_numeric_columns(frame)
+    metrics = []
+    for column, numeric in numeric_columns:
+        values = numeric.dropna()
+        if values.empty:
+            continue
+        item: dict[str, Any] = {
+            "col": str(column),
+            "n": int(len(values)),
+            "mean": _analysis_scalar(values.mean()),
+            "median": _analysis_scalar(values.median()),
+            "min": _analysis_scalar(values.min()),
+            "max": _analysis_scalar(values.max()),
+        }
+        if len(values) > 1:
+            item["std"] = _analysis_scalar(values.std())
+        metrics.append(item)
+    evidence: dict[str, Any] = {
+        "kind": "statistical",
+        "rows": int(len(frame)),
+        "cols": [str(column) for column in frame.columns[:40]],
+        "metrics": metrics[:40],
+    }
+    extrema = _statistical_extrema(frame, numeric_columns)
+    if extrema:
+        evidence["extrema"] = extrema
+    if not metrics:
+        evidence["notes"] = ["no numeric columns"]
+    return evidence
+
+
+def _correlation_evidence(frame: pd.DataFrame) -> dict[str, Any]:
+    numeric_columns = _analysis_numeric_columns(frame)
+    metrics = []
+    for left_index, (left_column, left) in enumerate(numeric_columns):
+        for right_column, right in numeric_columns[left_index + 1 :]:
+            pair = pd.DataFrame({"x": left, "y": right}).dropna()
+            if len(pair) < 2:
+                continue
+            pearson = pair["x"].corr(pair["y"], method="pearson")
+            spearman = pair["x"].rank().corr(pair["y"].rank(), method="pearson")
+            if pd.isna(pearson) and pd.isna(spearman):
+                continue
+            metrics.append(
+                {
+                    "x": str(left_column),
+                    "y": str(right_column),
+                    "n": int(len(pair)),
+                    "pearson": _analysis_scalar(pearson),
+                    "spearman": _analysis_scalar(spearman),
+                }
+            )
+    metrics.sort(
+        key=lambda item: abs(float(item.get("pearson") or item.get("spearman") or 0.0)),
+        reverse=True,
+    )
+    evidence: dict[str, Any] = {
+        "kind": "correlation",
+        "rows": int(len(frame)),
+        "cols": [str(column) for column in frame.columns[:40]],
+        "metrics": metrics[:20],
+    }
+    if len(numeric_columns) < 2:
+        evidence["notes"] = ["fewer than two numeric columns"]
+    elif not metrics:
+        evidence["notes"] = ["no valid numeric pairs"]
+    return evidence
+
+
+def _analysis_numeric_columns(frame: pd.DataFrame) -> list[tuple[Any, pd.Series]]:
+    columns: list[tuple[Any, pd.Series]] = []
+    for column in frame.columns:
+        numeric = _coerce_numeric_series(frame[column])
+        if numeric.notna().any():
+            columns.append((column, numeric))
+    return columns
+
+
+def _statistical_extrema(
+    frame: pd.DataFrame,
+    numeric_columns: list[tuple[Any, pd.Series]],
+) -> dict[str, Any]:
+    extrema: dict[str, Any] = {}
+    column_std = _std_extrema(
+        [
+            {
+                "col": str(column),
+                "n": int(values.dropna().shape[0]),
+                "std": _analysis_scalar(values.dropna().std()),
+            }
+            for column, values in numeric_columns
+            if values.dropna().shape[0] > 1
+        ]
+    )
+    if column_std:
+        extrema["col_std"] = column_std
+
+    row_std = _row_std_extrema(frame, numeric_columns)
+    if row_std:
+        extrema["row_std"] = row_std
+    return extrema
+
+
+def _row_std_extrema(
+    frame: pd.DataFrame,
+    numeric_columns: list[tuple[Any, pd.Series]],
+) -> dict[str, list[dict[str, Any]]] | None:
+    if len(numeric_columns) < 2 or frame.empty:
+        return None
+    numeric_frame = pd.DataFrame(
+        {str(column): values for column, values in numeric_columns},
+        index=frame.index,
+    )
+    counts = numeric_frame.notna().sum(axis=1)
+    std_values = numeric_frame.std(axis=1, skipna=True)
+    numeric_names = {column for column, _ in numeric_columns}
+    label_col = next((column for column in frame.columns if column not in numeric_names), None)
+    items = []
+    for position, (row_index, std_value) in enumerate(std_values.items()):
+        if counts.loc[row_index] <= 1:
+            continue
+        std = _analysis_scalar(std_value)
+        if std is None:
+            continue
+        item: dict[str, Any] = {
+            "row": int(position),
+            "n": int(counts.loc[row_index]),
+            "std": std,
+        }
+        if label_col is not None:
+            item["label_col"] = str(label_col)
+            item["label"] = _analysis_scalar(frame.iloc[position][label_col])
+        items.append(item)
+    return _std_extrema(items)
+
+
+def _std_extrema(items: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]] | None:
+    clean = [
+        item
+        for item in items
+        if isinstance(item.get("std"), (int, float))
+        and math.isfinite(float(item["std"]))
+    ]
+    if not clean:
+        return None
+    ordered = sorted(clean, key=lambda item: float(item["std"]))
+    return {
+        "min": ordered[:3],
+        "max": list(reversed(ordered[-3:])),
+    }
+
+
+def _analysis_scalar(value: Any) -> Any:
+    scalar = _to_python_scalar(value)
+    if isinstance(scalar, float):
+        if not math.isfinite(scalar):
+            return None
+        rounded = round(scalar, 12)
+        return int(rounded) if rounded.is_integer() else rounded
+    return scalar
 
 
 def _validate_call_dependencies(call: dict[str, Any]) -> None:

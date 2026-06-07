@@ -10,6 +10,7 @@ from .pandas_backend import (
 from .static_tools import (
     TABLE_REASONING_STATIC_TOOLS,
     AggregateTool,
+    AnalyzeEvidenceTool,
     DeriveTool,
     DistinctTool,
     FilterTool,
@@ -32,6 +33,7 @@ __all__ = [
     "PandasTableReasoningExecutor",
     "TABLE_REASONING_STATIC_TOOLS",
     "AggregateTool",
+    "AnalyzeEvidenceTool",
     "DeriveTool",
     "DistinctTool",
     "FilterTool",

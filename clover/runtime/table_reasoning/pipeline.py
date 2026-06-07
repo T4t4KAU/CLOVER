@@ -1,4 +1,4 @@
-"""Synchronous table query reasoning batching runtime."""
+"""Table reasoning compatibility entry point and mixed-runtime helpers."""
 
 from __future__ import annotations
 
@@ -41,12 +41,9 @@ from clover.supervisor import SupervisorAction, SupervisorAgent, SupervisorDecis
 from clover.runtime.items import RuntimeCommandItem, RuntimeWorkItem
 from clover.runtime.pipeline import (
     CaseResult,
-    GroupedPriorityQueue,
     InflightCallResult,
-    InflightStage,
     PipelineProfiler,
 )
-from clover.runtime.round_loop import RuntimeLoop
 from clover.runtime.task import (
     TASK_DAG_READY,
     TASK_EXECUTING,
@@ -65,6 +62,9 @@ from clover.runtime.task import (
 VALIDATION_NONE = "none"
 VALIDATION_REMOTE_SUPERVISOR = "remote_supervisor"
 VALIDATION_MODES = frozenset({VALIDATION_NONE, VALIDATION_REMOTE_SUPERVISOR})
+_STATIC_ACTION_NO_ANSWER = object()
+_STATIC_ACTION_NUMBER_TYPES = frozenset({"number", "float", "integer", "int"})
+_STATIC_ACTION_BOOLEAN_TYPES = frozenset({"boolean", "bool"})
 
 
 @dataclass
@@ -127,112 +127,6 @@ class ActionGroupItem:
 
     task: TaskItem
     actions: tuple[SupervisorAction, ...]
-
-
-@dataclass
-class _TableRuntimeAdapter:
-    pending_remote: list[TaskItem]
-    remote_stage: InflightStage[_RemoteDecomposeJob, Any]
-    sql_items: list[SqlItem]
-    action_items: list[ActionGroupItem]
-    dag_queue: GroupedPriorityQueue[LogicDagItem]
-    final_results: list[CaseResult]
-    finalized: set[str]
-    supervisor: SupervisorAgent
-    remote_batch_size: int
-    max_parallel_execution_units: int
-    max_parallel_slm_node_jobs: int
-    max_parallel_slm_sequences: int
-    max_pending_slm_sequences: int
-    max_retries: int
-    validation_mode: str
-    table_cache: dict[str, Any] | None
-    local_slm_config: dict[str, Any] | None
-    local_slm_dispatcher: LocalSlmSequenceDispatcher | None
-    profile_baseline: bool
-    profiler: PipelineProfiler
-
-    def submit_remote_prefetch(self) -> None:
-        _submit_remote_decompose_prefetch(
-            pending_remote=self.pending_remote,
-            remote_stage=self.remote_stage,
-            supervisor=self.supervisor,
-            remote_batch_size=self.remote_batch_size,
-        )
-
-    def drain_remote(self, *, wait_for_one: bool) -> int:
-        return _drain_remote_decompose_jobs(
-            remote_stage=self.remote_stage,
-            sql_items=self.sql_items,
-            action_items=self.action_items,
-            final_results=self.final_results,
-            finalized=self.finalized,
-            profiler=self.profiler,
-            wait_for_one=wait_for_one,
-        )
-
-    def parse_commands(self) -> None:
-        _run_optimizer_parse(
-            sql_items=self.sql_items,
-            dag_queue=self.dag_queue,
-            final_results=self.final_results,
-            finalized=self.finalized,
-            profiler=self.profiler,
-        )
-
-    def has_ready_barriers(self) -> bool:
-        return False
-
-    def advance_barriers(self) -> bool:
-        return False
-
-    def execute_local_once(self) -> bool:
-        if self.action_items:
-            return _run_one_action_group(
-                action_items=self.action_items,
-                final_results=self.final_results,
-                finalized=self.finalized,
-                supervisor=self.supervisor,
-                max_retries=self.max_retries,
-                table_cache=self.table_cache,
-                local_slm_config=self.local_slm_config,
-                local_slm_dispatcher=self.local_slm_dispatcher,
-                max_parallel_execution_units=self.max_parallel_execution_units,
-                max_parallel_slm_node_jobs=self.max_parallel_slm_node_jobs,
-                max_parallel_slm_sequences=self.max_parallel_slm_sequences,
-                max_pending_slm_sequences=self.max_pending_slm_sequences,
-                profiler=self.profiler,
-            )
-        return _run_one_execution_batch(
-            dag_queue=self.dag_queue,
-            sql_items=self.sql_items,
-            final_results=self.final_results,
-            finalized=self.finalized,
-            supervisor=self.supervisor,
-            max_parallel_execution_units=self.max_parallel_execution_units,
-            max_parallel_slm_node_jobs=self.max_parallel_slm_node_jobs,
-            max_parallel_slm_sequences=self.max_parallel_slm_sequences,
-            max_pending_slm_sequences=self.max_pending_slm_sequences,
-            max_retries=self.max_retries,
-            validation_mode=self.validation_mode,
-            table_cache=self.table_cache,
-            local_slm_config=self.local_slm_config,
-            local_slm_dispatcher=self.local_slm_dispatcher,
-            profile_baseline=self.profile_baseline,
-            profiler=self.profiler,
-        )
-
-    def has_pending_remote(self) -> bool:
-        return bool(self.pending_remote)
-
-    def has_remote_inflight(self) -> bool:
-        return bool(self.remote_stage)
-
-    def has_commands(self) -> bool:
-        return bool(self.sql_items)
-
-    def has_local_work(self) -> bool:
-        return bool(self.action_items) or bool(self.dag_queue)
 
 
 @dataclass
@@ -311,73 +205,6 @@ def run_table_reasoning_system(
         profile=mixed_result.profile,
     )
 
-    profiler = PipelineProfiler()
-    supervisor = SupervisorAgent(remote_config=remote_config, client=client)
-    task_items = _build_task_items(case_specs, case_result_callback=case_result_callback)
-    sql_items: list[SqlItem] = []
-    action_items: list[ActionGroupItem] = []
-    pending_remote: list[TaskItem] = []
-    dag_queue: GroupedPriorityQueue[LogicDagItem] = GroupedPriorityQueue()
-    final_results: list[CaseResult] = []
-    finalized: set[str] = set()
-    _initialize_table_entries(
-        task_items=task_items,
-        pending_remote=pending_remote,
-        sql_items=sql_items,
-        action_items=action_items,
-        final_results=final_results,
-        finalized=finalized,
-        profiler=profiler,
-    )
-
-    local_slm_dispatcher = LocalSlmSequenceDispatcher(
-        slm_config=local_slm_config,
-        max_parallel_sequences=max_parallel_slm_sequences,
-        max_pending_sequences=max_pending_slm_sequences,
-    )
-    try:
-        with InflightStage[_RemoteDecomposeJob, Any](
-            stage_name="supervisor_decompose",
-            max_workers=remote_concurrency,
-            profiler=profiler,
-        ) as remote_stage:
-            RuntimeLoop(
-                _TableRuntimeAdapter(
-                    pending_remote=pending_remote,
-                    remote_stage=remote_stage,
-                    sql_items=sql_items,
-                    action_items=action_items,
-                    dag_queue=dag_queue,
-                    final_results=final_results,
-                    finalized=finalized,
-                    supervisor=supervisor,
-                    remote_batch_size=remote_batch_size,
-                    max_parallel_execution_units=max_parallel_execution_units,
-                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-                    max_parallel_slm_sequences=max_parallel_slm_sequences,
-                    max_pending_slm_sequences=max_pending_slm_sequences,
-                    max_retries=max_retries,
-                    validation_mode=validation_mode,
-                    table_cache=table_cache,
-                    local_slm_config=local_slm_config,
-                    local_slm_dispatcher=local_slm_dispatcher,
-                    profile_baseline=profile_baseline,
-                    profiler=profiler,
-                ),
-            ).run()
-    finally:
-        local_slm_dispatcher.close()
-
-    return TableReasoningSystemResult(
-        case_results=_ordered_case_results(final_results, task_items),
-        task_items=task_items,
-        profile=_profile_with_summary(
-            profiler,
-            validation_mode=validation_mode,
-        ),
-    )
-
-
 
 def _build_task_items(
     case_specs: list[TableReasoningCaseSpec | dict[str, Any]],
@@ -390,20 +217,6 @@ def _build_task_items(
         case_spec_class=TableReasoningCaseSpec,
         task_item_class=TaskItem,
         case_result_callback=case_result_callback,
-    )
-
-
-def _ordered_case_results(
-    results: list[CaseResult],
-    task_items: dict[str, TaskItem],
-) -> list[CaseResult]:
-    order = {
-        (task.case_id, task.answer_key): index
-        for index, task in enumerate(task_items.values())
-    }
-    return sorted(
-        results,
-        key=lambda result: order.get((result.case_id, result.answer_key), len(order)),
     )
 
 
@@ -526,57 +339,6 @@ def _enqueue_planned_table_command(
     )
 
 
-def _submit_remote_decompose_prefetch(
-    *,
-    pending_remote: list[TaskItem],
-    remote_stage: InflightStage[_RemoteDecomposeJob, Any],
-    supervisor: SupervisorAgent,
-    remote_batch_size: int,
-) -> None:
-    while pending_remote and remote_stage.has_capacity:
-        source_file = pending_remote[0].group_key
-        analyze = _is_analyze_task(pending_remote[0])
-        batch = _pop_batch_for_source(
-            pending_remote,
-            source_file,
-            1 if analyze else remote_batch_size,
-            analyze=analyze,
-        )
-        remote_dsl = _query_remote_dsl(batch[0]) if analyze else _batch_remote_dsl(batch)
-        remote_stage.submit(
-            _RemoteDecomposeJob(
-                batch=batch,
-                remote_dsl=remote_dsl,
-            ),
-            lambda remote_dsl=remote_dsl: supervisor.decompose(task_dsl=remote_dsl),
-            items=len(batch),
-        )
-
-
-def _drain_remote_decompose_jobs(
-    *,
-    remote_stage: InflightStage[_RemoteDecomposeJob, Any],
-    sql_items: list[SqlItem],
-    action_items: list[ActionGroupItem],
-    final_results: list[CaseResult],
-    finalized: set[str],
-    profiler: PipelineProfiler,
-    wait_for_one: bool,
-) -> int:
-    return remote_stage.drain_ready(
-        lambda job, result: _finish_remote_decompose_job(
-            job=job,
-            call_result=result,
-            sql_items=sql_items,
-            action_items=action_items,
-            final_results=final_results,
-            finalized=finalized,
-            profiler=profiler,
-        ),
-        wait_for_one=wait_for_one,
-    )
-
-
 def _finish_remote_decompose_job(
     *,
     job: _RemoteDecomposeJob,
@@ -647,7 +409,7 @@ def _parse_single_table_command(
     if "final" in payload:
         raise SqlParseError("Remote table command must not include final")
     action_op = _payload_action_op(payload)
-    if action_op and action_op not in {"sql", "inspect", "answer"}:
+    if action_op and action_op not in {"sql", "inspect", "analyze", "answer"}:
         raise SqlParseError(f"Unsupported remote table action op: {action_op}")
     if action_op == "answer":
         if "a" not in payload:
@@ -773,7 +535,7 @@ def _normalize_table_actions(payload: dict[str, Any]) -> tuple[SupervisorAction,
             actions.extend(_normalize_one_table_action(item, label=f"acts[{index}]"))
         return tuple(actions)
     action_op = _payload_action_op(payload)
-    if action_op in {"sql", "inspect"}:
+    if action_op in {"sql", "inspect", "analyze"}:
         return tuple(_normalize_one_table_action(payload, label="action"))
     if any(key in payload for key in ("q", "sql", "sqls")):
         return tuple(_normalize_one_table_action({"op": "sql", **payload}, label="action"))
@@ -803,6 +565,20 @@ def _normalize_one_table_action(
                 raise SqlParseError(f"{label} inspect seed requires one SQL")
             seed_sql = seed_sqls[0]
         return (SupervisorAction(op="inspect", q=question.strip(), seed=seed_sql),)
+    if action_op == "analyze":
+        kind = payload.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            raise SqlParseError(f"{label} analyze requires non-empty kind")
+        seed_sqls = _normalize_sqls(payload.get("seed"))
+        if len(seed_sqls) != 1:
+            raise SqlParseError(f"{label} analyze requires one seed SQL")
+        return (
+            SupervisorAction(
+                op="analyze",
+                seed=seed_sqls[0],
+                kind=kind.strip().lower(),
+            ),
+        )
     raise SqlParseError(f"Unsupported remote table action op: {action_op}")
 
 
@@ -826,6 +602,8 @@ def _command_content(command: _PlannedSqlCommand) -> str:
 
 def _action_to_dict(action: SupervisorAction) -> dict[str, Any]:
     payload = {"op": action.op}
+    if action.kind:
+        payload["kind"] = action.kind
     if action.q is not None:
         payload["q"] = action.q
     if action.seed:
@@ -847,7 +625,7 @@ def _is_analyze_remote_dsl(remote_dsl: dict[str, Any]) -> bool:
 def _run_optimizer_parse(
     *,
     sql_items: list[SqlItem],
-    dag_queue: GroupedPriorityQueue[LogicDagItem],
+    dag_queue: Any,
     final_results: list[CaseResult],
     finalized: set[str],
     profiler: PipelineProfiler,
@@ -911,6 +689,7 @@ def _run_one_action_group(
     max_parallel_slm_node_jobs: int,
     max_parallel_slm_sequences: int,
     max_pending_slm_sequences: int,
+    validation_mode: str,
     profiler: PipelineProfiler,
 ) -> bool:
     if not action_items:
@@ -933,6 +712,14 @@ def _run_one_action_group(
         )
         profiler.increment("action_group_calls")
         profiler.increment("action_group_actions", len(item.actions))
+    if validation_mode == VALIDATION_NONE and _try_finalize_static_action_group_answer(
+        item=item,
+        observation=observation,
+        final_results=final_results,
+        finalized=finalized,
+        profiler=profiler,
+    ):
+        return True
     _run_supervisor_action_report(
         item=item,
         observation=observation,
@@ -944,6 +731,152 @@ def _run_one_action_group(
         profiler=profiler,
     )
     return True
+
+
+def _try_finalize_static_action_group_answer(
+    *,
+    item: ActionGroupItem,
+    observation: dict[str, Any],
+    final_results: list[CaseResult],
+    finalized: set[str],
+    profiler: PipelineProfiler,
+) -> bool:
+    answer = _static_action_group_scalar_answer(item=item, observation=observation)
+    if answer is _STATIC_ACTION_NO_ANSWER:
+        return False
+    profiler.increment("action_group_static_answer_hits")
+    answer_type = _answer_type_name(item.task)
+    if answer_type in _STATIC_ACTION_NUMBER_TYPES:
+        profiler.increment("action_group_static_answer_number_hits")
+    elif answer_type in _STATIC_ACTION_BOOLEAN_TYPES:
+        profiler.increment("action_group_static_answer_boolean_hits")
+    _finalize_success(
+        item.task,
+        answer=answer,
+        final_results=final_results,
+        finalized=finalized,
+    )
+    return True
+
+
+def _static_action_group_scalar_answer(
+    *,
+    item: ActionGroupItem,
+    observation: dict[str, Any],
+) -> Any:
+    if len(item.actions) != 1 or item.actions[0].op != "sql":
+        return _STATIC_ACTION_NO_ANSWER
+    answer_type = _answer_type_name(item.task)
+    if answer_type not in _STATIC_ACTION_NUMBER_TYPES | _STATIC_ACTION_BOOLEAN_TYPES:
+        return _STATIC_ACTION_NO_ANSWER
+    obs = observation.get("obs")
+    if not isinstance(obs, list) or len(obs) != 1:
+        return _STATIC_ACTION_NO_ANSWER
+    sql_observation = obs[0]
+    if (
+        not isinstance(sql_observation, dict)
+        or sql_observation.get("op") != "sql"
+        or sql_observation.get("ok") is not True
+    ):
+        return _STATIC_ACTION_NO_ANSWER
+    cell = _single_answerish_cell(
+        sql_observation.get("res"),
+        answer_key=item.task.answer_key,
+    )
+    if cell is _STATIC_ACTION_NO_ANSWER:
+        return _STATIC_ACTION_NO_ANSWER
+    normalized = _normalize_answer_for_task(item.task, cell)
+    if answer_type in _STATIC_ACTION_NUMBER_TYPES:
+        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool):
+            try:
+                if pd.isna(normalized):
+                    return _STATIC_ACTION_NO_ANSWER
+            except TypeError:
+                pass
+            return normalized
+        return _STATIC_ACTION_NO_ANSWER
+    if isinstance(normalized, bool):
+        return normalized
+    return _STATIC_ACTION_NO_ANSWER
+
+
+def _answer_type_name(task: TaskItem) -> str:
+    return str(task.answer_type or "").strip().lower()
+
+
+def _single_answerish_cell(value: Any, *, answer_key: str) -> Any:
+    if isinstance(value, pd.DataFrame):
+        if value.shape != (1, 1):
+            return _STATIC_ACTION_NO_ANSWER
+        column = str(value.columns[0])
+        if not _is_answerish_column(column, answer_key=answer_key):
+            return _STATIC_ACTION_NO_ANSWER
+        return value.iloc[0, 0]
+    if isinstance(value, dict):
+        rows = value.get("rows")
+        if rows is None:
+            rows = value.get("data")
+        if isinstance(rows, list):
+            count = value.get("n")
+            if count is not None and count != 1:
+                return _STATIC_ACTION_NO_ANSWER
+            return _single_answerish_row_cell(
+                rows,
+                columns=value.get("cols", value.get("columns")),
+                answer_key=answer_key,
+            )
+        if len(value) == 1:
+            column, cell = next(iter(value.items()))
+            if _is_answerish_column(str(column), answer_key=answer_key):
+                return cell
+        return _STATIC_ACTION_NO_ANSWER
+    if isinstance(value, list):
+        return _single_answerish_row_cell(
+            value,
+            columns=None,
+            answer_key=answer_key,
+        )
+    return _STATIC_ACTION_NO_ANSWER
+
+
+def _single_answerish_row_cell(
+    rows: list[Any],
+    *,
+    columns: Any,
+    answer_key: str,
+) -> Any:
+    if len(rows) != 1:
+        return _STATIC_ACTION_NO_ANSWER
+    row = rows[0]
+    if isinstance(row, dict):
+        if isinstance(columns, list) and len(columns) == 1:
+            column = str(columns[0])
+            if column in row and _is_answerish_column(column, answer_key=answer_key):
+                return row[column]
+        if len(row) == 1:
+            column, cell = next(iter(row.items()))
+            if _is_answerish_column(str(column), answer_key=answer_key):
+                return cell
+        return _STATIC_ACTION_NO_ANSWER
+    if isinstance(row, (list, tuple)):
+        if len(row) != 1:
+            return _STATIC_ACTION_NO_ANSWER
+        if not isinstance(columns, list) or len(columns) != 1:
+            return _STATIC_ACTION_NO_ANSWER
+        if not _is_answerish_column(str(columns[0]), answer_key=answer_key):
+            return _STATIC_ACTION_NO_ANSWER
+        return row[0]
+    return _STATIC_ACTION_NO_ANSWER
+
+
+def _is_answerish_column(column: str, *, answer_key: str) -> bool:
+    normalized = column.strip().lower()
+    answer = str(answer_key or "").strip().lower()
+    if normalized in {"answer", "result", "value"}:
+        return True
+    if answer and (normalized == answer or normalized.startswith(f"{answer}__")):
+        return True
+    return False
 
 
 def _execute_table_action_group(
@@ -981,6 +914,23 @@ def _execute_table_action_group(
         if action.op == "inspect":
             observations.append(
                 _execute_inspect_action_observation(
+                    task=task,
+                    action=action,
+                    index=index,
+                    table_cache=table_cache,
+                    local_slm_config=local_slm_config,
+                    local_slm_dispatcher=local_slm_dispatcher,
+                    max_parallel_execution_units=max_parallel_execution_units,
+                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                    max_parallel_slm_sequences=max_parallel_slm_sequences,
+                    max_pending_slm_sequences=max_pending_slm_sequences,
+                    profiler=profiler,
+                )
+            )
+            continue
+        if action.op == "analyze":
+            observations.append(
+                _execute_analyze_action_observation(
                     task=task,
                     action=action,
                     index=index,
@@ -1166,6 +1116,64 @@ def _inspect_action_physical_plan(
     return physical_plan, evidence_key
 
 
+def _analyze_action_physical_plan(
+    *,
+    task: TaskItem,
+    action: SupervisorAction,
+    action_index: int,
+    profiler: PipelineProfiler,
+) -> tuple[dict[str, Any], str]:
+    evidence_key = f"{task.answer_key}__a{action_index + 1}"
+    seed = action.seed
+    if not isinstance(seed, str) or not seed.strip():
+        raise ValueError("analyze action requires seed SQL")
+    kind = action.kind
+    if not isinstance(kind, str) or not kind.strip():
+        raise ValueError("analyze action requires kind")
+
+    seed_key = f"{evidence_key}__seed"
+    seed_dsl = _query_remote_dsl_with_answer(
+        task,
+        {"name": seed_key, "type": "table"},
+    )
+    logic_dag = parse_remote_sql_to_logic_dag(seed, seed_dsl)
+    physical_plan = _optimize_table_logic_dag(
+        logic_dag=logic_dag,
+        context=_batch_context(task),
+        local_dsl=_query_local_dsl(task),
+        profiler=profiler,
+        stage_name="action_group_analyze_seed_optimizer",
+        items=1,
+    )
+    analyze_dependency = _pre_format_table_dependency(physical_plan, seed_key)
+    analyze_node = {
+        "id": f"A{action_index + 1}_analyze",
+        "op": "AnalyzeEvidence",
+        "dependency": [analyze_dependency],
+        "input": [],
+        "params": {"kind": kind.strip().lower()},
+        "output": evidence_key,
+        "output_type": "evidence",
+    }
+    physical_plan.setdefault("nodes", []).append(analyze_node)
+    physical_plan.setdefault("edges", [])
+    return physical_plan, evidence_key
+
+
+def _pre_format_table_dependency(physical_plan: dict[str, Any], output_key: str) -> str:
+    for node in physical_plan.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        if node.get("output") != output_key or node.get("op") != "FormatAnswer":
+            continue
+        dependencies = node.get("dependency")
+        if isinstance(dependencies, list) and dependencies:
+            dependency = dependencies[0]
+            if isinstance(dependency, str) and dependency:
+                return dependency
+    return output_key
+
+
 def _inspect_action_need(task: TaskItem) -> dict[str, Any]:
     payload: dict[str, Any] = {"answer_type": task.answer_type}
     profile = table_reasoning_profile_from_dsl(task.local_dsl)
@@ -1263,6 +1271,66 @@ def _execute_inspect_action_observation(
         if iterations is not None:
             observation["it"] = iterations
         profiler.increment("action_group_inspect_calls")
+        return observation
+    except Exception as exc:  # noqa: BLE001 - surfaced as action observation.
+        observation["err"] = _error_payload(exc)
+        return observation
+
+
+def _execute_analyze_action_observation(
+    *,
+    task: TaskItem,
+    action: SupervisorAction,
+    index: int,
+    table_cache: dict[str, Any] | None,
+    local_slm_config: dict[str, Any] | None,
+    local_slm_dispatcher: LocalSlmSequenceDispatcher | None,
+    max_parallel_execution_units: int,
+    max_parallel_slm_node_jobs: int,
+    max_parallel_slm_sequences: int,
+    max_pending_slm_sequences: int,
+    profiler: PipelineProfiler,
+) -> dict[str, Any]:
+    observation: dict[str, Any] = {
+        "i": index,
+        "op": "analyze",
+        "kind": action.kind,
+        "ok": False,
+        "seed": action.seed,
+    }
+    try:
+        with profiler.measure("action_group_analyze", items=1):
+            physical_plan, evidence_key = _analyze_action_physical_plan(
+                task=task,
+                action=action,
+                action_index=index,
+                profiler=profiler,
+            )
+            execution_result = _execute_table_physical_plan(
+                physical_plan=physical_plan,
+                table_cache=table_cache,
+                local_slm_config=local_slm_config,
+                local_slm_dispatcher=local_slm_dispatcher,
+                profiler=profiler,
+                stage_name="action_group_analyze_executor",
+                items=1,
+                max_parallel_execution_units=max_parallel_execution_units,
+                max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                max_parallel_slm_sequences=max_parallel_slm_sequences,
+                max_pending_slm_sequences=max_pending_slm_sequences,
+            )
+        _record_executor_trace_counters(profiler, execution_result)
+        if not execution_result.ok:
+            observation["err"] = execution_result.error or {
+                "type": "ExecutionFailed",
+                "message": "analyze action failed",
+            }
+            return observation
+        observation["ok"] = True
+        observation["res"] = _compact_evidence_value(
+            _execution_value_for_key(execution_result, evidence_key)
+        )
+        profiler.increment("action_group_analyze_calls")
         return observation
     except Exception as exc:  # noqa: BLE001 - surfaced as action observation.
         observation["err"] = _error_payload(exc)
@@ -1476,90 +1544,6 @@ def _compact_action_memory_result(observation: dict[str, Any]) -> Any:
     if not isinstance(obs, list):
         return None
     return json_ready(obs[:4])
-
-
-def _run_one_execution_batch(
-    *,
-    dag_queue: GroupedPriorityQueue[LogicDagItem],
-    sql_items: list[SqlItem],
-    final_results: list[CaseResult],
-    finalized: set[str],
-    supervisor: SupervisorAgent,
-    max_parallel_execution_units: int,
-    max_parallel_slm_node_jobs: int,
-    max_parallel_slm_sequences: int,
-    max_pending_slm_sequences: int,
-    max_retries: int,
-    validation_mode: str,
-    table_cache: dict[str, Any] | None,
-    local_slm_config: dict[str, Any] | None,
-    local_slm_dispatcher: LocalSlmSequenceDispatcher | None,
-    profile_baseline: bool,
-    profiler: PipelineProfiler,
-) -> bool:
-    popped = dag_queue.pop_best_group(len(dag_queue))
-    if popped is None:
-        return False
-    source_file, batch = popped
-    for item in batch:
-        item.task.status = TASK_EXECUTING
-
-    logic_dag = _batch_logic_dag(batch)
-    local_dsl = _batch_local_dsl(batch)
-    context = _batch_context(batch[0].task)
-    if profile_baseline:
-        _profile_one_by_one_baseline(
-            batch=batch,
-            table_cache=table_cache,
-            local_slm_config=local_slm_config,
-            profiler=profiler,
-        )
-    physical_plan = _optimize_table_logic_dag(
-        logic_dag=logic_dag,
-        context=context,
-        local_dsl=local_dsl,
-        profiler=profiler,
-        stage_name="optimizer",
-        items=len(batch),
-    )
-    merge_stats = physical_plan.get("merge_stats", {})
-    profiler.increment("merged_plan_count")
-    profiler.increment("merged_plan_nodes", int(merge_stats.get("nodes", 0) or 0))
-    profiler.increment("reused_nodes", int(merge_stats.get("reused_nodes", 0) or 0))
-
-    execution_result = _execute_table_physical_plan(
-        physical_plan=physical_plan,
-        table_cache=table_cache,
-        local_slm_config=local_slm_config,
-        profiler=profiler,
-        stage_name="executor",
-        items=len(batch),
-        max_parallel_execution_units=max_parallel_execution_units,
-        max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-        max_parallel_slm_sequences=max_parallel_slm_sequences,
-        max_pending_slm_sequences=max_pending_slm_sequences,
-        local_slm_dispatcher=local_slm_dispatcher,
-    )
-    _record_executor_trace_counters(profiler, execution_result)
-
-    return _finish_table_execution_batch(
-        batch=batch,
-        logic_dag=logic_dag,
-        physical_plan=physical_plan,
-        execution_result=execution_result,
-        requeue_interrupted=lambda item: dag_queue.push(
-            source_file,
-            item,
-            priority=item.task.retry_count,
-        ),
-        sql_items=sql_items,
-        final_results=final_results,
-        finalized=finalized,
-        supervisor=supervisor,
-        max_retries=max_retries,
-        validation_mode=validation_mode,
-        profiler=profiler,
-    )
 
 
 def _finish_table_execution_batch(

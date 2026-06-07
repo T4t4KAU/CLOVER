@@ -20,8 +20,10 @@ POWERMETRICS_BACKEND = "powermetrics_apple_silicon"
 POWERMETRICS_SAMPLERS = "cpu_power,gpu_power,ane_power"
 INTEL_RAPL_BACKEND = "intel_rapl"
 INTEL_RAPL_NVML_BACKEND = "intel_rapl_nvml"
+NVIDIA_NVML_BACKEND = "nvidia_nvml"
 INTEL_RAPL_SAMPLERS = "intel_rapl"
 INTEL_RAPL_NVML_SAMPLERS = "intel_rapl,nvidia_nvml"
+NVIDIA_NVML_SAMPLERS = "nvidia_nvml"
 
 
 @dataclass(frozen=True)
@@ -57,28 +59,54 @@ class PowerSummary:
     cpu_joules: float
     gpu_joules: float
     ane_joules: float
+    memory_joules: float = 0.0
+    cpu_core_joules: float | None = None
+    cpu_uncore_joules: float | None = None
+    psys_joules: float | None = None
+    rapl_domains: dict[str, float] | None = None
 
     @property
     def total_joules(self) -> float:
-        return self.cpu_joules + self.gpu_joules + self.ane_joules
+        return (
+            self.cpu_joules
+            + self.gpu_joules
+            + self.ane_joules
+            + self.memory_joules
+        )
 
     def avg_watts(self, joules: float) -> float:
         return joules / self.elapsed_seconds if self.elapsed_seconds > 0 else 0.0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "samples": self.samples,
             "elapsed_seconds": self.elapsed_seconds,
             "cpu_joules": self.cpu_joules,
             "gpu_joules": self.gpu_joules,
             "ane_joules": self.ane_joules,
+            "memory_joules": self.memory_joules,
             "total_joules": self.total_joules,
             "cpu_avg_watts": self.avg_watts(self.cpu_joules),
             "gpu_avg_watts": self.avg_watts(self.gpu_joules),
             "ane_avg_watts": self.avg_watts(self.ane_joules),
+            "memory_avg_watts": self.avg_watts(self.memory_joules),
             "total_avg_watts": self.avg_watts(self.total_joules),
             "total_wh": self.total_joules / 3600.0,
         }
+        if self.cpu_core_joules is not None:
+            payload["cpu_core_joules"] = self.cpu_core_joules
+            payload["cpu_core_avg_watts"] = self.avg_watts(self.cpu_core_joules)
+        if self.cpu_uncore_joules is not None:
+            payload["cpu_uncore_joules"] = self.cpu_uncore_joules
+            payload["cpu_uncore_avg_watts"] = self.avg_watts(
+                self.cpu_uncore_joules
+            )
+        if self.psys_joules is not None:
+            payload["psys_joules"] = self.psys_joules
+            payload["psys_avg_watts"] = self.avg_watts(self.psys_joules)
+        if self.rapl_domains:
+            payload["rapl_domains"] = dict(sorted(self.rapl_domains.items()))
+        return payload
 
 
 class EnergyProfiler:
@@ -87,8 +115,9 @@ class EnergyProfiler:
     On Apple Silicon macOS this uses powermetrics CPU/GPU/ANE subsystem
     estimates. On Linux Intel hosts this uses RAPL package energy for CPU and,
     when available, NVIDIA NVML instantaneous power for GPU integration. On
-    other platforms it records the hardware metadata and reports that direct
-    measurement is unsupported.
+    Linux GPU-only hosts where RAPL is unavailable but NVML is readable, this
+    records GPU energy only. On other platforms it records the hardware
+    metadata and reports that direct measurement is unsupported.
     """
 
     def __init__(
@@ -222,6 +251,9 @@ class EnergyProfiler:
         if _is_intel_energy_backend(self.platform.backend):
             self._intel_sample_loop()
             return
+        if self.platform.backend == NVIDIA_NVML_BACKEND:
+            self._nvml_sample_loop()
+            return
 
         while not self._stop_event.is_set():
             try:
@@ -263,6 +295,29 @@ class EnergyProfiler:
         finally:
             sampler.close()
 
+    def _nvml_sample_loop(self) -> None:
+        interval_s = min(0.1, max(0.02, self.sample_ms / 1000.0 / 4.0))
+        try:
+            sampler = _NvmlEnergySampler(interval_s=interval_s)
+        except Exception as exc:  # noqa: BLE001
+            self._sample_errors.append(f"{type(exc).__name__}: {exc}")
+            self._stop_event.set()
+            return
+
+        try:
+            while not self._stop_event.is_set():
+                summary = sampler.measure_window(
+                    self.sample_ms / 1000.0,
+                    stop_event=self._stop_event,
+                )
+                if summary.samples > 0:
+                    self._sample_summaries.append(summary)
+        except Exception as exc:  # noqa: BLE001
+            self._sample_errors.append(f"{type(exc).__name__}: {exc}")
+            self._stop_event.set()
+        finally:
+            sampler.close()
+
 
 def detect_hardware_platform() -> HardwarePlatform:
     system = platform.system()
@@ -280,6 +335,17 @@ def detect_hardware_platform() -> HardwarePlatform:
     if system == "Linux":
         rapl_path = _find_rapl_energy_path()
         if rapl_path is None:
+            if _nvml_available():
+                return HardwarePlatform(
+                    system=system,
+                    machine=machine,
+                    release=release,
+                    version=version,
+                    model_identifier=model_identifier,
+                    cpu_brand=cpu_brand,
+                    backend=NVIDIA_NVML_BACKEND,
+                    supported=True,
+                )
             return HardwarePlatform(
                 system=system,
                 machine=machine,
@@ -294,6 +360,17 @@ def detect_hardware_platform() -> HardwarePlatform:
         try:
             _IntelRaplMeter(rapl_path).read_j()
         except Exception as exc:  # noqa: BLE001 - surface a concise capability probe.
+            if _nvml_available():
+                return HardwarePlatform(
+                    system=system,
+                    machine=machine,
+                    release=release,
+                    version=version,
+                    model_identifier=model_identifier,
+                    cpu_brand=cpu_brand,
+                    backend=NVIDIA_NVML_BACKEND,
+                    supported=True,
+                )
             return HardwarePlatform(
                 system=system,
                 machine=machine,
@@ -410,7 +487,39 @@ def _combine_power_summaries(summaries: list[PowerSummary]) -> PowerSummary:
         cpu_joules=sum(summary.cpu_joules for summary in summaries),
         gpu_joules=sum(summary.gpu_joules for summary in summaries),
         ane_joules=sum(summary.ane_joules for summary in summaries),
+        memory_joules=sum(summary.memory_joules for summary in summaries),
+        cpu_core_joules=_sum_optional(
+            summary.cpu_core_joules for summary in summaries
+        ),
+        cpu_uncore_joules=_sum_optional(
+            summary.cpu_uncore_joules for summary in summaries
+        ),
+        psys_joules=_sum_optional(summary.psys_joules for summary in summaries),
+        rapl_domains=_combine_domain_totals(
+            summary.rapl_domains for summary in summaries
+        ),
     )
+
+
+def _sum_optional(values: Any) -> float | None:
+    total = 0.0
+    seen = False
+    for value in values:
+        if value is None:
+            continue
+        total += float(value)
+        seen = True
+    return total if seen else None
+
+
+def _combine_domain_totals(values: Any) -> dict[str, float] | None:
+    totals: dict[str, float] = {}
+    for domains in values:
+        if not domains:
+            continue
+        for key, value in domains.items():
+            totals[str(key)] = totals.get(str(key), 0.0) + float(value)
+    return totals or None
 
 
 class _IntelRaplMeter:
@@ -431,6 +540,35 @@ class _IntelRaplMeter:
         if self.max_uj <= 0:
             return 0.0
         return (self.max_uj / 1_000_000.0 - start_j) + end_j
+
+
+class _IntelRaplDomainMeters:
+    def __init__(self) -> None:
+        paths = _find_rapl_domain_energy_paths()
+        if not paths:
+            package_path = _find_rapl_energy_path()
+            if package_path is None:
+                raise RuntimeError("cannot find Intel RAPL energy_uj")
+            paths = {"package": package_path}
+        self.meters = {
+            name: _IntelRaplMeter(path)
+            for name, path in sorted(paths.items())
+        }
+
+    def read_j(self) -> dict[str, float]:
+        return {name: meter.read_j() for name, meter in self.meters.items()}
+
+    def delta_j(
+        self,
+        start: dict[str, float],
+        end: dict[str, float],
+    ) -> dict[str, float]:
+        output: dict[str, float] = {}
+        for name, meter in self.meters.items():
+            if name not in start or name not in end:
+                continue
+            output[name] = max(0.0, meter.delta_j(start[name], end[name]))
+        return output
 
 
 class _NvmlMeter:
@@ -490,7 +628,7 @@ class _NvmlMeter:
 
 class _IntelEnergySampler:
     def __init__(self, *, interval_s: float, include_nvml: bool) -> None:
-        self.cpu = _IntelRaplMeter()
+        self.rapl = _IntelRaplDomainMeters()
         self.gpu: _NvmlMeter | None
         if not include_nvml:
             self.gpu = None
@@ -511,7 +649,7 @@ class _IntelEnergySampler:
         seconds: float,
         stop_event: threading.Event | None = None,
     ) -> PowerSummary:
-        cpu_start_j = self.cpu.read_j()
+        rapl_start_j = self.rapl.read_j()
         t0 = time.perf_counter()
         deadline = t0 + max(0.0, seconds)
         gpu_samples: list[tuple[float, float]] = []
@@ -531,13 +669,65 @@ class _IntelEnergySampler:
                 gpu_samples.append((time.perf_counter(), self.gpu.power_w()))
 
         t1 = time.perf_counter()
-        cpu_end_j = self.cpu.read_j()
-        cpu_j = max(0.0, self.cpu.delta_j(cpu_start_j, cpu_end_j))
+        rapl_end_j = self.rapl.read_j()
+        rapl_delta = self.rapl.delta_j(rapl_start_j, rapl_end_j)
+        cpu_package_j = rapl_delta.get("package", 0.0)
+        cpu_core_j = rapl_delta.get("core")
+        cpu_uncore_j = (
+            max(0.0, cpu_package_j - cpu_core_j)
+            if cpu_core_j is not None
+            else None
+        )
+        memory_j = rapl_delta.get("dram", 0.0)
         gpu_j = _integrate_power_samples(gpu_samples, start_time=t0, end_time=t1)
         return PowerSummary(
             samples=1,
             elapsed_seconds=t1 - t0,
-            cpu_joules=cpu_j,
+            cpu_joules=cpu_package_j,
+            gpu_joules=gpu_j,
+            ane_joules=0.0,
+            memory_joules=memory_j,
+            cpu_core_joules=cpu_core_j,
+            cpu_uncore_joules=cpu_uncore_j,
+            psys_joules=rapl_delta.get("psys"),
+            rapl_domains=rapl_delta,
+        )
+
+
+class _NvmlEnergySampler:
+    def __init__(self, *, interval_s: float) -> None:
+        self.gpu = _NvmlMeter()
+        self.interval_s = interval_s
+
+    def close(self) -> None:
+        self.gpu.close()
+
+    def measure_window(
+        self,
+        seconds: float,
+        stop_event: threading.Event | None = None,
+    ) -> PowerSummary:
+        t0 = time.perf_counter()
+        deadline = t0 + max(0.0, seconds)
+        gpu_samples: list[tuple[float, float]] = [(t0, self.gpu.power_w())]
+
+        while True:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            sleep_s = min(self.interval_s, remaining)
+            if stop_event is None:
+                time.sleep(sleep_s)
+            elif stop_event.wait(sleep_s):
+                break
+            gpu_samples.append((time.perf_counter(), self.gpu.power_w()))
+
+        t1 = time.perf_counter()
+        gpu_j = _integrate_power_samples(gpu_samples, start_time=t0, end_time=t1)
+        return PowerSummary(
+            samples=1,
+            elapsed_seconds=t1 - t0,
+            cpu_joules=0.0,
             gpu_joules=gpu_j,
             ane_joules=0.0,
         )
@@ -578,6 +768,11 @@ def _collect_fixed_sample_count(
             sample_count=sample_count,
             include_nvml=backend == INTEL_RAPL_NVML_BACKEND,
         )
+    if backend == NVIDIA_NVML_BACKEND:
+        return _collect_nvml_fixed_sample_count(
+            sample_ms=sample_ms,
+            sample_count=sample_count,
+        )
     raise RuntimeError(f"unsupported energy backend: {backend}")
 
 
@@ -609,6 +804,23 @@ def _collect_intel_fixed_sample_count(
 ) -> PowerSummary:
     interval_s = min(0.1, max(0.02, sample_ms / 1000.0 / 4.0))
     sampler = _IntelEnergySampler(interval_s=interval_s, include_nvml=include_nvml)
+    try:
+        summaries = [
+            sampler.measure_window(sample_ms / 1000.0)
+            for _ in range(max(0, sample_count))
+        ]
+    finally:
+        sampler.close()
+    return _combine_power_summaries(summaries)
+
+
+def _collect_nvml_fixed_sample_count(
+    *,
+    sample_ms: int,
+    sample_count: int,
+) -> PowerSummary:
+    interval_s = min(0.1, max(0.02, sample_ms / 1000.0 / 4.0))
+    sampler = _NvmlEnergySampler(interval_s=interval_s)
     try:
         summaries = [
             sampler.measure_window(sample_ms / 1000.0)
@@ -682,6 +894,8 @@ def _samplers_for_backend(backend: str) -> str:
         return INTEL_RAPL_NVML_SAMPLERS
     if backend == INTEL_RAPL_BACKEND:
         return INTEL_RAPL_SAMPLERS
+    if backend == NVIDIA_NVML_BACKEND:
+        return NVIDIA_NVML_SAMPLERS
     return "unsupported"
 
 
@@ -708,6 +922,44 @@ def _find_rapl_energy_path() -> Path | None:
         if name and name.startswith("package-"):
             return path
     return energy_paths[0] if energy_paths else None
+
+
+def _find_rapl_domain_energy_paths() -> dict[str, Path]:
+    root = Path("/sys/class/powercap")
+    if not root.exists():
+        return {}
+    output: dict[str, Path] = {}
+    for directory in sorted(root.glob("intel-rapl*")):
+        if not directory.is_dir():
+            continue
+        energy_path = directory / "energy_uj"
+        if not energy_path.exists():
+            continue
+        raw_name = _read_text(directory / "name") or directory.name
+        name = _normalize_rapl_domain_name(raw_name)
+        if name in output:
+            name = _unique_rapl_domain_name(name, output)
+        output[name] = energy_path
+    return output
+
+
+def _normalize_rapl_domain_name(name: str) -> str:
+    normalized = name.strip().lower()
+    if normalized.startswith("package-"):
+        return "package"
+    if normalized in {"core", "dram", "uncore", "psys"}:
+        return normalized
+    return "".join(
+        char if char.isalnum() else "_"
+        for char in normalized
+    ).strip("_") or "unknown"
+
+
+def _unique_rapl_domain_name(name: str, existing: dict[str, Path]) -> str:
+    index = 1
+    while f"{name}_{index}" in existing:
+        index += 1
+    return f"{name}_{index}"
 
 
 def _nvml_available() -> bool:

@@ -19,6 +19,7 @@ class SupervisorAction:
     op: str
     q: str | None = None
     seed: str | None = None
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,7 @@ def parse_supervisor_decision(remote_response: str) -> SupervisorDecision:
             "Legacy retry/new_sql/done protocol is not supported"
         )
     action_op = _action_op(payload)
-    if action_op and action_op not in {"sql", "inspect", "answer"}:
+    if action_op and action_op not in {"sql", "inspect", "analyze", "answer"}:
         raise SupervisorParseError(f"Unsupported Supervisor action op: {action_op}")
     if action_op == "answer":
         if "a" not in payload:
@@ -226,7 +227,7 @@ def _normalize_actions(payload: dict[str, Any]) -> tuple[SupervisorAction, ...]:
         return tuple(actions)
 
     action_op = _action_op(payload)
-    if action_op in {"sql", "inspect"}:
+    if action_op in {"sql", "inspect", "analyze"}:
         return tuple(_normalize_one_action(payload, label="action"))
 
     if any(key in payload for key in ("q", "sql", "sqls")):
@@ -258,6 +259,21 @@ def _normalize_one_action(payload: dict[str, Any], *, label: str) -> tuple[Super
                 op="inspect",
                 q=question.strip(),
                 seed=normalized_seed,
+            ),
+        )
+    if action_op == "analyze":
+        kind = payload.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            raise SupervisorParseError(f"{label} analyze requires non-empty kind")
+        seed = payload.get("seed")
+        seed_sqls = _normalize_sqls(seed)
+        if len(seed_sqls) != 1:
+            raise SupervisorParseError(f"{label} analyze requires one seed SQL")
+        return (
+            SupervisorAction(
+                op="analyze",
+                seed=seed_sqls[0],
+                kind=kind.strip().lower(),
             ),
         )
     raise SupervisorParseError(f"Unsupported Supervisor action op: {action_op}")

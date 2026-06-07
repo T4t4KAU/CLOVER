@@ -4,7 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from clover.supervisor import generate_remote_text
+from clover.config.model_config import resolve_model_config_env
+from clover.supervisor import create_remote_llm_client, generate_remote_text
 
 
 class SupervisorClientTest(unittest.TestCase):
@@ -111,6 +112,43 @@ class SupervisorClientTest(unittest.TestCase):
             ["user"],
         )
         self.assertEqual(second_messages[0]["content"], "report")
+
+    def test_create_client_passes_explicit_proxy(self) -> None:
+        with (
+            patch("clover.supervisor.client.httpx.Client") as httpx_client,
+            patch("clover.supervisor.client.OpenAI") as openai_client,
+        ):
+            create_remote_llm_client(
+                {
+                    "api_key": "secret",
+                    "base_url": "https://example.test/v1",
+                    "model": "fake-model",
+                    "timeout": 10,
+                    "http2": False,
+                    "trust_env": False,
+                    "proxy": "http://127.0.0.1:7890",
+                }
+            )
+
+        httpx_client.assert_called_once_with(
+            timeout=10,
+            trust_env=False,
+            http2=False,
+            proxy="http://127.0.0.1:7890",
+        )
+        openai_client.assert_called_once()
+
+    def test_proxy_can_be_overridden_from_environment(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"TEST_CLOVER_REMOTE_PROXY": "http://127.0.0.1:7890"},
+            clear=False,
+        ):
+            config = resolve_model_config_env(
+                {"proxy_env": "TEST_CLOVER_REMOTE_PROXY"},
+            )
+
+        self.assertEqual(config["proxy"], "http://127.0.0.1:7890")
 
 
 class _FakeResponsesClient:

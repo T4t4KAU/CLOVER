@@ -516,12 +516,169 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertNotIn('"task_type"', review_prompt)
         self.assertIn('"q":"Which country has the highest finalWorth, and why?"', review_prompt)
         self.assertIn('"ty":"string"', review_prompt)
-        self.assertIn('"t":{"table_1"', review_prompt)
+        self.assertNotIn('"t":{"table_1"', review_prompt)
         self.assertNotIn('"v"', review_prompt)
-        self.assertIn('"act"', review_prompt)
-        self.assertIn('"obs"', review_prompt)
+        self.assertNotIn('"act"', review_prompt)
+        self.assertNotIn('"obs"', review_prompt)
+        self.assertIn('"ev"', review_prompt)
         self.assertIn('"op":"sql"', review_prompt)
         self.assertIn("United States", review_prompt)
+
+    def test_analyze_numeric_scalar_action_can_finalize_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT COUNT(*) AS "answer_1__a1" '
+                                'FROM "table_1";'
+                            )
+                        }
+                    ),
+                ]
+            )
+            scalar_table = {
+                "n": 1,
+                "cols": ["answer_1__a1"],
+                "rows": [{"answer_1__a1": 2}],
+            }
+
+            with patch(
+                "clover.runtime.table_reasoning.pipeline.execute_execution_plan",
+                return_value=ExecutionResult(
+                    ok=True,
+                    answer={"answer_1__a1": scalar_table},
+                    outputs={"answer_1__a1": scalar_table},
+                    collector_outputs={"answer": {"answer_1__a1": scalar_table}},
+                    traces=[],
+                    output_summaries={},
+                ),
+            ):
+                result = run_table_reasoning_system(
+                    case_specs=[
+                        _case_spec(
+                            "case_1",
+                            Path(tmpdir),
+                            table_path,
+                            "How many rows are present?",
+                            "number",
+                            profile="analyze",
+                        ),
+                    ],
+                    remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                    remote_batch_size=8,
+                    client=client,
+                )
+
+        self.assertEqual(result.case_results[0].answer, 2)
+        self.assertEqual(result.profile["counters"]["supervisor_decompose_calls"], 1)
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
+        self.assertEqual(
+            result.profile["counters"]["action_group_static_answer_number_hits"],
+            1,
+        )
+        self.assertEqual(len(client.chat.completions.requests), 1)
+
+    def test_analyze_string_scalar_action_still_runs_supervisor_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "country" AS "answer_1__a1" '
+                                'FROM "table_1" LIMIT 1;'
+                            )
+                        }
+                    ),
+                    json.dumps({"a": "France"}),
+                ]
+            )
+            scalar_table = {
+                "n": 1,
+                "cols": ["answer_1__a1"],
+                "rows": [{"answer_1__a1": "France"}],
+            }
+
+            with patch(
+                "clover.runtime.table_reasoning.pipeline.execute_execution_plan",
+                return_value=ExecutionResult(
+                    ok=True,
+                    answer={"answer_1__a1": scalar_table},
+                    outputs={"answer_1__a1": scalar_table},
+                    collector_outputs={"answer": {"answer_1__a1": scalar_table}},
+                    traces=[],
+                    output_summaries={},
+                ),
+            ):
+                result = run_table_reasoning_system(
+                    case_specs=[
+                        _case_spec(
+                            "case_1",
+                            Path(tmpdir),
+                            table_path,
+                            "Which country appears first?",
+                            "string",
+                            profile="analyze",
+                        ),
+                    ],
+                    remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                    remote_batch_size=8,
+                    client=client,
+                )
+
+        self.assertEqual(result.case_results[0].answer, "France")
+        self.assertEqual(result.profile["counters"]["supervisor_decompose_calls"], 1)
+        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
+        self.assertNotIn("action_group_static_answer_hits", result.profile["counters"])
+        self.assertEqual(len(client.chat.completions.requests), 2)
+
+    def test_analyze_profile_runs_static_analyze_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "acts": [
+                                {
+                                    "op": "analyze",
+                                    "kind": "statistical",
+                                    "seed": 'SELECT "finalWorth" FROM "table_1";',
+                                }
+                            ],
+                        }
+                    ),
+                    json.dumps({"a": 150}),
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        Path(tmpdir),
+                        table_path,
+                        "What is the average finalWorth?",
+                        "number",
+                        profile="analyze",
+                    ),
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=8,
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, 150)
+        self.assertEqual(result.profile["counters"]["action_group_analyze_calls"], 1)
+        review_prompt = client.chat.completions.requests[1]["messages"][0]["content"]
+        self.assertIn('"op":"analyze"', review_prompt)
+        self.assertIn('"kind":"statistical"', review_prompt)
+        self.assertIn('"mean":150', review_prompt)
 
     def test_analyze_profile_review_can_enqueue_more_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -79,12 +79,19 @@ def create_remote_llm_client(remote_config: dict[str, Any]) -> OpenAI:
         "timeout": timeout,
         "max_retries": remote_config.get("max_retries", 2),
     }
-    if "trust_env" in remote_config or "http2" in remote_config:
-        client_kwargs["http_client"] = httpx.Client(
-            timeout=timeout,
-            trust_env=bool(remote_config.get("trust_env", True)),
-            http2=bool(remote_config.get("http2", False)),
-        )
+    if (
+        "trust_env" in remote_config
+        or "http2" in remote_config
+        or "proxy" in remote_config
+    ):
+        http_client_kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "trust_env": bool(remote_config.get("trust_env", True)),
+            "http2": bool(remote_config.get("http2", False)),
+        }
+        if remote_config.get("proxy"):
+            http_client_kwargs["proxy"] = remote_config["proxy"]
+        client_kwargs["http_client"] = httpx.Client(**http_client_kwargs)
     return OpenAI(**client_kwargs)
 
 

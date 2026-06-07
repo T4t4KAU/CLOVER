@@ -162,6 +162,11 @@ class FormatAnswerTool(TableReasoningStaticTool):
         super().__init__("FormatAnswer", "table_reasoning.format_answer", ("answer",))
 
 
+class AnalyzeEvidenceTool(TableReasoningStaticTool):
+    def __init__(self) -> None:
+        super().__init__("AnalyzeEvidence", "table_reasoning.analyze_evidence", ("kind",))
+
+
 TABLE_REASONING_STATIC_TOOLS = {
     tool.op: tool
     for tool in (
@@ -178,5 +183,6 @@ TABLE_REASONING_STATIC_TOOLS = {
         SetOpTool(),
         RepeatUnionTool(),
         FormatAnswerTool(),
+        AnalyzeEvidenceTool(),
     )
 }

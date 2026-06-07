@@ -16,6 +16,7 @@ STRING_FIELDS = {
     "api_key_env",
     "base_url",
     "model",
+    "proxy",
     "reasoning_effort",
     "slm_scheduler",
 }
