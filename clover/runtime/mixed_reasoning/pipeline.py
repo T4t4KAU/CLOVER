@@ -106,6 +106,9 @@ _PlanEntry = _TablePlanEntry | _DocumentPlanEntry
 
 @dataclass
 class _MixedRuntimeAdapter:
+    pending_table_builders: list[table_pipeline.TableBuilderJob]
+    table_builder_stage: InflightStage[table_pipeline.TableBuilderJob, TableTaskItem]
+    table_task_items: dict[str, TableTaskItem]
     pending_table_remote: list[TableTaskItem]
     pending_document_remote: list[document_pipeline._DocumentRemoteJob]
     remote_stage: InflightStage[_MixedRemoteJob, Any]
@@ -135,6 +138,17 @@ class _MixedRuntimeAdapter:
     remote_turn: str = REMOTE_TABLE_DECOMPOSE
 
     def submit_remote_prefetch(self) -> None:
+        while self.table_builder_stage.has_capacity and self.pending_table_builders:
+            job = self.pending_table_builders.pop(0)
+            self.table_builder_stage.submit(
+                job,
+                lambda job=job: table_pipeline._run_table_builder_job(
+                    job=job,
+                    local_slm_config=self.local_slm_config,
+                    slm_client=self.slm_client,
+                ),
+                items=1,
+            )
         while self.remote_stage.has_capacity:
             job = self._next_remote_job()
             if job is None:
@@ -187,13 +201,40 @@ class _MixedRuntimeAdapter:
         )
 
     def drain_remote(self, *, wait_for_one: bool) -> int:
+        drained = self.table_builder_stage.drain_ready(
+            lambda job, result: _finish_table_builder_job(
+                adapter=self,
+                job=job,
+                call_result=result,
+            ),
+            wait_for_one=False,
+        )
+        drained += self.remote_stage.drain_ready(
+            lambda job, result: _finish_mixed_remote_job(
+                adapter=self,
+                job=job,
+                call_result=result,
+            ),
+            wait_for_one=False,
+        )
+        if drained or not wait_for_one:
+            return drained
+        if self.table_builder_stage:
+            return self.table_builder_stage.drain_ready(
+                lambda job, result: _finish_table_builder_job(
+                    adapter=self,
+                    job=job,
+                    call_result=result,
+                ),
+                wait_for_one=True,
+            )
         return self.remote_stage.drain_ready(
             lambda job, result: _finish_mixed_remote_job(
                 adapter=self,
                 job=job,
                 call_result=result,
             ),
-            wait_for_one=wait_for_one,
+            wait_for_one=True,
         )
 
     def parse_commands(self) -> None:
@@ -232,10 +273,14 @@ class _MixedRuntimeAdapter:
         return _execute_mixed_local_once(self)
 
     def has_pending_remote(self) -> bool:
-        return bool(self.pending_table_remote) or bool(self.pending_document_remote)
+        return (
+            bool(self.pending_table_builders)
+            or bool(self.pending_table_remote)
+            or bool(self.pending_document_remote)
+        )
 
     def has_remote_inflight(self) -> bool:
-        return bool(self.remote_stage)
+        return bool(self.table_builder_stage) or bool(self.remote_stage)
 
     def has_commands(self) -> bool:
         return bool(self.table_sql_items) or bool(self.document_code_items)
@@ -314,8 +359,12 @@ def run_mixed_reasoning_system(
     )
     profiler = PipelineProfiler()
     supervisor = SupervisorAgent(remote_config=remote_config, client=client)
-    table_task_items = table_pipeline._build_task_items(
+    table_builder_jobs, ready_table_specs = table_pipeline._split_table_builder_specs(
         table_specs,
+        case_result_callback=case_result_callback,
+    )
+    table_task_items = table_pipeline._build_task_items(
+        ready_table_specs,
         case_result_callback=case_result_callback,
     )
     document_task_items = document_pipeline.build_document_task_items(
@@ -360,14 +409,23 @@ def run_mixed_reasoning_system(
         max_parallel_sequences=max_parallel_slm_sequences,
         max_pending_sequences=max_pending_slm_sequences,
     )
+    builder_workers = max(1, int(max_parallel_slm_node_jobs or 1))
     try:
+        table_builder_stage = InflightStage[table_pipeline.TableBuilderJob, TableTaskItem](
+            stage_name="table_builder_agent",
+            max_workers=builder_workers,
+            profiler=profiler,
+        )
         with InflightStage[_MixedRemoteJob, Any](
             stage_name="supervisor_remote",
             max_workers=remote_concurrency,
             profiler=profiler,
-        ) as remote_stage:
+        ) as remote_stage, table_builder_stage:
             RuntimeLoop(
                 _MixedRuntimeAdapter(
+                    pending_table_builders=table_builder_jobs,
+                    table_builder_stage=table_builder_stage,
+                    table_task_items=table_task_items,
                     pending_table_remote=pending_table_remote,
                     pending_document_remote=pending_document_remote,
                     remote_stage=remote_stage,
@@ -411,7 +469,7 @@ def run_mixed_reasoning_system(
         profile=_profile_with_summary(
             profiler,
             validation_mode=validation_mode,
-            table_case_count=len(table_task_items),
+            table_case_count=len(table_specs),
             document_case_count=len(document_task_items),
         ),
     )
@@ -517,6 +575,7 @@ def _copy_spec_with_answer_key(raw_spec: Any, spec_class: type[Any], answer_key:
             metadata=copy.deepcopy(raw_spec.metadata),
             preprocess_result=raw_spec.preprocess_result,
             answer_key=answer_key,
+            builder=copy.deepcopy(raw_spec.builder),
         )
     return raw_spec
 
@@ -540,6 +599,48 @@ def _remote_job_items(job: _MixedRemoteJob) -> int:
     if job.kind == REMOTE_TABLE_DECOMPOSE:
         return len(job.payload.batch)
     return 1
+
+
+def _finish_table_builder_job(
+    *,
+    adapter: _MixedRuntimeAdapter,
+    job: table_pipeline.TableBuilderJob,
+    call_result: InflightCallResult[TableTaskItem],
+) -> None:
+    answer_key = job.spec.answer_key or job.spec.case_id
+    if call_result.error is not None or call_result.value is None:
+        if answer_key in adapter.finalized:
+            return
+        adapter.finalized.add(answer_key)
+        result = CaseResult(
+            case_id=job.spec.case_id,
+            answer_key=answer_key,
+            status="failed",
+            error=table_pipeline._error_payload(
+                call_result.error
+                or RuntimeError("Table BuilderAgent returned no task item")
+            ),
+            metadata=copy.deepcopy(job.spec.metadata),
+        )
+        adapter.case_results.append(result)
+        if job.result_callback is not None:
+            job.result_callback(result)
+        return
+
+    task = call_result.value
+    adapter.table_task_items[task.answer_key] = task
+    table_pipeline._record_table_builder_usage(adapter.profiler, task)
+    action_items: list[table_pipeline.ActionGroupItem] = []
+    table_pipeline._initialize_table_entries(
+        task_items={task.answer_key: task},
+        pending_remote=adapter.pending_table_remote,
+        sql_items=adapter.table_sql_items,
+        action_items=action_items,
+        final_results=adapter.case_results,
+        finalized=adapter.finalized,
+        profiler=adapter.profiler,
+    )
+    _enqueue_table_actions(adapter.local_items, action_items)
 
 
 def _finish_mixed_remote_job(

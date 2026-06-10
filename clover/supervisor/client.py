@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    RateLimitError,
+)
 
 from clover.config import resolve_model_config_env
 
@@ -25,6 +32,14 @@ class RemoteLLMResult:
     response_id: str | None
     response_status: str | None
     api_type: str
+
+
+RETRYABLE_REMOTE_ERRORS = (
+    APIConnectionError,
+    APITimeoutError,
+    RateLimitError,
+    InternalServerError,
+)
 
 
 def extract_token_usage(response_payload: dict[str, Any]) -> dict[str, int]:
@@ -103,6 +118,40 @@ def generate_remote_text(
     """Generate text through either Responses or Chat Completions API."""
 
     remote_config = resolve_model_config_env(remote_config)
+    attempts = _retry_attempts(remote_config)
+    initial_sleep = _retry_initial_sleep(remote_config)
+    max_sleep = _retry_max_sleep(remote_config)
+
+    for attempt_index in range(attempts):
+        current_client = client or create_remote_llm_client(remote_config)
+        try:
+            return _generate_remote_text_once(
+                prompt,
+                remote_config=remote_config,
+                client=current_client,
+            )
+        except RETRYABLE_REMOTE_ERRORS:
+            if attempt_index + 1 >= attempts:
+                raise
+            _close_client_if_owned(current_client, owned=client is None)
+            sleep_seconds = min(
+                max_sleep,
+                initial_sleep * (2**attempt_index),
+            )
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+    raise RemoteLLMConfigError("Remote LLM retry attempts must be positive")
+
+
+def _generate_remote_text_once(
+    prompt: str,
+    *,
+    remote_config: dict[str, Any],
+    client: Any,
+) -> RemoteLLMResult:
+    """Generate text once without application-level retry."""
+
     if client is None:
         client = create_remote_llm_client(remote_config)
 
@@ -222,6 +271,61 @@ def _resolve_api_key(remote_config: dict[str, Any]) -> str:
     if api_key_env:
         raise RemoteLLMConfigError(f"Environment variable is not set: {api_key_env}")
     raise RemoteLLMConfigError("Remote LLM config must define api_key or api_key_env")
+
+
+def _retry_attempts(remote_config: dict[str, Any]) -> int:
+    value = remote_config.get("connection_retry_attempts")
+    if value is None:
+        return 1
+    try:
+        attempts = int(value)
+    except (TypeError, ValueError) as exc:
+        raise RemoteLLMConfigError(
+            f"connection_retry_attempts must be a positive integer: {value!r}"
+        ) from exc
+    if attempts <= 0:
+        raise RemoteLLMConfigError("connection_retry_attempts must be positive")
+    return attempts
+
+
+def _retry_initial_sleep(remote_config: dict[str, Any]) -> float:
+    return _retry_sleep_seconds(
+        remote_config.get("connection_retry_initial_seconds"),
+        default=1.0,
+        name="connection_retry_initial_seconds",
+    )
+
+
+def _retry_max_sleep(remote_config: dict[str, Any]) -> float:
+    return _retry_sleep_seconds(
+        remote_config.get("connection_retry_max_seconds"),
+        default=30.0,
+        name="connection_retry_max_seconds",
+    )
+
+
+def _retry_sleep_seconds(value: Any, *, default: float, name: str) -> float:
+    if value is None:
+        return default
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RemoteLLMConfigError(f"{name} must be non-negative: {value!r}") from exc
+    if seconds < 0:
+        raise RemoteLLMConfigError(f"{name} must be non-negative")
+    return seconds
+
+
+def _close_client_if_owned(client: Any, *, owned: bool) -> None:
+    if not owned:
+        return
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception:
+        pass
 
 
 def _int_usage_value(payload: dict[str, Any], *names: str) -> int:

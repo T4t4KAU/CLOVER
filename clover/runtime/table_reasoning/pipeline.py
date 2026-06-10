@@ -6,6 +6,7 @@ import copy
 import json
 import traceback
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
@@ -36,7 +37,10 @@ from clover.optimizer import (
 )
 from clover.optimizer import optimize_logic_dag_to_physical_plan
 from clover.supervisor import extract_token_usage
-from clover.resource import prepare_physical_plan_resources
+from clover.resource import (
+    build_table_task_dsl_with_builder_agent,
+    prepare_physical_plan_resources,
+)
 from clover.supervisor import SupervisorAction, SupervisorAgent, SupervisorDecision
 from clover.runtime.items import RuntimeCommandItem, RuntimeWorkItem
 from clover.runtime.pipeline import (
@@ -56,6 +60,7 @@ from clover.runtime.task import (
     RuntimeCaseSpec,
     TableTaskItem,
     build_runtime_task_items,
+    normalize_runtime_case_spec,
 )
 
 
@@ -127,6 +132,14 @@ class ActionGroupItem:
 
     task: TaskItem
     actions: tuple[SupervisorAction, ...]
+
+
+@dataclass(frozen=True)
+class TableBuilderJob:
+    """One table case whose DSL must be materialized inside the runtime."""
+
+    spec: TableReasoningCaseSpec
+    result_callback: Callable[[CaseResult], None] | None = None
 
 
 @dataclass
@@ -211,6 +224,10 @@ def _build_task_items(
     *,
     case_result_callback: Callable[[CaseResult], None] | None = None,
 ) -> dict[str, TaskItem]:
+    if any(_builder_payload_from_raw_spec(spec) is not None for spec in case_specs):
+        raise ValueError(
+            "Table builder specs must be materialized by the runtime builder stage"
+        )
     return build_runtime_task_items(
         case_specs,
         task_type=TABLE_REASONING_QUERY_TASK_TYPE,
@@ -218,6 +235,184 @@ def _build_task_items(
         task_item_class=TaskItem,
         case_result_callback=case_result_callback,
     )
+
+
+def _split_table_builder_specs(
+    case_specs: list[TableReasoningCaseSpec | dict[str, Any]],
+    *,
+    case_result_callback: Callable[[CaseResult], None] | None = None,
+) -> tuple[list[TableBuilderJob], list[TableReasoningCaseSpec | dict[str, Any]]]:
+    builder_jobs: list[TableBuilderJob] = []
+    ready_specs: list[TableReasoningCaseSpec | dict[str, Any]] = []
+    for raw_spec in case_specs:
+        if _builder_payload_from_raw_spec(raw_spec) is None:
+            ready_specs.append(raw_spec)
+            continue
+        spec = normalize_runtime_case_spec(raw_spec, TableReasoningCaseSpec)
+        builder_jobs.append(
+            TableBuilderJob(
+                spec=spec,
+                result_callback=case_result_callback,
+            )
+        )
+    return builder_jobs, ready_specs
+
+
+def _builder_payload_from_raw_spec(
+    raw_spec: TableReasoningCaseSpec | dict[str, Any],
+) -> dict[str, Any] | None:
+    value = (
+        raw_spec.get("builder")
+        if isinstance(raw_spec, dict)
+        else getattr(raw_spec, "builder", None)
+    )
+    if value is None:
+        metadata = (
+            raw_spec.get("metadata", {})
+            if isinstance(raw_spec, dict)
+            else getattr(raw_spec, "metadata", {})
+        )
+        if isinstance(metadata, dict):
+            value = metadata.get("builder")
+    return value if isinstance(value, dict) else None
+
+
+def _run_table_builder_job(
+    *,
+    job: TableBuilderJob,
+    local_slm_config: dict[str, Any] | None,
+    slm_client: Any | None,
+) -> TaskItem:
+    if local_slm_config is None:
+        raise ValueError("Table BuilderAgent requires local_slm_config")
+    spec = normalize_runtime_case_spec(job.spec, TableReasoningCaseSpec)
+    builder = spec.builder or spec.metadata.get("builder")
+    if not isinstance(builder, dict):
+        raise ValueError("Table builder spec requires builder payload")
+    question = _required_builder_string(builder, "question")
+    source_file = str(builder.get("source_file") or "table.csv")
+    table_path = _builder_table_path(spec.base_dir, builder, source_file=source_file)
+    answer_type = builder.get("answer_type")
+    if answer_type is not None:
+        answer_type = str(answer_type)
+    task_type = str(builder.get("task_type") or "table_reasoning.analyze")
+    source_id = _builder_int(builder.get("source_id"), fallback=0)
+
+    builder_result = build_table_task_dsl_with_builder_agent(
+        question=question,
+        table_path=table_path,
+        source_file=source_file,
+        answer_type=answer_type,
+        task_type=task_type,
+        source_id=source_id,
+        slm_config=local_slm_config,
+        client=slm_client,
+    )
+    task_dsl = _table_builder_task_dsl(builder_result.task_dsl, builder)
+    dsl_builder_metadata = _table_builder_metadata(
+        builder_result=builder_result,
+        task_dsl=task_dsl,
+    )
+    metadata = copy.deepcopy(spec.metadata)
+    metadata.pop("builder", None)
+    metadata["dsl_builder"] = dsl_builder_metadata
+    metadata["task_answer_type"] = task_dsl.get("answer", {}).get("type")
+    built_spec = TableReasoningCaseSpec(
+        case_id=spec.case_id,
+        task_dsl=task_dsl,
+        base_dir=spec.base_dir,
+        metadata=metadata,
+        answer_key=spec.answer_key,
+    )
+    task_items = build_runtime_task_items(
+        [built_spec],
+        task_type=TABLE_REASONING_QUERY_TASK_TYPE,
+        case_spec_class=TableReasoningCaseSpec,
+        task_item_class=TaskItem,
+        case_result_callback=job.result_callback,
+    )
+    return next(iter(task_items.values()))
+
+
+def _builder_table_path(
+    base_dir: str | Path,
+    builder: dict[str, Any],
+    *,
+    source_file: str,
+) -> Path:
+    value = builder.get("table_path") or source_file
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = Path(base_dir).expanduser() / path
+    return path.resolve()
+
+
+def _required_builder_string(builder: dict[str, Any], key: str) -> str:
+    value = builder.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Table builder payload requires non-empty {key}")
+    return value.strip()
+
+
+def _builder_int(value: Any, *, fallback: int) -> int:
+    if value is None:
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Table builder source_id must be an integer: {value!r}") from exc
+
+
+def _table_builder_task_dsl(
+    task_dsl: dict[str, Any],
+    builder: dict[str, Any],
+) -> dict[str, Any]:
+    updated = copy.deepcopy(task_dsl)
+    hints = builder.get("hints")
+    if isinstance(hints, dict) and hints:
+        updated["hints"] = copy.deepcopy(hints)
+    updated["task_type"] = str(builder.get("task_type") or updated.get("task_type"))
+    for key in ("profile", "metadata", "reasoning_profile", "reasoning_context"):
+        updated.pop(key, None)
+    return updated
+
+
+def _table_builder_metadata(
+    *,
+    builder_result: Any,
+    task_dsl: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "mode": builder_result.builder_mode,
+        "tool_call": builder_result.tool_call,
+        "diagnostics": builder_result.diagnostics,
+        "raw_output": builder_result.raw_output,
+        "parsed_output": builder_result.parsed_output,
+        "prompt_chars": len(builder_result.prompt),
+        "token_usage": extract_token_usage(builder_result.response_payload),
+        "task_answer_type": task_dsl.get("answer", {}).get("type"),
+    }
+
+
+def _record_table_builder_usage(
+    profiler: PipelineProfiler,
+    task: TaskItem,
+) -> None:
+    profiler.increment("table_builder_cases")
+    usage = (task.metadata.get("dsl_builder") or {}).get("token_usage")
+    if not isinstance(usage, dict):
+        return
+    profiler.increment("builder_agent_calls")
+    profiler.increment("local_slm_calls")
+    for key, value in usage.items():
+        try:
+            amount = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue
+        profiler.increment(f"builder_agent_{key}", amount)
+        profiler.increment(f"local_slm_{key}", amount)
 
 
 def _normalize_validation_mode(value: str) -> str:
@@ -1408,50 +1603,6 @@ def _execute_table_physical_plan(
         )
 
 
-def _run_supervisor_action_report(
-    *,
-    item: ActionGroupItem,
-    observation: dict[str, Any],
-    action_items: list[ActionGroupItem],
-    final_results: list[CaseResult],
-    finalized: set[str],
-    supervisor: SupervisorAgent,
-    max_retries: int,
-    profiler: PipelineProfiler,
-) -> None:
-    task = item.task
-    task.status = TASK_SUPERVISOR_REVIEW
-    with profiler.measure("supervisor_synthesis", items=1):
-        supervisor_result = supervisor.synthesize(
-            local_dsl=_query_local_dsl(task),
-            logic_dag={"task_type": task.task_type, "query_plans": []},
-            observation=observation,
-            current_command={"acts": [_action_to_dict(action) for action in item.actions]},
-        )
-        profiler.increment("supervisor_synthesis_calls")
-        _record_remote_token_usage(
-            profiler,
-            stage_name="supervisor_synthesis",
-            response_payload=supervisor_result.response_payload,
-        )
-    if supervisor_result.decision is None:
-        raise ValueError("Supervisor synthesis did not return a decision")
-    _record_action_memory(
-        task=task,
-        actions=item.actions,
-        observation=observation,
-        decision=supervisor_result.decision,
-    )
-    _apply_action_group_decision(
-        task=task,
-        decision=supervisor_result.decision,
-        action_items=action_items,
-        final_results=final_results,
-        finalized=finalized,
-        max_retries=max_retries,
-    )
-
-
 def _apply_action_group_decision(
     *,
     task: TaskItem,
@@ -1759,26 +1910,91 @@ def _run_supervisor_synthesis(
 ) -> None:
     for item in batch:
         item.task.status = TASK_SUPERVISOR_REVIEW
-    observation = execution_result
-    with profiler.measure("supervisor_synthesis", items=len(batch)):
-        supervisor_result = supervisor.synthesize(
-            local_dsl=_synthesis_local_dsl(batch),
-            logic_dag=logic_dag,
-            observation=observation,
-            current_command=_sql_map(batch),
-        )
-        profiler.increment("supervisor_synthesis_calls")
-        _record_remote_token_usage(
-            profiler,
-            stage_name="supervisor_synthesis",
-            response_payload=supervisor_result.response_payload,
-        )
-    if supervisor_result.decision is None:
-        raise ValueError("Supervisor synthesis did not return a decision")
+    try:
+        observation = execution_result
+        with profiler.measure("supervisor_synthesis", items=len(batch)):
+            supervisor_result = supervisor.synthesize(
+                local_dsl=_synthesis_local_dsl(batch),
+                logic_dag=logic_dag,
+                observation=observation,
+                current_command=_sql_map(batch),
+            )
+            profiler.increment("supervisor_synthesis_calls")
+            _record_remote_token_usage(
+                profiler,
+                stage_name="supervisor_synthesis",
+                response_payload=supervisor_result.response_payload,
+            )
+        if supervisor_result.decision is None:
+            raise ValueError("Supervisor synthesis did not return a decision")
+    except Exception as exc:  # noqa: BLE001 - keep cloud/report failures task-scoped.
+        profiler.increment("supervisor_synthesis_failures")
+        for item in batch:
+            _finalize_failed(
+                item.task,
+                final_results=final_results,
+                finalized=finalized,
+                error=_error_payload(exc),
+            )
+        return
     _apply_supervisor_decision(
         batch=batch,
         decision=supervisor_result.decision,
         sql_items=sql_items,
+        final_results=final_results,
+        finalized=finalized,
+        max_retries=max_retries,
+    )
+
+
+def _run_supervisor_action_report(
+    *,
+    item: ActionGroupItem,
+    observation: dict[str, Any],
+    action_items: list[ActionGroupItem],
+    final_results: list[CaseResult],
+    finalized: set[str],
+    supervisor: SupervisorAgent,
+    max_retries: int,
+    profiler: PipelineProfiler,
+) -> None:
+    task = item.task
+    task.status = TASK_SUPERVISOR_REVIEW
+    try:
+        with profiler.measure("supervisor_synthesis", items=1):
+            supervisor_result = supervisor.synthesize(
+                local_dsl=_query_local_dsl(task),
+                logic_dag={"task_type": task.task_type, "query_plans": []},
+                observation=observation,
+                current_command={"acts": [_action_to_dict(action) for action in item.actions]},
+            )
+            profiler.increment("supervisor_synthesis_calls")
+            _record_remote_token_usage(
+                profiler,
+                stage_name="supervisor_synthesis",
+                response_payload=supervisor_result.response_payload,
+            )
+        if supervisor_result.decision is None:
+            raise ValueError("Supervisor synthesis did not return a decision")
+    except Exception as exc:  # noqa: BLE001 - keep cloud/report failures task-scoped.
+        profiler.increment("supervisor_synthesis_failures")
+        _finalize_failed(
+            task,
+            final_results=final_results,
+            finalized=finalized,
+            error=_error_payload(exc),
+        )
+        return
+    _record_action_memory(
+        task=task,
+        actions=item.actions,
+        observation=observation,
+        decision=supervisor_result.decision,
+    )
+    _apply_action_group_decision(
+        task=task,
+        decision=supervisor_result.decision,
+        action_items=action_items,
         final_results=final_results,
         finalized=finalized,
         max_retries=max_retries,

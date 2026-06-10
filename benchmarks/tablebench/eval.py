@@ -7,8 +7,6 @@ import shutil
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -25,15 +23,12 @@ from benchmarks.databench.static_tool_eval import (
 )
 from benchmarks.tablebench.adapter import (
     TABLEBENCH_DSL_MODE_BUILDER_AGENT,
-    TablebenchTask,
     iter_tablebench_dataset_dirs,
-    load_tablebench_task,
     read_cases,
     write_json,
 )
 from benchmarks.tablebench.metrics import score_tablebench_answer, tablebench_metric_name
 from benchmarks.warnings import suppress_benchmark_warnings
-from clover.resource import preprocess_task_dsl
 from clover.runtime import (
     CaseResult,
     TableReasoningCaseSpec,
@@ -48,25 +43,6 @@ TOKEN_KEYS = (
     "reasoning_tokens",
     "total_tokens",
 )
-
-
-@dataclass(frozen=True)
-class _PreparedTableBenchCase:
-    sampled_case: dict[str, Any]
-    sample_index: int
-    runtime_case_id: str
-    case_id: str
-    case_dir: Path
-    task: TablebenchTask
-    preprocess_result: dict[str, Any]
-    expected_raw: Any
-    answer_type: str | None
-    qtype: str | None
-    qsubtype: str | None
-    source_file: str
-    dsl_builder_mode: str
-    task_answer_type: str | None
-    dsl_builder: dict[str, Any]
 
 
 def run_tablebench_eval(
@@ -237,7 +213,7 @@ def _run_tablebench_cases(
     records_by_answer: dict[str, dict[str, Any]] = {}
     completed_records: list[dict[str, Any]] = []
     started_by_case: dict[str, float] = {}
-    specs_by_source_file: dict[str, list[TableReasoningCaseSpec]] = defaultdict(list)
+    case_specs: list[TableReasoningCaseSpec] = []
     progress_lock = Lock()
     startup_started = time.perf_counter()
     startup_profile: dict[str, Any] = {
@@ -260,51 +236,15 @@ def _run_tablebench_cases(
             case_dir=case_dir,
         )
         records_by_case[runtime_case_id] = record
-        try:
-            prepared = _prepare_case(
+        startup_profile["loaded_cases"] += 1
+        case_specs.append(
+            _builder_case_spec(
                 tablebench_root=tablebench_root,
                 sampled_case=sampled_case,
                 sample_index=sample_index,
                 runtime_case_id=runtime_case_id,
-                case_dir=case_dir,
-                dsl_builder_slm_config=local_slm_config,
             )
-        except Exception as exc:  # noqa: BLE001 - isolate startup failures.
-            _mark_case_failure(
-                record=record,
-                runtime_case_id=runtime_case_id,
-                case_dir=case_dir,
-                exc=exc,
-                started_by_case=started_by_case,
-                completed_records=completed_records,
-                progress_bar=progress_bar,
-                progress_lock=progress_lock,
-            )
-            startup_profile["preprocess_failed_cases"] += 1
-            continue
-
-        _update_record_from_prepared_case(record, prepared)
-        _write_startup_artifacts(prepared)
-        startup_profile["loaded_cases"] += 1
-        spec = TableReasoningCaseSpec(
-            case_id=prepared.runtime_case_id,
-            task_dsl=prepared.task.task_dsl,
-            base_dir=prepared.task.base_dir,
-            preprocess_result=prepared.preprocess_result,
-            answer_key=f"answer_{prepared.sample_index + 1}",
-            metadata={
-                "sample_index": prepared.sample_index,
-                "dataset_id": prepared.sampled_case["dataset_id"],
-                "case_id": prepared.case_id,
-                "case_index": prepared.sampled_case.get("case_index"),
-                "answer_type": prepared.answer_type,
-                "qtype": prepared.qtype,
-                "qsubtype": prepared.qsubtype,
-                "dsl_builder_mode": prepared.dsl_builder_mode,
-                "task_answer_type": prepared.task_answer_type,
-            },
         )
-        specs_by_source_file[prepared.source_file].append(spec)
 
     def on_case_result(case_result: CaseResult) -> None:
         with progress_lock:
@@ -323,7 +263,7 @@ def _run_tablebench_cases(
                 progress_bar.update(completed_records)
 
     system_results = _run_system_groups(
-        spec_groups=list(specs_by_source_file.values()),
+        spec_groups=[case_specs],
         remote_config=remote_config,
         local_slm_config=local_slm_config,
         remote_batch_size=remote_batch_size,
@@ -345,10 +285,28 @@ def _run_tablebench_cases(
         progress_lock=progress_lock,
     )
     for system_result in system_results:
+        for case_result in system_result.case_results:
+            record = records_by_case.get(case_result.case_id)
+            if record is None or record.get("answer_key"):
+                continue
+            records_by_answer[case_result.answer_key] = record
+            _update_record_from_case_result(record, case_result)
+            record["elapsed_seconds"] = (
+                time.perf_counter() - started_by_case[case_result.case_id]
+            )
+            write_json(
+                output_dir / "cases" / case_result.case_id / "case_result.json",
+                record,
+            )
         for answer_key, task_item in system_result.task_items.items():
             record = records_by_answer.get(answer_key) or records_by_case.get(task_item.case_id)
             if record is None:
                 continue
+            _update_record_from_task_item(record, task_item)
+            _write_runtime_task_artifacts(
+                output_dir / "cases" / task_item.case_id,
+                task_item,
+            )
             record["answer_key"] = answer_key
             record["current_sql"] = task_item.current_sql
             record.setdefault("initial_sql", None)
@@ -366,42 +324,46 @@ def _run_tablebench_cases(
     return list(records_by_case.values()), system_profile
 
 
-def _prepare_case(
+def _builder_case_spec(
     *,
     tablebench_root: Path,
     sampled_case: dict[str, Any],
     sample_index: int,
     runtime_case_id: str,
-    case_dir: Path,
-    dsl_builder_slm_config: dict[str, Any] | None,
-) -> _PreparedTableBenchCase:
-    task = load_tablebench_task(
-        tablebench_root=tablebench_root,
-        dataset_id=sampled_case["dataset_id"],
-        case_id=sampled_case["case_id"],
-        dsl_builder_slm_config=dsl_builder_slm_config,
-    )
-    preprocess_result = preprocess_task_dsl(task.task_dsl, base_dir=task.base_dir)
-    source_file = _source_file_from_task(task)
-    return _PreparedTableBenchCase(
-        sampled_case=sampled_case,
-        sample_index=sample_index,
-        runtime_case_id=runtime_case_id,
-        case_id=sampled_case["case_id"],
-        case_dir=case_dir,
-        task=task,
-        preprocess_result=preprocess_result,
-        expected_raw=task.metadata.get("expected_answer"),
-        answer_type=task.metadata["case"].get("type"),
-        qtype=task.metadata.get("qtype"),
-        qsubtype=task.metadata.get("qsubtype"),
-        source_file=source_file,
-        dsl_builder_mode=str(
-            task.metadata.get("dsl_builder", {}).get("mode")
-            or TABLEBENCH_DSL_MODE_BUILDER_AGENT
-        ),
-        task_answer_type=task.task_dsl.get("answer", {}).get("type"),
-        dsl_builder=dict(task.metadata.get("dsl_builder", {})),
+) -> TableReasoningCaseSpec:
+    dataset_dir = tablebench_root / sampled_case["dataset_id"]
+    hints = _tablebench_hints(sampled_case)
+    builder = {
+        "kind": TABLEBENCH_DSL_MODE_BUILDER_AGENT,
+        "question": sampled_case["question"],
+        "table_path": "table.csv",
+        "source_file": "table.csv",
+        "answer_type": sampled_case.get("answer_type"),
+        "task_type": "table_reasoning.analyze",
+        "source_id": 0,
+        "hints": hints,
+    }
+    metadata = {
+        "sample_index": sample_index,
+        "dataset": "tablebench",
+        "dataset_id": sampled_case["dataset_id"],
+        "case_id": sampled_case["case_id"],
+        "case_index": sampled_case.get("case_index"),
+        "answer_type": sampled_case.get("answer_type"),
+        "qtype": sampled_case.get("qtype"),
+        "qsubtype": sampled_case.get("qsubtype"),
+        "expected_answer": sampled_case.get("expected_answer"),
+        "question": sampled_case.get("question"),
+        "dsl_builder_mode": TABLEBENCH_DSL_MODE_BUILDER_AGENT,
+        "builder": builder,
+    }
+    return TableReasoningCaseSpec(
+        case_id=runtime_case_id,
+        task_dsl={},
+        base_dir=dataset_dir,
+        metadata=metadata,
+        answer_key=f"answer_{sample_index + 1}",
+        builder=builder,
     )
 
 
@@ -525,23 +487,21 @@ def _token_usage_from_counters(counters: Counter[str], prefix: str) -> dict[str,
     }
 
 
-def _update_record_from_prepared_case(
+def _update_record_from_task_item(
     record: dict[str, Any],
-    prepared: _PreparedTableBenchCase,
+    task_item: Any,
 ) -> None:
-    metric = tablebench_metric_name(prepared.qtype, prepared.qsubtype)
+    metadata = task_item.metadata if isinstance(task_item.metadata, dict) else {}
+    dsl_builder = metadata.get("dsl_builder")
+    if isinstance(dsl_builder, dict):
+        record["dsl_builder"] = json_ready(_dsl_builder_record_summary(dsl_builder))
+        record["dsl_builder_mode"] = dsl_builder.get("mode") or record.get(
+            "dsl_builder_mode"
+        )
     record.update(
         {
-            "answer_type": prepared.answer_type,
-            "task_answer_type": prepared.task_answer_type,
-            "qtype": prepared.qtype,
-            "qsubtype": prepared.qsubtype,
-            "dsl_builder_mode": prepared.dsl_builder_mode,
-            "dsl_builder": json_ready(_dsl_builder_record_summary(prepared.dsl_builder)),
-            "question": prepared.task.task_dsl["question"],
-            "expected_raw": prepared.expected_raw,
-            "expected_standard_text": json_ready(prepared.expected_raw),
-            "tablebench_metric": metric,
+            "task_answer_type": task_item.answer_type,
+            "question": task_item.question,
             "parse_ok": True,
         }
     )
@@ -551,6 +511,8 @@ def _update_record_from_case_result(
     record: dict[str, Any],
     case_result: CaseResult,
 ) -> None:
+    metadata = case_result.metadata if isinstance(case_result.metadata, dict) else {}
+    _update_record_from_result_metadata(record, metadata)
     score = score_tablebench_answer(
         expected=record.get("expected_raw"),
         actual=case_result.answer,
@@ -580,25 +542,32 @@ def _update_record_from_case_result(
     )
 
 
-def _mark_case_failure(
-    *,
+def _update_record_from_result_metadata(
     record: dict[str, Any],
-    runtime_case_id: str,
-    case_dir: Path,
-    exc: Exception,
-    started_by_case: dict[str, float],
-    completed_records: list[dict[str, Any]],
-    progress_bar: Any | None,
-    progress_lock: Lock,
+    metadata: dict[str, Any],
 ) -> None:
-    record["error"] = format_error(exc)
-    record["elapsed_seconds"] = time.perf_counter() - started_by_case[runtime_case_id]
-    write_json(case_dir / "case_error.json", record["error"])
-    write_json(case_dir / "case_result.json", record)
-    with progress_lock:
-        completed_records.append(record)
-        if progress_bar is not None:
-            progress_bar.update(completed_records)
+    for source_key, record_key in (
+        ("answer_type", "answer_type"),
+        ("qtype", "qtype"),
+        ("qsubtype", "qsubtype"),
+        ("question", "question"),
+        ("expected_answer", "expected_raw"),
+        ("task_answer_type", "task_answer_type"),
+    ):
+        value = metadata.get(source_key)
+        if value is not None:
+            record[record_key] = value
+    if record.get("expected_raw") is not None:
+        record["expected_standard_text"] = json_ready(record["expected_raw"])
+    dsl_builder = metadata.get("dsl_builder")
+    if isinstance(dsl_builder, dict):
+        record["dsl_builder"] = json_ready(_dsl_builder_record_summary(dsl_builder))
+        record["dsl_builder_mode"] = dsl_builder.get("mode") or record.get(
+            "dsl_builder_mode"
+        )
+        record["parse_ok"] = True
+        if dsl_builder.get("task_answer_type") is not None:
+            record["task_answer_type"] = dsl_builder.get("task_answer_type")
 
 
 def _fail_group(
@@ -629,12 +598,14 @@ def _fail_group(
             progress_bar.update(completed_records)
 
 
-def _write_startup_artifacts(prepared: _PreparedTableBenchCase) -> None:
-    write_json(prepared.case_dir / "task_dsl.json", prepared.task.task_dsl)
-    write_json(prepared.case_dir / "local_dsl.json", prepared.preprocess_result["local_dsl"])
-    write_json(prepared.case_dir / "remote_dsl.json", prepared.preprocess_result["remote_dsl"])
-    write_json(prepared.case_dir / "context.json", prepared.preprocess_result["context"])
-    write_json(prepared.case_dir / "dsl_builder.json", json_ready(prepared.dsl_builder))
+def _write_runtime_task_artifacts(case_dir: Path, task_item: Any) -> None:
+    write_json(case_dir / "task_dsl.json", json_ready(task_item.task_dsl))
+    write_json(case_dir / "local_dsl.json", json_ready(task_item.local_dsl))
+    write_json(case_dir / "remote_dsl.json", json_ready(task_item.remote_dsl))
+    write_json(case_dir / "context.json", json_ready(task_item.context))
+    dsl_builder = task_item.metadata.get("dsl_builder")
+    if isinstance(dsl_builder, dict):
+        write_json(case_dir / "dsl_builder.json", json_ready(dsl_builder))
 
 
 def _dsl_builder_record_summary(dsl_builder: dict[str, Any]) -> dict[str, Any]:
@@ -911,12 +882,12 @@ def base_case_record(
             sampled_case.get("qsubtype"),
         ),
         "tablebench_score": 0.0,
-        "question": None,
+        "question": sampled_case.get("question"),
         "parse_ok": False,
         "runtime_ok": False,
         "answer_correct": False,
-        "expected_raw": None,
-        "expected_standard_text": None,
+        "expected_raw": sampled_case.get("expected_answer"),
+        "expected_standard_text": json_ready(sampled_case.get("expected_answer")),
         "final_answer": None,
         "final_answer_preview": None,
         "final_answer_standard_text": None,
@@ -983,6 +954,8 @@ def list_tablebench_cases(tablebench_root: Path) -> list[dict[str, Any]]:
                     "dataset_id": dataset_dir.name,
                     "case_id": case["case_id"],
                     "case_index": case_index,
+                    "question": case.get("question"),
+                    "expected_answer": case.get("answer"),
                     "answer_type": case.get("type"),
                     "qtype": case.get("qtype"),
                     "qsubtype": case.get("qsubtype"),
@@ -991,19 +964,15 @@ def list_tablebench_cases(tablebench_root: Path) -> list[dict[str, Any]]:
     return cases
 
 
-def _source_file_from_task(task: TablebenchTask) -> str:
-    source = _single_task_source(task)
-    path = Path(source["file"]).expanduser()
-    if not path.is_absolute():
-        path = task.base_dir / path
-    return str(path.resolve())
-
-
-def _single_task_source(task: TablebenchTask) -> dict[str, Any]:
-    sources = task.task_dsl.get("sources", [])
-    if len(sources) != 1:
-        raise ValueError("TableBench table reasoning eval requires one table source")
-    return sources[0]
+def _tablebench_hints(sampled_case: dict[str, Any]) -> dict[str, Any]:
+    hints = {}
+    if sampled_case.get("qtype") is not None:
+        hints["category"] = sampled_case["qtype"]
+    if sampled_case.get("qsubtype") is not None:
+        hints["subcategory"] = sampled_case["qsubtype"]
+    if sampled_case.get("chart_type") is not None:
+        hints["chart_type"] = sampled_case["chart_type"]
+    return hints
 
 
 def _config_summary(config: dict[str, Any] | None) -> dict[str, Any] | None:

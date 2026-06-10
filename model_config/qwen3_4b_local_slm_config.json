@@ -1,0 +1,20 @@
+{
+  "provider": "local",
+  "api_type": "chat_completions",
+  "api_key": "EMPTY",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "model": "qwen3-4b-local",
+  "timeout": 1800,
+  "max_retries": 2,
+  "max_tokens": 512,
+  "temperature": 0,
+  "top_p": 1.0,
+  "http2": false,
+  "trust_env": false,
+  "agent_loop_max_iterations": 3,
+  "extra_body": {
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    }
+  }
+}

@@ -15,6 +15,53 @@ from clover.supervisor import SupervisorAgent
 
 
 class MixedReasoningRuntimeTest(unittest.TestCase):
+    def test_table_builder_job_releases_task_into_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            task = _table_logic_item(table_path).task
+            spec = table_pipeline.TableReasoningCaseSpec(
+                case_id="builder_case",
+                task_dsl={},
+                base_dir=tmpdir,
+                metadata={"question": "Which country appears first?"},
+                answer_key="answer_1",
+                builder={
+                    "kind": "builder_agent",
+                    "question": "Which country appears first?",
+                    "source_file": "table.csv",
+                    "table_path": "table.csv",
+                    "answer_type": "string",
+                },
+            )
+            profiler = PipelineProfiler()
+            with InflightStage(
+                stage_name="test_remote",
+                max_workers=1,
+                profiler=profiler,
+            ) as remote_stage, InflightStage(
+                stage_name="test_builder",
+                max_workers=1,
+                profiler=profiler,
+            ) as builder_stage:
+                adapter = _empty_adapter(
+                    remote_stage=remote_stage,
+                    builder_stage=builder_stage,
+                    profiler=profiler,
+                    pending_table_builders=[
+                        table_pipeline.TableBuilderJob(spec=spec)
+                    ],
+                )
+                with patch(
+                    "clover.runtime.table_reasoning.pipeline._run_table_builder_job",
+                    return_value=task,
+                ):
+                    adapter.submit_remote_prefetch()
+                    adapter.drain_remote(wait_for_one=True)
+
+        self.assertEqual(adapter.table_task_items["answer_1"], task)
+        self.assertEqual(adapter.pending_table_remote, [task])
+        self.assertFalse(adapter.pending_table_builders)
+
     def test_table_and_document_local_plans_execute_in_one_mixed_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
@@ -70,8 +117,15 @@ class MixedReasoningRuntimeTest(unittest.TestCase):
                 stage_name="test_remote",
                 max_workers=1,
                 profiler=profiler,
-            ) as remote_stage:
+            ) as remote_stage, InflightStage(
+                stage_name="test_builder",
+                max_workers=1,
+                profiler=profiler,
+            ) as builder_stage:
                 adapter = mixed_pipeline._MixedRuntimeAdapter(
+                    pending_table_builders=[],
+                    table_builder_stage=builder_stage,
+                    table_task_items={"answer_1": table_item.task},
                     pending_table_remote=[],
                     pending_document_remote=[],
                     remote_stage=remote_stage,
@@ -131,6 +185,52 @@ class MixedReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(document_item.task.status, TASK_SUPERVISOR_REVIEW)
         self.assertEqual(len(adapter.pending_document_remote), 1)
         self.assertIn("revenue evidence", document_item.compact_observation["evidence_summary"])
+
+
+def _empty_adapter(
+    *,
+    remote_stage: InflightStage,
+    builder_stage: InflightStage,
+    profiler: PipelineProfiler,
+    pending_table_builders: list[table_pipeline.TableBuilderJob] | None = None,
+) -> mixed_pipeline._MixedRuntimeAdapter:
+    return mixed_pipeline._MixedRuntimeAdapter(
+        pending_table_builders=pending_table_builders or [],
+        table_builder_stage=builder_stage,
+        table_task_items={},
+        pending_table_remote=[],
+        pending_document_remote=[],
+        remote_stage=remote_stage,
+        table_sql_items=[],
+        document_code_items=[],
+        local_items=[],
+        case_results=[],
+        finalized=set(),
+        document_round_steps={},
+        document_round_results={},
+        document_compact_observations={},
+        supervisor=SupervisorAgent(
+            remote_config={
+                "api_type": "chat_completions",
+                "model": "fake-model",
+            }
+        ),
+        remote_batch_size=8,
+        max_parallel_execution_units=4,
+        max_parallel_slm_node_jobs=2,
+        max_parallel_slm_sequences=3,
+        max_pending_slm_sequences=16,
+        max_retries=1,
+        validation_mode=table_pipeline.VALIDATION_NONE,
+        table_cache=None,
+        local_slm_config=None,
+        slm_client=None,
+        local_slm_dispatcher=None,
+        node_timeout_seconds=None,
+        profile_baseline=False,
+        profiler=profiler,
+    )
+
 
 def _write_people_table(tmpdir: Path) -> Path:
     tmpdir.mkdir(parents=True, exist_ok=True)

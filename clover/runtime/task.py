@@ -32,6 +32,7 @@ class RuntimeCaseSpec:
     metadata: dict[str, Any] = field(default_factory=dict)
     preprocess_result: dict[str, Any] | None = None
     answer_key: str | None = None
+    builder: dict[str, Any] | None = None
 
 
 @dataclass
@@ -188,6 +189,7 @@ def normalize_runtime_case_spec(
         metadata=dict(raw_spec.get("metadata", {})),
         preprocess_result=raw_spec.get("preprocess_result"),
         answer_key=raw_spec.get("answer_key"),
+        builder=raw_spec.get("builder"),
     )
 
 
