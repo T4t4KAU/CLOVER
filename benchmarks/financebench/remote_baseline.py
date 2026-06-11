@@ -76,7 +76,7 @@ def run_financebench_remote_only_baseline(
     question_reasoning: str | None = None,
     eval_mode: str = EVAL_MODE_IN_CONTEXT,
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
-    max_workers: int | None = None,
+    max_workers: int | None = 64,
     overwrite: bool = False,
     remote_cost_model: str | None = None,
     progress_factory: Callable[[int], Any] | None = None,

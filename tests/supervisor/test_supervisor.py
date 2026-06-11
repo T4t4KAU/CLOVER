@@ -260,6 +260,36 @@ class SupervisorTest(unittest.TestCase):
         )
         self.assertIn("Evidence payload:", request_messages[0]["content"])
 
+    def test_supervisor_can_route_synthesis_to_separate_model(self) -> None:
+        decompose_client = _StatefulChatClient(['{"acts":[{"op":"sql","q":"SELECT 1"}]}'])
+        synthesize_client = _StatefulChatClient(['{"op":"answer","a":2}'])
+        agent = SupervisorAgent(
+            remote_config={"api_type": "chat_completions", "model": "remote-model"},
+            client=decompose_client,
+            synthesize_config={
+                "api_type": "chat_completions",
+                "model": "synthesize-model",
+            },
+            synthesize_client=synthesize_client,
+        )
+
+        agent.decompose(task_dsl=_local_dsl())
+        result = agent.synthesize(
+            local_dsl=_local_dsl(),
+            logic_dag=_logic_dag(),
+            observation=_execution_result(),
+        )
+
+        self.assertEqual(result.decision.answer, 2)
+        self.assertEqual(
+            decompose_client.chat.completions.requests[0]["model"],
+            "remote-model",
+        )
+        self.assertEqual(
+            synthesize_client.chat.completions.requests[0]["model"],
+            "synthesize-model",
+        )
+
     def test_document_synthesis_prompt_uses_worker_evidence_only(self) -> None:
         observation = _document_execution_result()
         prompt = render_synthesis_prompt(

@@ -56,33 +56,11 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
             ]
             task_specs_exists = (dataset_dir / "task_specs").exists()
             table_text = (dataset_dir / "table.csv").read_text(encoding="utf-8")
-            with patch(
-                "clover.resource.dsl_builder._generate_builder_slm_text",
-                return_value=type(
-                    "FakeResult",
-                    (),
-                    {
-                        "text": json.dumps(
-                            {
-                                "tool": "build_table_dsl",
-                                "arguments": {"source_id": 0},
-                            }
-                        ),
-                        "response_payload": {
-                            "usage": {"prompt_tokens": 9, "completion_tokens": 4}
-                        },
-                    },
-                )(),
-            ):
-                task = load_tablebench_task(
-                    root,
-                    dataset_id,
-                    case_id="case-a",
-                    dsl_builder_slm_config={
-                        "api_type": "chat_completions",
-                        "model": "fake",
-                    },
-                )
+            task = load_tablebench_task(
+                root,
+                dataset_id,
+                case_id="case-a",
+            )
 
         self.assertEqual(summary["dataset_count"], 1)
         self.assertEqual(summary["case_count"], 2)
@@ -97,7 +75,7 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
             {"category": "NumericalReasoning", "subcategory": "Aggregation"},
         )
         self.assertEqual(task.metadata["qtype"], "NumericalReasoning")
-        self.assertEqual(task.metadata["dsl_builder"]["mode"], "builder_agent")
+        self.assertEqual(task.metadata["dsl_builder"]["mode"], "build_table_dsl_tool")
         self.assertNotIn("task_spec_path", task.metadata)
         self.assertNotIn("benchmark_task_spec_path", task.metadata)
         self.assertIn("region,sales", table_text)
@@ -127,40 +105,22 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
             dataset_id = summary["datasets"][0]["dataset_id"]
             with patch(
                 "clover.resource.dsl_builder._generate_builder_slm_text",
-                return_value=type(
-                    "FakeResult",
-                    (),
-                    {
-                        "text": json.dumps(
-                            {
-                                "tool": "build_table_dsl",
-                                "arguments": {"source_id": 0},
-                            }
-                        ),
-                        "response_payload": {
-                            "usage": {"prompt_tokens": 9, "completion_tokens": 4}
-                        },
-                    },
-                )(),
+                side_effect=AssertionError("TableBench builder should be static"),
             ):
                 task = load_tablebench_task(
                     root,
                     dataset_id,
                     case_id="case-a",
-                    dsl_builder_slm_config={
-                        "api_type": "chat_completions",
-                        "model": "fake",
-                    },
                 )
 
-        self.assertEqual(task.metadata["dsl_builder"]["mode"], "builder_agent")
+        self.assertEqual(task.metadata["dsl_builder"]["mode"], "build_table_dsl_tool")
         self.assertEqual(
             task.metadata["dsl_builder"]["tool_call"]["tool"],
             "build_table_dsl",
         )
         self.assertEqual(
             task.metadata["dsl_builder"]["token_usage"]["total_tokens"],
-            13,
+            0,
         )
         self.assertEqual(
             task.task_dsl["hints"],
@@ -172,7 +132,7 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
             task.metadata["dsl_builder"]["diagnostics"]["hints"],
         )
 
-    def test_builder_agent_mode_requires_slm_config(self) -> None:
+    def test_builder_entry_does_not_require_slm_config(self) -> None:
         rows = [
             {
                 "id": "case-a",
@@ -186,12 +146,13 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
             root = Path(tmpdir) / "tablebench"
             summary = convert_tablebench_rows(rows=rows, output_root=root)
             dataset_id = summary["datasets"][0]["dataset_id"]
-            with self.assertRaisesRegex(ValueError, "requires dsl_builder_slm_config"):
-                load_tablebench_task(
-                    root,
-                    dataset_id,
-                    case_id="case-a",
-                )
+            task = load_tablebench_task(
+                root,
+                dataset_id,
+                case_id="case-a",
+            )
+
+        self.assertEqual(task.metadata["dsl_builder"]["mode"], "build_table_dsl_tool")
 
     def test_filters_by_qtype_and_limit(self) -> None:
         rows = [

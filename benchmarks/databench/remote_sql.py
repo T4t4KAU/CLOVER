@@ -30,7 +30,7 @@ def run_databench_remote_sql_sample(
     remote_llm_config_path: Path,
     sample_size: int,
     seed: int,
-    max_workers: int | None = None,
+    max_workers: int | None = 64,
 ) -> dict[str, Any]:
     with suppress_benchmark_warnings():
         return _run_databench_remote_sql_sample(
@@ -51,7 +51,7 @@ def _run_databench_remote_sql_sample(
     remote_llm_config_path: Path,
     sample_size: int,
     seed: int,
-    max_workers: int | None = None,
+    max_workers: int | None = 64,
 ) -> dict[str, Any]:
     run_dir = output_root / run_name
     cases_dir = run_dir / "cases"

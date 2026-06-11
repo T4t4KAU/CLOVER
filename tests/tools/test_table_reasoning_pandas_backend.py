@@ -445,7 +445,30 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
 
         self.assertAlmostEqual(outputs["answer"], -3.24)
 
-    def test_filter_literal_binding_requires_exact_match(self) -> None:
+    def test_executes_nullif_function(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                "driver,points,laps\n"
+                "a,10,0\n"
+                "b,8,4\n",
+                encoding="utf-8",
+            )
+            remote_dsl = _remote_dsl("number", ["driver", "points", "laps"])
+            logic_dag = parse_remote_sql_to_logic_dag(
+                'SELECT CAST("points" AS REAL) / NULLIF("laps", 0) AS answer '
+                'FROM "table_1" ORDER BY answer DESC LIMIT 1;',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                logic_dag,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], 2)
+
+    def test_filter_literal_binding_repairs_unique_case_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"
             table_path.write_text(
@@ -458,6 +481,29 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
             logic_dag = parse_remote_sql_to_logic_dag(
                 'SELECT AVG("height") AS answer FROM "table_1" '
                 'WHERE "city" = \'Winnipeg\' AND "floors" > 10;',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                logic_dag,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], 47)
+
+    def test_filter_literal_binding_keeps_ambiguous_case_mismatch_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                "city,height\n"
+                "winnipeg,44\n"
+                "Winnipeg,50\n",
+                encoding="utf-8",
+            )
+            remote_dsl = _remote_dsl("number", ["city", "height"])
+            logic_dag = parse_remote_sql_to_logic_dag(
+                'SELECT AVG("height") AS answer FROM "table_1" '
+                'WHERE "city" = \'WINNIPEG\';',
                 remote_dsl,
             )
 

@@ -64,7 +64,7 @@ def run_databench_remote_only_baseline(
     dataset_id: str | None = None,
     sample_size: int | None = None,
     seed: int = 20260528,
-    max_workers: int | None = None,
+    max_workers: int | None = 64,
     overwrite: bool = False,
     execution_timeout_seconds: float = DEFAULT_EXECUTION_TIMEOUT_SECONDS,
     remote_cost_model: str | None = None,

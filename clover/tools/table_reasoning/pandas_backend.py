@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import itertools
 import math
 import re
 import threading
@@ -219,6 +220,14 @@ class PandasTableReasoningExecutor:
         evaluator = _ExpressionEvaluator(table.frame, call.get("upstream_outputs", {}))
         mask = evaluator.eval(predicate)
         mask = _series_for_frame(mask, table.frame).fillna(False).astype(bool)
+        if not table.frame.empty and not bool(mask.any()):
+            repaired_mask = _empty_filter_literal_repair_mask(
+                table.frame,
+                predicate,
+                evaluator,
+            )
+            if repaired_mask is not None and bool(repaired_mask.any()):
+                return PandasTable(table.frame.loc[repaired_mask].copy())
         return PandasTable(table.frame.loc[mask].copy())
 
     def _project(self, call: dict[str, Any]) -> PandasTable:
@@ -713,6 +722,13 @@ class _ExpressionEvaluator:
             return value.apply(math.floor) if isinstance(value, pd.Series) else math.floor(value)
         if function in {"COALESCE", "IFNULL"}:
             return _coalesce(args, self.frame)
+        if function == "NULLIF":
+            if len(args) < 2:
+                raise PandasExecutionError("NULLIF requires two arguments")
+            left = _series_for_frame(args[0], self.frame)
+            right = _series_for_frame(args[1], self.frame)
+            left, right = _coerce_comparison_values(left, right)
+            return left.mask(left == right)
         if function == "CONCAT":
             result = _series_for_frame("", self.frame).astype("string")
             for arg in args:
@@ -1072,6 +1088,182 @@ def _analysis_scalar(value: Any) -> Any:
         rounded = round(scalar, 12)
         return int(rounded) if rounded.is_integer() else rounded
     return scalar
+
+
+def _empty_filter_literal_repair_mask(
+    frame: pd.DataFrame,
+    predicate: dict[str, Any],
+    evaluator: _ExpressionEvaluator,
+) -> pd.Series | None:
+    options = _filter_mask_options(frame, predicate, evaluator)
+    for mask, repairs in options:
+        if repairs and bool(mask.any()):
+            return mask
+    return None
+
+
+def _filter_mask_options(
+    frame: pd.DataFrame,
+    expr: dict[str, Any],
+    evaluator: _ExpressionEvaluator,
+) -> list[tuple[pd.Series, list[dict[str, Any]]]]:
+    original = _bool_mask_for_filter(evaluator.eval(expr), frame)
+    options: list[tuple[pd.Series, list[dict[str, Any]]]] = [(original, [])]
+    expr_type = expr.get("type")
+    if expr_type == "logical_op":
+        operands = [
+            item
+            for item in expr.get("operands", [])
+            if isinstance(item, dict)
+        ]
+        if not operands:
+            return options
+        operand_options = [
+            _filter_mask_options(frame, operand, evaluator)
+            for operand in operands
+        ]
+        for combo in itertools.islice(
+            itertools.product(*operand_options),
+            32,
+        ):
+            repairs = [
+                repair
+                for _, item_repairs in combo
+                for repair in item_repairs
+            ]
+            if not repairs:
+                continue
+            masks = [mask for mask, _ in combo]
+            combined = masks[0].copy()
+            if expr.get("op") == "AND":
+                for mask in masks[1:]:
+                    combined = combined & mask
+            elif expr.get("op") == "OR":
+                for mask in masks[1:]:
+                    combined = combined | mask
+            else:
+                continue
+            options.append((combined, repairs))
+        return options[:32]
+
+    repaired = _literal_filter_leaf_repair_mask(frame, expr)
+    if repaired is not None:
+        mask, repair = repaired
+        if not mask.equals(original):
+            options.append((mask, [repair]))
+    return options
+
+
+def _bool_mask_for_filter(value: Any, frame: pd.DataFrame) -> pd.Series:
+    return _series_for_frame(value, frame).fillna(False).astype(bool)
+
+
+def _literal_filter_leaf_repair_mask(
+    frame: pd.DataFrame,
+    expr: dict[str, Any],
+) -> tuple[pd.Series, dict[str, Any]] | None:
+    expr_type = expr.get("type")
+    if expr_type == "binary_op" and expr.get("op") == "=":
+        pair = _column_literal_pair(expr.get("left"), expr.get("right"))
+        if pair is None:
+            return None
+        column, literal = pair
+        mask = _normalized_literal_equality_mask(frame, column, [literal])
+        if mask is None:
+            return None
+        return mask, {"op": "=", "column": column, "value": literal}
+    if expr_type == "in":
+        target = expr.get("expr")
+        if not isinstance(target, dict) or target.get("type") != "column":
+            return None
+        column = target.get("name")
+        if column not in frame.columns:
+            return None
+        literals = []
+        for item in expr.get("values", []):
+            if not isinstance(item, dict) or item.get("type") != "literal":
+                return None
+            value = item.get("value")
+            if not isinstance(value, str):
+                return None
+            literals.append(value)
+        if not literals:
+            return None
+        mask = _normalized_literal_equality_mask(frame, str(column), literals)
+        if mask is None:
+            return None
+        return mask, {"op": "IN", "column": str(column), "values": literals}
+    if expr_type == "like":
+        target = expr.get("expr")
+        pattern = expr.get("pattern")
+        if not isinstance(target, dict) or target.get("type") != "column":
+            return None
+        if not isinstance(pattern, dict) or pattern.get("type") != "literal":
+            return None
+        column = target.get("name")
+        literal = pattern.get("value")
+        if column not in frame.columns or not isinstance(literal, str):
+            return None
+        regex = _sql_like_to_regex(literal)
+        values = frame[str(column)].astype("string")
+        mask = values.str.contains(regex, regex=True, flags=re.IGNORECASE, na=False)
+        if not bool(mask.any()):
+            return None
+        return mask, {"op": "LIKE", "column": str(column), "value": literal}
+    return None
+
+
+def _column_literal_pair(left: Any, right: Any) -> tuple[str, str] | None:
+    if (
+        isinstance(left, dict)
+        and isinstance(right, dict)
+        and left.get("type") == "column"
+        and right.get("type") == "literal"
+        and isinstance(right.get("value"), str)
+        and isinstance(left.get("name"), str)
+    ):
+        return left["name"], right["value"]
+    if (
+        isinstance(left, dict)
+        and isinstance(right, dict)
+        and left.get("type") == "literal"
+        and right.get("type") == "column"
+        and isinstance(left.get("value"), str)
+        and isinstance(right.get("name"), str)
+    ):
+        return right["name"], left["value"]
+    return None
+
+
+def _normalized_literal_equality_mask(
+    frame: pd.DataFrame,
+    column: str,
+    literals: list[str],
+) -> pd.Series | None:
+    if column not in frame.columns:
+        return None
+    normalized_targets = [_normalize_filter_text(value) for value in literals]
+    if any(not value for value in normalized_targets):
+        return None
+    series = frame[column]
+    normalized_cells = series.map(_normalize_filter_text)
+    for target in normalized_targets:
+        matched_originals = {
+            str(original)
+            for original, normalized in zip(series.tolist(), normalized_cells.tolist(), strict=False)
+            if normalized == target
+        }
+        if len(matched_originals) != 1:
+            return None
+    mask = normalized_cells.isin(normalized_targets)
+    return mask.fillna(False).astype(bool)
+
+
+def _normalize_filter_text(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip().casefold()
+    return re.sub(r"\s+", " ", text)
 
 
 def _validate_call_dependencies(call: dict[str, Any]) -> None:

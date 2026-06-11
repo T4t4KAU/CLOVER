@@ -15,6 +15,7 @@ from clover.executor import (
     slice_execution_result_by_namespace,
 )
 from clover.executor.slm_dispatcher import (
+    DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
     DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
     DEFAULT_MAX_PENDING_SLM_SEQUENCES,
     LocalSlmSequenceDispatcher,
@@ -25,6 +26,7 @@ from clover.runtime.pipeline import (
     InflightCallResult,
     InflightStage,
     PipelineProfiler,
+    wait_for_any_inflight,
 )
 from clover.runtime.round_loop import RoundLoopResult, RoundLoopStep, RuntimeLoop
 from clover.runtime.table_reasoning import pipeline as table_pipeline
@@ -219,6 +221,29 @@ class _MixedRuntimeAdapter:
         )
         if drained or not wait_for_one:
             return drained
+        ready_futures = wait_for_any_inflight(
+            stage
+            for stage in (self.table_builder_stage, self.remote_stage)
+            if stage
+        )
+        drained = self.table_builder_stage.drain_ready(
+            lambda job, result: _finish_table_builder_job(
+                adapter=self,
+                job=job,
+                call_result=result,
+            ),
+            completed_futures=ready_futures,
+        )
+        drained += self.remote_stage.drain_ready(
+            lambda job, result: _finish_mixed_remote_job(
+                adapter=self,
+                job=job,
+                call_result=result,
+            ),
+            completed_futures=ready_futures,
+        )
+        if drained:
+            return drained
         if self.table_builder_stage:
             return self.table_builder_stage.drain_ready(
                 lambda job, result: _finish_table_builder_job(
@@ -319,11 +344,12 @@ def run_mixed_reasoning_system(
     ]
     | None = None,
     remote_config: dict[str, Any],
+    synthesize_config: dict[str, Any] | None = None,
     local_slm_config: dict[str, Any] | None = None,
-    remote_batch_size: int = 16,
-    remote_concurrency: int = 2,
-    max_parallel_execution_units: int = 32,
-    max_parallel_slm_node_jobs: int = 1,
+    remote_batch_size: int = 64,
+    remote_concurrency: int = 64,
+    max_parallel_execution_units: int = 64,
+    max_parallel_slm_node_jobs: int = DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
     max_parallel_slm_sequences: int = DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
     max_pending_slm_sequences: int = DEFAULT_MAX_PENDING_SLM_SEQUENCES,
     max_retries: int = 1,
@@ -358,7 +384,11 @@ def run_mixed_reasoning_system(
         document_case_specs or [],
     )
     profiler = PipelineProfiler()
-    supervisor = SupervisorAgent(remote_config=remote_config, client=client)
+    supervisor = SupervisorAgent(
+        remote_config=remote_config,
+        client=client,
+        synthesize_config=synthesize_config,
+    )
     table_builder_jobs, ready_table_specs = table_pipeline._split_table_builder_specs(
         table_specs,
         case_result_callback=case_result_callback,
@@ -730,14 +760,16 @@ def _execute_mixed_local_once(adapter: _MixedRuntimeAdapter) -> bool:
         if item.kind == TABLE_WORK_ACTION
         and item.payload.task.answer_key not in adapter.finalized
     ]
-    for action_item in action_items:
-        followups = [action_item]
-        table_pipeline._run_one_action_group(
-            action_items=followups,
+    if action_items:
+        followups: list[table_pipeline.ActionGroupItem] = []
+        table_pipeline._run_action_groups_batch(
+            action_items=action_items,
+            followup_action_items=followups,
             final_results=adapter.case_results,
             finalized=adapter.finalized,
             supervisor=adapter.supervisor,
             max_retries=adapter.max_retries,
+            remote_concurrency=adapter.remote_stage.max_workers,
             table_cache=adapter.table_cache,
             local_slm_config=adapter.local_slm_config,
             local_slm_dispatcher=adapter.local_slm_dispatcher,

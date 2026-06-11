@@ -20,6 +20,7 @@ from clover.executor.result import (
 )
 from clover.executor.scheduler import ExecutionPlan, ExecutionUnit, Scheduler
 from clover.executor.slm_dispatcher import (
+    DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
     DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
     DEFAULT_MAX_PENDING_SLM_SEQUENCES,
     LocalSlmSequenceDispatcher,
@@ -44,7 +45,7 @@ class Executor:
         resource_spill_threshold_bytes: int | None = None,
         resource_spill_root: str | None = None,
         max_parallel_execution_units: int = 1,
-        max_parallel_slm_node_jobs: int = 1,
+        max_parallel_slm_node_jobs: int = DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
         max_parallel_slm_sequences: int = DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
         max_pending_slm_sequences: int = DEFAULT_MAX_PENDING_SLM_SEQUENCES,
         node_timeout_seconds: float | None = None,
@@ -501,7 +502,7 @@ def execute_execution_plan(
     resource_spill_threshold_bytes: int | None = None,
     resource_spill_root: str | None = None,
     max_parallel_execution_units: int = 1,
-    max_parallel_slm_node_jobs: int = 1,
+    max_parallel_slm_node_jobs: int = DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
     max_parallel_slm_sequences: int = DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
     max_pending_slm_sequences: int = DEFAULT_MAX_PENDING_SLM_SEQUENCES,
     node_timeout_seconds: float | None = None,

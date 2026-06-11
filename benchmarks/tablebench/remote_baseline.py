@@ -66,7 +66,7 @@ def run_tablebench_remote_only_baseline(
     include_visualization: bool = False,
     sample_size: int | None = None,
     seed: int = 20260528,
-    max_workers: int | None = None,
+    max_workers: int | None = 64,
     instruction_type: str = "DP",
     execution_timeout_seconds: float = 20.0,
     overwrite: bool = False,

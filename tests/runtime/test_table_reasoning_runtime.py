@@ -582,7 +582,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         )
         self.assertEqual(len(client.chat.completions.requests), 1)
 
-    def test_analyze_string_scalar_action_still_runs_supervisor_answer(self) -> None:
+    def test_analyze_string_scalar_action_can_finalize_locally(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
@@ -595,7 +595,6 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                             )
                         }
                     ),
-                    json.dumps({"a": "France"}),
                 ]
             )
             scalar_table = {
@@ -633,9 +632,314 @@ class TableReasoningRuntimeTest(unittest.TestCase):
 
         self.assertEqual(result.case_results[0].answer, "France")
         self.assertEqual(result.profile["counters"]["supervisor_decompose_calls"], 1)
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
+        self.assertEqual(
+            result.profile["counters"]["action_group_static_answer_text_hits"],
+            1,
+        )
+        self.assertEqual(len(client.chat.completions.requests), 1)
+
+    def test_analyze_average_row_aggregate_action_can_finalize_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            table_path.write_text(
+                "commodity,2002 - 03,2003 - 04,2004 - 05,2005 - 06\n"
+                "wheat,2692,5636,4320,5905\n",
+                encoding="utf-8",
+            )
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT AVG(CAST("2002 - 03" AS REAL)) AS avg_2002_03, '
+                                'AVG(CAST("2003 - 04" AS REAL)) AS avg_2003_04, '
+                                'AVG(CAST("2004 - 05" AS REAL)) AS avg_2004_05, '
+                                'AVG(CAST("2005 - 06" AS REAL)) AS avg_2005_06 '
+                                'FROM "table_1" WHERE "commodity" = \'Wheat\';'
+                            )
+                        }
+                    ),
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        root,
+                        table_path,
+                        "What is the average value of wheat production from 2002-03 to 2005-06?",
+                        "number",
+                        profile="analyze",
+                    ),
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=8,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, 4638.25)
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
+        self.assertEqual(
+            result.profile["counters"]["action_group_static_answer_number_hits"],
+            1,
+        )
+        self.assertEqual(len(client.chat.completions.requests), 1)
+
+    def test_analyze_average_summed_range_action_can_finalize_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            table_path.write_text(
+                "commodity,2002 - 03,2003 - 04,2004 - 05,2005 - 06\n"
+                "wheat,2692,5636,4320,5905\n",
+                encoding="utf-8",
+            )
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT AVG(("2002 - 03" + "2003 - 04" + '
+                                '"2004 - 05" + "2005 - 06") * 1.0) '
+                                'AS avg_wheat_production FROM "table_1" '
+                                'WHERE "commodity" = \'Wheat\';'
+                            )
+                        }
+                    ),
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        root,
+                        table_path,
+                        "What is the average value of wheat production from 2002-03 to 2005-06?",
+                        "number",
+                        profile="analyze",
+                    ),
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=8,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, 4638.25)
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
+        self.assertEqual(
+            result.profile["counters"]["action_group_static_answer_number_hits"],
+            1,
+        )
+        self.assertEqual(len(client.chat.completions.requests), 1)
+
+    def test_analyze_target_column_action_can_finalize_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            rows = [
+                "driver,points,laps",
+                "kasey kahne,185,334",
+            ]
+            rows.extend(f"driver {index},1,334" for index in range(2, 25))
+            rows.append("brian vickers,34,24")
+            table_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "driver", "points", "laps", '
+                                'CAST("points" AS REAL) / NULLIF("laps", 0) '
+                                'AS "points_per_lap" FROM "table_1" '
+                                'ORDER BY "points_per_lap" DESC LIMIT 1;'
+                            )
+                        }
+                    ),
+                ]
+            )
+            spec = _case_spec(
+                "case_1",
+                root,
+                table_path,
+                "Which driver has the highest Points Per Lap?",
+                "string",
+                profile="analyze",
+            )
+            spec.metadata["dsl_builder"] = {
+                "diagnostics": {"target_column": "driver"},
+            }
+
+            result = run_table_reasoning_system(
+                case_specs=[spec],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=8,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, "brian vickers")
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
+        self.assertEqual(len(client.chat.completions.requests), 1)
+
+    def test_analyze_single_column_multirow_action_can_finalize_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            table_path.write_text(
+                "nation,gold,silver,bronze\n"
+                "benin,1,0,0\n"
+                "quebec,1,0,0\n"
+                "cape verde,1,0,0\n"
+                "ivory coast,1,0,0\n"
+                "canada,1,1,2\n",
+                encoding="utf-8",
+            )
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "nation" FROM "table_1" '
+                                'WHERE "gold" = 1 AND "silver" = 0 AND "bronze" = 0;'
+                            )
+                        }
+                    ),
+                ]
+            )
+            spec = _case_spec(
+                "case_1",
+                root,
+                table_path,
+                "Which nation won 1 gold medal and no silver or bronze medals?",
+                "string",
+                profile="analyze",
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[spec],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=8,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(
+            result.case_results[0].answer,
+            "benin, quebec, cape verde, ivory coast",
+        )
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
+        self.assertEqual(len(client.chat.completions.requests), 1)
+
+    def test_analyze_multirow_multicolumn_target_action_needs_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            table_path.write_text(
+                "driver,points,laps\n"
+                "kasey kahne,185,334\n"
+                "brian vickers,34,24\n",
+                encoding="utf-8",
+            )
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "driver", "points", "laps" '
+                                'FROM "table_1";'
+                            )
+                        }
+                    ),
+                    json.dumps({"a": "brian vickers"}),
+                ]
+            )
+            spec = _case_spec(
+                "case_1",
+                root,
+                table_path,
+                "Which driver has the highest Points Per Lap?",
+                "string",
+                profile="analyze",
+            )
+            spec.metadata["dsl_builder"] = {
+                "diagnostics": {"target_column": "driver"},
+            }
+
+            result = run_table_reasoning_system(
+                case_specs=[spec],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=8,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, "brian vickers")
         self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
         self.assertNotIn("action_group_static_answer_hits", result.profile["counters"])
         self.assertEqual(len(client.chat.completions.requests), 2)
+
+    def test_analyze_defined_ratio_multicolumn_target_action_can_finalize_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            rows = [
+                "driver,points,laps",
+                "kasey kahne,185,334",
+            ]
+            rows.extend(f"driver {index},1,334" for index in range(2, 25))
+            rows.append("brian vickers,34,24")
+            table_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "driver", "points", "laps" '
+                                'FROM "table_1";'
+                            )
+                        }
+                    ),
+                ]
+            )
+            spec = _case_spec(
+                "case_1",
+                root,
+                table_path,
+                (
+                    "Points Per Lap is defined as the total points earned by a driver "
+                    "divided by the total number of laps completed. Which driver has "
+                    "the highest Points Per Lap?"
+                ),
+                "string",
+                profile="analyze",
+            )
+            spec.metadata["dsl_builder"] = {
+                "diagnostics": {"target_column": "driver"},
+            }
+
+            result = run_table_reasoning_system(
+                case_specs=[spec],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=8,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, "brian vickers")
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
+        self.assertEqual(len(client.chat.completions.requests), 1)
 
     def test_analyze_profile_runs_static_analyze_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -723,11 +1027,10 @@ class TableReasoningRuntimeTest(unittest.TestCase):
 
         self.assertEqual(result.case_results[0].answer, "United States")
         self.assertEqual(result.profile["counters"]["supervisor_decompose_calls"], 1)
-        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 2)
+        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
         self.assertNotIn("static_synthesis_calls", result.profile["counters"])
-        self.assertEqual(len(client.chat.completions.requests), 3)
-        second_review_prompt = client.chat.completions.requests[2]["messages"][0]["content"]
-        self.assertIn('"mem"', second_review_prompt)
+        self.assertEqual(len(client.chat.completions.requests), 2)
 
     def test_analyze_string_answer_contract_normalizes_objects(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -755,7 +1058,10 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                 client=client,
             )
 
-        self.assertEqual(result.case_results[0].answer, '{"country":"France"}')
+        self.assertEqual(result.case_results[0].answer, "France")
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(result.profile["counters"]["action_group_static_answer_hits"], 1)
+        self.assertEqual(len(client.chat.completions.requests), 1)
 
     def test_fail_fast_interrupted_independent_answers_are_requeued(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

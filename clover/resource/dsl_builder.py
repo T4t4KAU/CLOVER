@@ -218,51 +218,20 @@ def build_table_task_dsl_with_builder_agent(
     max_preview_rows: int = 8,
     max_columns: int = 64,
 ) -> TableDslBuilderResult:
-    """Use a local SLM BuilderAgent to choose a DSL construction tool."""
+    """Build a table task DSL through the BuilderAgent-compatible entry point."""
 
-    prompt = render_table_dsl_builder_agent_prompt(
-        question=question,
-        sources=[{"id": source_id, "type": "table"}],
-    )
-    llm_result = _generate_builder_slm_text(
-        prompt,
-        slm_config=_builder_agent_slm_config(slm_config),
-        client=client,
-    )
-    parsed = parse_builder_agent_tool_call(llm_result.text)
-    tool_call = _normalize_builder_agent_tool_call(
-        parsed,
-        question=question,
-        source_id=source_id,
-        source_file=source_file,
-    )
-    static_result = BuildTableDSLTool().run(
+    # The current table builder has exactly one executable tool. Keep the
+    # public entry point, but do not ask a model to spell a static tool name.
+    del slm_config, client
+    return BuildTableDSLTool().run(
         question=question,
         table_path=table_path,
         source_file=source_file,
         answer_type=answer_type,
         task_type=task_type,
-        source_id=int(tool_call["arguments"]["source_id"]),
+        source_id=source_id,
         max_preview_rows=max_preview_rows,
         max_columns=max_columns,
-    )
-    diagnostics = dict(static_result.diagnostics or {})
-    diagnostics["agent_tool_call"] = {
-        "tool": parsed.get("tool"),
-        "arguments": parsed.get("arguments", {}),
-    }
-    diagnostics["executed_tool_call"] = tool_call
-    return TableDslBuilderResult(
-        task_dsl=static_result.task_dsl,
-        prompt=prompt,
-        raw_output=llm_result.text,
-        parsed_output=parsed,
-        response_payload=llm_result.response_payload,
-        table_profile=static_result.table_profile,
-        fallback_used=False,
-        builder_mode=BUILDER_AGENT_MODE,
-        tool_call=tool_call,
-        diagnostics=diagnostics,
     )
 
 

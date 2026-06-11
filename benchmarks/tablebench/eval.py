@@ -50,6 +50,7 @@ def run_tablebench_eval(
     tablebench_root: Path,
     output_dir: Path,
     remote_config: dict[str, Any],
+    synthesize_config: dict[str, Any] | None = None,
     local_slm_config: dict[str, Any] | None = None,
     max_cases: int | None = None,
     case_ids: set[str] | None = None,
@@ -59,14 +60,14 @@ def run_tablebench_eval(
     include_visualization: bool = False,
     sample_size: int | None = None,
     seed: int = 20260528,
-    max_workers: int | None = None,
+    max_workers: int | None = 64,
     max_retries: int = 1,
     validation_mode: str = "none",
-    remote_batch_size: int = 16,
-    remote_concurrency: int = 2,
-    max_parallel_execution_units: int = 32,
-    max_parallel_slm_node_jobs: int = 1,
-    max_parallel_slm_sequences: int = 8,
+    remote_batch_size: int = 64,
+    remote_concurrency: int = 64,
+    max_parallel_execution_units: int = 64,
+    max_parallel_slm_node_jobs: int = 64,
+    max_parallel_slm_sequences: int = 64,
     max_pending_slm_sequences: int = 1024,
     eval_batch_size: int | None = None,
     profile_baseline: bool = False,
@@ -114,7 +115,7 @@ def run_tablebench_eval(
             raise ValueError("eval_batch_size must be positive")
         if local_slm_config is None:
             raise ValueError(
-                "TableBench eval requires local_slm_config for BuilderAgent DSL construction"
+                "TableBench eval requires local_slm_config for local SLM repair/synthesis"
             )
         validation_mode = str(validation_mode or "none").strip().lower()
         progress_bar = progress_factory(len(selected_cases)) if progress_factory else None
@@ -124,6 +125,7 @@ def run_tablebench_eval(
                 output_dir=output_dir,
                 selected_cases=selected_cases,
                 remote_config=remote_config,
+                synthesize_config=synthesize_config,
                 local_slm_config=local_slm_config,
                 max_workers=max_workers,
                 max_retries=max_retries,
@@ -163,6 +165,7 @@ def run_tablebench_eval(
             records=records,
             output_dir=output_dir,
             remote_config=remote_config,
+            synthesize_config=synthesize_config,
             local_slm_config=local_slm_config,
             selected_cases=selected_cases,
             elapsed_seconds=time.perf_counter() - started,
@@ -196,6 +199,7 @@ def _run_tablebench_cases(
     output_dir: Path,
     selected_cases: list[dict[str, Any]],
     remote_config: dict[str, Any],
+    synthesize_config: dict[str, Any] | None,
     local_slm_config: dict[str, Any] | None,
     max_workers: int | None,
     max_retries: int,
@@ -265,6 +269,7 @@ def _run_tablebench_cases(
     system_results = _run_system_groups(
         spec_groups=[case_specs],
         remote_config=remote_config,
+        synthesize_config=synthesize_config,
         local_slm_config=local_slm_config,
         remote_batch_size=remote_batch_size,
         remote_concurrency=remote_concurrency,
@@ -371,6 +376,7 @@ def _run_system_groups(
     *,
     spec_groups: list[list[TableReasoningCaseSpec]],
     remote_config: dict[str, Any],
+    synthesize_config: dict[str, Any] | None,
     local_slm_config: dict[str, Any] | None,
     remote_batch_size: int,
     remote_concurrency: int,
@@ -398,6 +404,7 @@ def _run_system_groups(
         return run_table_reasoning_system(
             case_specs=all_specs,
             remote_config=remote_config,
+            synthesize_config=synthesize_config,
             local_slm_config=local_slm_config,
             remote_batch_size=remote_batch_size,
             remote_concurrency=remote_concurrency,
@@ -461,6 +468,14 @@ def _merge_system_profiles(profiles: list[dict[str, Any]]) -> dict[str, Any]:
         "reused_nodes": counters.get("reused_nodes", 0),
         "parallel_system_instances": len(profiles),
         "remote_token_usage": _token_usage_from_counters(counters, "remote"),
+        "supervisor_decompose_token_usage": _token_usage_from_counters(
+            counters,
+            "supervisor_decompose",
+        ),
+        "supervisor_synthesis_token_usage": _token_usage_from_counters(
+            counters,
+            "supervisor_synthesis",
+        ),
         "local_slm_token_usage": _token_usage_from_counters(counters, "local_slm"),
     }
     if validation_modes:
@@ -636,11 +651,19 @@ def _sum_dsl_builder_token_usage(records: list[dict[str, Any]]) -> dict[str, int
     return total
 
 
+def _dsl_builder_total_tokens(record: dict[str, Any]) -> int:
+    usage = (record.get("dsl_builder") or {}).get("token_usage")
+    if not isinstance(usage, dict):
+        return 0
+    return int(usage.get("total_tokens", 0) or 0)
+
+
 def build_summary(
     *,
     records: list[dict[str, Any]],
     output_dir: Path,
     remote_config: dict[str, Any],
+    synthesize_config: dict[str, Any] | None,
     local_slm_config: dict[str, Any] | None,
     selected_cases: list[dict[str, Any]],
     elapsed_seconds: float,
@@ -706,8 +729,7 @@ def build_summary(
     builder_agent_calls = sum(
         1
         for record in records
-        if (record.get("dsl_builder") or {}).get("mode")
-        == TABLEBENCH_DSL_MODE_BUILDER_AGENT
+        if _dsl_builder_total_tokens(record) > 0
     )
     mismatches_by_type = Counter(
         record.get("answer_type")
@@ -716,6 +738,12 @@ def build_summary(
     )
     remote_token_usage = system_profile.get("summary", {}).get("remote_token_usage", {})
     summary_profile = system_profile.get("summary", {})
+    supervisor_decompose_token_usage = normalize_remote_token_usage(
+        summary_profile.get("supervisor_decompose_token_usage", {})
+    )
+    supervisor_synthesis_token_usage = normalize_remote_token_usage(
+        summary_profile.get("supervisor_synthesis_token_usage", {})
+    )
     remote_token_summary = normalize_remote_token_usage(remote_token_usage)
     local_slm_token_summary = normalize_remote_token_usage(
         summary_profile.get("local_slm_token_usage", {})
@@ -760,7 +788,10 @@ def build_summary(
         "profile_baseline": profile_baseline,
         "dsl_builder_mode": TABLEBENCH_DSL_MODE_BUILDER_AGENT,
         "remote_llm": _config_summary(remote_config),
+        "synthesize_llm": _config_summary(synthesize_config),
         "local_slm": _config_summary(local_slm_config),
+        "supervisor_decompose_token_usage": supervisor_decompose_token_usage,
+        "supervisor_synthesis_token_usage": supervisor_synthesis_token_usage,
         "remote_calls": summary_profile.get("remote_calls", 0),
         "local_slm_calls": summary_profile.get("local_slm_calls", 0),
         "total_cases": total,

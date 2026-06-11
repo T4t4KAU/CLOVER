@@ -15,7 +15,7 @@ from clover.resource import (
 from clover.supervisor.client import extract_token_usage
 
 
-TABLEBENCH_DSL_MODE_BUILDER_AGENT = "builder_agent"
+TABLEBENCH_DSL_MODE_BUILDER_AGENT = "build_table_dsl_tool"
 
 
 @dataclass(frozen=True)
@@ -85,13 +85,11 @@ def load_tablebench_task(
     dsl_builder_slm_config: dict[str, Any] | None = None,
     dsl_builder_client: Any | None = None,
 ) -> TablebenchTask:
-    """Load one converted TableBench case and build task DSL via BuilderAgent."""
+    """Load one converted TableBench case and build task DSL."""
 
     dataset_dir = Path(tablebench_root).expanduser().resolve() / dataset_id
     if not dataset_dir.is_dir():
         raise FileNotFoundError(f"TableBench dataset not found: {dataset_dir}")
-    if dsl_builder_slm_config is None:
-        raise ValueError("TableBench BuilderAgent requires dsl_builder_slm_config")
 
     case = select_case(dataset_dir, case_id=case_id, case_index=case_index)
     selected_case_id = case["case_id"]
@@ -100,12 +98,12 @@ def load_tablebench_task(
         table_path=dataset_dir / "table.csv",
         source_file="table.csv",
         answer_type=case.get("type"),
-        slm_config=dsl_builder_slm_config,
+        slm_config=dsl_builder_slm_config or {},
         client=dsl_builder_client,
     )
     task_dsl = _with_legacy_tablebench_hints(builder_result.task_dsl, case)
     dsl_builder_metadata: dict[str, Any] = {
-        "mode": TABLEBENCH_DSL_MODE_BUILDER_AGENT,
+        "mode": builder_result.builder_mode,
         "tool_call": builder_result.tool_call,
         "diagnostics": builder_result.diagnostics,
         "raw_output": builder_result.raw_output,

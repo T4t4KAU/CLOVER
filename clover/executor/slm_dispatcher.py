@@ -24,10 +24,11 @@ from clover.supervisor.client import RemoteLLMResult
 SLM_SCHEDULER_TPTT = "tptt"
 SLM_SCHEDULER_FIFO = "fifo"
 SLM_SCHEDULER_CHOICES = frozenset({SLM_SCHEDULER_TPTT, SLM_SCHEDULER_FIFO})
-DEFAULT_MAX_PARALLEL_SLM_SEQUENCES = 8
+DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS = 64
+DEFAULT_MAX_PARALLEL_SLM_SEQUENCES = 64
 DEFAULT_MAX_PENDING_SLM_SEQUENCES = 1024
 DEFAULT_MAX_TPTT_LEAF_SEQUENCES_PER_TREE = 64
-DEFAULT_TPTT_COALESCE_MS = 5.0
+DEFAULT_TPTT_COALESCE_MS = 20.0
 DEFAULT_TPTT_PREFIX_TOKENS = 64
 
 
@@ -183,9 +184,14 @@ class LocalSlmSequenceDispatcher:
     def generate(self, request: LocalSlmSequenceRequest) -> LocalSlmSequenceResult:
         """Submit a sequence and wait synchronously for its local SLM result."""
 
+        return self.submit(request).result()
+
+    def submit(self, request: LocalSlmSequenceRequest) -> Future[LocalSlmSequenceResult]:
+        """Submit a sequence and return its future without blocking the caller."""
+
         queued = self._enqueue(request)
         self._dispatch_available()
-        return queued.future.result()
+        return queued.future
 
     def close(self, *, wait: bool = True) -> None:
         cancelled: list[SlmJob] = []

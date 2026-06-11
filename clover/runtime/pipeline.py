@@ -7,6 +7,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from collections.abc import Iterable
 from typing import Any, Callable, Generic, Iterator, TypeVar
 
 P = TypeVar("P")
@@ -121,6 +122,12 @@ class InflightStage(Generic[P, R]):
     def has_capacity(self) -> bool:
         return len(self._jobs) < self.max_workers
 
+    @property
+    def futures(self) -> tuple[Future[InflightCallResult[R]], ...]:
+        """Return currently inflight futures for cross-stage waiting."""
+
+        return tuple(job.future for job in self._jobs)
+
     def submit(
         self,
         payload: P,
@@ -138,10 +145,16 @@ class InflightStage(Generic[P, R]):
         handler: Callable[[P, InflightCallResult[R]], None],
         *,
         wait_for_one: bool = False,
+        completed_futures: set[Future[Any]] | None = None,
     ) -> int:
         if not self._jobs:
             return 0
-        done_futures = {job.future for job in self._jobs if job.future.done()}
+        if completed_futures is None:
+            done_futures = {job.future for job in self._jobs if job.future.done()}
+        else:
+            done_futures = {
+                job.future for job in self._jobs if job.future in completed_futures
+            }
         if not done_futures and wait_for_one:
             done_futures, _ = wait(
                 [job.future for job in self._jobs],
@@ -187,6 +200,18 @@ class InflightStage(Generic[P, R]):
 
     def __len__(self) -> int:
         return len(self._jobs)
+
+
+def wait_for_any_inflight(
+    stages: Iterable[InflightStage[Any, Any]],
+) -> set[Future[Any]]:
+    """Wait until any provided inflight stage has a completed future."""
+
+    futures = [future for stage in stages for future in stage.futures]
+    if not futures:
+        return set()
+    done_futures, _ = wait(futures, return_when=FIRST_COMPLETED)
+    return set(done_futures)
 
 
 def _timed_call(call: Callable[[], R]) -> InflightCallResult[R]:

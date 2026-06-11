@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import copy
 import json
+import re
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +20,7 @@ from clover.executor import (
     execute_execution_plan,
 )
 from clover.executor.slm_dispatcher import (
+    DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
     DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
     DEFAULT_MAX_PENDING_SLM_SEQUENCES,
     LocalSlmSequenceDispatcher,
@@ -70,6 +74,8 @@ VALIDATION_MODES = frozenset({VALIDATION_NONE, VALIDATION_REMOTE_SUPERVISOR})
 _STATIC_ACTION_NO_ANSWER = object()
 _STATIC_ACTION_NUMBER_TYPES = frozenset({"number", "float", "integer", "int"})
 _STATIC_ACTION_BOOLEAN_TYPES = frozenset({"boolean", "bool"})
+_STATIC_ACTION_TEXT_TYPES = frozenset({"string", "entity", "category"})
+_ACTION_FULL_RESULT_KEY = "_clover_full_res"
 
 
 @dataclass
@@ -135,6 +141,26 @@ class ActionGroupItem:
 
 
 @dataclass(frozen=True)
+class _ActionGroupRunResult:
+    order_index: int
+    item: ActionGroupItem
+    observation: dict[str, Any] | None
+    profiler: PipelineProfiler
+    elapsed: float
+    error: Exception | None = None
+
+
+@dataclass(frozen=True)
+class _ActionReportRunResult:
+    order_index: int
+    item: ActionGroupItem
+    observation: dict[str, Any]
+    supervisor_result: Any | None
+    profiler: PipelineProfiler
+    error: Exception | None = None
+
+
+@dataclass(frozen=True)
 class TableBuilderJob:
     """One table case whose DSL must be materialized inside the runtime."""
 
@@ -161,11 +187,12 @@ def run_table_reasoning_system(
     *,
     case_specs: list[TableReasoningCaseSpec | dict[str, Any]],
     remote_config: dict[str, Any],
+    synthesize_config: dict[str, Any] | None = None,
     local_slm_config: dict[str, Any] | None = None,
-    remote_batch_size: int = 16,
-    remote_concurrency: int = 2,
-    max_parallel_execution_units: int = 32,
-    max_parallel_slm_node_jobs: int = 1,
+    remote_batch_size: int = 64,
+    remote_concurrency: int = 64,
+    max_parallel_execution_units: int = 64,
+    max_parallel_slm_node_jobs: int = DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
     max_parallel_slm_sequences: int = DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
     max_pending_slm_sequences: int = DEFAULT_MAX_PENDING_SLM_SEQUENCES,
     max_retries: int = 1,
@@ -198,6 +225,7 @@ def run_table_reasoning_system(
     mixed_result = run_mixed_reasoning_system(
         table_case_specs=case_specs,
         remote_config=remote_config,
+        synthesize_config=synthesize_config,
         local_slm_config=local_slm_config,
         remote_batch_size=remote_batch_size,
         remote_concurrency=remote_concurrency,
@@ -399,7 +427,10 @@ def _record_table_builder_usage(
     task: TaskItem,
 ) -> None:
     profiler.increment("table_builder_cases")
-    usage = (task.metadata.get("dsl_builder") or {}).get("token_usage")
+    builder = task.metadata.get("dsl_builder") or {}
+    if builder.get("mode") != "builder_agent":
+        return
+    usage = builder.get("token_usage")
     if not isinstance(usage, dict):
         return
     profiler.increment("builder_agent_calls")
@@ -886,15 +917,174 @@ def _run_one_action_group(
     max_pending_slm_sequences: int,
     validation_mode: str,
     profiler: PipelineProfiler,
+    remote_concurrency: int = 1,
 ) -> bool:
     if not action_items:
         return False
     item = action_items.pop(0)
-    task = item.task
-    task.status = TASK_EXECUTING
-    with profiler.measure("action_group", items=len(item.actions)):
+    followups: list[ActionGroupItem] = []
+    ran = _run_action_groups_batch(
+        action_items=[item],
+        followup_action_items=followups,
+        final_results=final_results,
+        finalized=finalized,
+        supervisor=supervisor,
+        max_retries=max_retries,
+        remote_concurrency=remote_concurrency,
+        table_cache=table_cache,
+        local_slm_config=local_slm_config,
+        local_slm_dispatcher=local_slm_dispatcher,
+        max_parallel_execution_units=max_parallel_execution_units,
+        max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+        max_parallel_slm_sequences=max_parallel_slm_sequences,
+        max_pending_slm_sequences=max_pending_slm_sequences,
+        validation_mode=validation_mode,
+        profiler=profiler,
+    )
+    action_items.extend(followups)
+    return ran
+
+
+def _run_action_groups_batch(
+    *,
+    action_items: list[ActionGroupItem],
+    followup_action_items: list[ActionGroupItem],
+    final_results: list[CaseResult],
+    finalized: set[str],
+    supervisor: SupervisorAgent,
+    max_retries: int,
+    table_cache: dict[str, Any] | None,
+    local_slm_config: dict[str, Any] | None,
+    local_slm_dispatcher: LocalSlmSequenceDispatcher | None,
+    max_parallel_execution_units: int,
+    max_parallel_slm_node_jobs: int,
+    max_parallel_slm_sequences: int,
+    max_pending_slm_sequences: int,
+    validation_mode: str,
+    profiler: PipelineProfiler,
+    remote_concurrency: int = 1,
+) -> bool:
+    del validation_mode
+    runnable = [
+        item for item in action_items if item.task.answer_key not in finalized
+    ]
+    if not runnable:
+        return False
+
+    for item in runnable:
+        item.task.status = TASK_EXECUTING
+
+    max_workers = max(1, min(max_parallel_slm_node_jobs, len(runnable)))
+    if max_workers == 1:
+        results = [
+            _execute_action_group_for_batch(
+                order_index=index,
+                item=item,
+                table_cache=table_cache,
+                local_slm_config=local_slm_config,
+                local_slm_dispatcher=local_slm_dispatcher,
+                max_parallel_execution_units=max_parallel_execution_units,
+                max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                max_parallel_slm_sequences=max_parallel_slm_sequences,
+                max_pending_slm_sequences=max_pending_slm_sequences,
+            )
+            for index, item in enumerate(runnable)
+        ]
+    else:
+        results_by_index: dict[int, _ActionGroupRunResult] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(
+                    _execute_action_group_for_batch,
+                    order_index=index,
+                    item=item,
+                    table_cache=table_cache,
+                    local_slm_config=local_slm_config,
+                    local_slm_dispatcher=local_slm_dispatcher,
+                    max_parallel_execution_units=max_parallel_execution_units,
+                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                    max_parallel_slm_sequences=max_parallel_slm_sequences,
+                    max_pending_slm_sequences=max_pending_slm_sequences,
+                )
+                for index, item in enumerate(runnable)
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                results_by_index[result.order_index] = result
+        results = [results_by_index[index] for index in range(len(runnable))]
+
+    report_items: list[tuple[ActionGroupItem, dict[str, Any]]] = []
+    for result in results:
+        _merge_pipeline_profiler(profiler, result.profiler)
+        profiler.record(
+            "action_group",
+            items=len(result.item.actions),
+            elapsed=result.elapsed,
+        )
+        profiler.increment("action_group_calls")
+        profiler.increment("action_group_actions", len(result.item.actions))
+        if result.item.task.answer_key in finalized:
+            continue
+        if result.error is not None:
+            _finalize_failed(
+                result.item.task,
+                final_results=final_results,
+                finalized=finalized,
+                error=_error_payload(result.error),
+            )
+            continue
+        observation = result.observation
+        if observation is None:
+            _finalize_failed(
+                result.item.task,
+                final_results=final_results,
+                finalized=finalized,
+                error={
+                    "type": "ActionGroupExecutionError",
+                    "message": "action group produced no observation",
+                },
+            )
+            continue
+        if _try_finalize_static_action_group_answer(
+            item=result.item,
+            observation=observation,
+            final_results=final_results,
+            finalized=finalized,
+            profiler=profiler,
+        ):
+            continue
+        report_items.append((result.item, _public_action_group_observation(observation)))
+    if report_items:
+        _run_supervisor_action_reports_batch(
+            report_items=report_items,
+            action_items=followup_action_items,
+            final_results=final_results,
+            finalized=finalized,
+            supervisor=supervisor,
+            max_retries=max_retries,
+            remote_concurrency=remote_concurrency,
+            profiler=profiler,
+        )
+    return True
+
+
+def _execute_action_group_for_batch(
+    *,
+    order_index: int,
+    item: ActionGroupItem,
+    table_cache: dict[str, Any] | None,
+    local_slm_config: dict[str, Any] | None,
+    local_slm_dispatcher: LocalSlmSequenceDispatcher | None,
+    max_parallel_execution_units: int,
+    max_parallel_slm_node_jobs: int,
+    max_parallel_slm_sequences: int,
+    max_pending_slm_sequences: int,
+) -> _ActionGroupRunResult:
+    local_profiler = PipelineProfiler()
+    started = time.perf_counter()
+    try:
         observation = _execute_table_action_group(
-            task=task,
+            task=item.task,
             actions=item.actions,
             table_cache=table_cache,
             local_slm_config=local_slm_config,
@@ -903,29 +1093,38 @@ def _run_one_action_group(
             max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
             max_parallel_slm_sequences=max_parallel_slm_sequences,
             max_pending_slm_sequences=max_pending_slm_sequences,
-            profiler=profiler,
+            profiler=local_profiler,
         )
-        profiler.increment("action_group_calls")
-        profiler.increment("action_group_actions", len(item.actions))
-    if validation_mode == VALIDATION_NONE and _try_finalize_static_action_group_answer(
-        item=item,
-        observation=observation,
-        final_results=final_results,
-        finalized=finalized,
-        profiler=profiler,
-    ):
-        return True
-    _run_supervisor_action_report(
-        item=item,
-        observation=observation,
-        action_items=action_items,
-        final_results=final_results,
-        finalized=finalized,
-        supervisor=supervisor,
-        max_retries=max_retries,
-        profiler=profiler,
-    )
-    return True
+        return _ActionGroupRunResult(
+            order_index=order_index,
+            item=item,
+            observation=observation,
+            profiler=local_profiler,
+            elapsed=time.perf_counter() - started,
+        )
+    except Exception as exc:  # noqa: BLE001 - reported per task below.
+        return _ActionGroupRunResult(
+            order_index=order_index,
+            item=item,
+            observation=None,
+            profiler=local_profiler,
+            elapsed=time.perf_counter() - started,
+            error=exc,
+        )
+
+
+def _merge_pipeline_profiler(
+    target: PipelineProfiler,
+    child: PipelineProfiler,
+) -> None:
+    for stage_name, stage in child.stages.items():
+        target.record(
+            stage_name,
+            items=stage.items,
+            elapsed=stage.total_seconds,
+        )
+    for counter_name, amount in child.counters.items():
+        target.increment(counter_name, amount)
 
 
 def _try_finalize_static_action_group_answer(
@@ -945,6 +1144,8 @@ def _try_finalize_static_action_group_answer(
         profiler.increment("action_group_static_answer_number_hits")
     elif answer_type in _STATIC_ACTION_BOOLEAN_TYPES:
         profiler.increment("action_group_static_answer_boolean_hits")
+    elif answer_type in _STATIC_ACTION_TEXT_TYPES:
+        profiler.increment("action_group_static_answer_text_hits")
     _finalize_success(
         item.task,
         answer=answer,
@@ -962,7 +1163,12 @@ def _static_action_group_scalar_answer(
     if len(item.actions) != 1 or item.actions[0].op != "sql":
         return _STATIC_ACTION_NO_ANSWER
     answer_type = _answer_type_name(item.task)
-    if answer_type not in _STATIC_ACTION_NUMBER_TYPES | _STATIC_ACTION_BOOLEAN_TYPES:
+    allowed_answer_types = (
+        _STATIC_ACTION_NUMBER_TYPES
+        | _STATIC_ACTION_BOOLEAN_TYPES
+        | _STATIC_ACTION_TEXT_TYPES
+    )
+    if answer_type not in allowed_answer_types:
         return _STATIC_ACTION_NO_ANSWER
     obs = observation.get("obs")
     if not isinstance(obs, list) or len(obs) != 1:
@@ -974,10 +1180,29 @@ def _static_action_group_scalar_answer(
         or sql_observation.get("ok") is not True
     ):
         return _STATIC_ACTION_NO_ANSWER
-    cell = _single_answerish_cell(
+    sql = item.actions[0].q or ""
+    result_value = sql_observation.get(
+        _ACTION_FULL_RESULT_KEY,
         sql_observation.get("res"),
-        answer_key=item.task.answer_key,
     )
+    cell = _STATIC_ACTION_NO_ANSWER
+    if answer_type in _STATIC_ACTION_NUMBER_TYPES:
+        cell = _numeric_action_result_reduce_answer(
+            result_value,
+            task=item.task,
+            sql=sql,
+        )
+    if cell is _STATIC_ACTION_NO_ANSWER:
+        cell = _targeted_action_result_answer(
+            result_value,
+            task=item.task,
+            sql=sql,
+        )
+    if cell is _STATIC_ACTION_NO_ANSWER:
+        cell = _single_answerish_cell(
+            result_value,
+            answer_key=item.task.answer_key,
+        )
     if cell is _STATIC_ACTION_NO_ANSWER:
         return _STATIC_ACTION_NO_ANSWER
     normalized = _normalize_answer_for_task(item.task, cell)
@@ -992,7 +1217,446 @@ def _static_action_group_scalar_answer(
         return _STATIC_ACTION_NO_ANSWER
     if isinstance(normalized, bool):
         return normalized
+    if answer_type in _STATIC_ACTION_TEXT_TYPES:
+        if normalized is None:
+            return _STATIC_ACTION_NO_ANSWER
+        if isinstance(normalized, str) and normalized.strip():
+            return normalized
     return _STATIC_ACTION_NO_ANSWER
+
+
+def _public_action_group_observation(observation: dict[str, Any]) -> dict[str, Any]:
+    public = copy.deepcopy(observation)
+    obs = public.get("obs")
+    if isinstance(obs, list):
+        for item in obs:
+            if isinstance(item, dict):
+                item.pop(_ACTION_FULL_RESULT_KEY, None)
+    return public
+
+
+def _targeted_action_result_answer(
+    value: Any,
+    *,
+    task: TaskItem,
+    sql: str,
+) -> Any:
+    rows, columns = _table_rows_and_columns(value)
+    if not rows:
+        return _STATIC_ACTION_NO_ANSWER
+    answer_type = _answer_type_name(task)
+    target_column = _task_target_column(task)
+    selected_column = _matching_column(columns, target_column) if target_column else None
+    if len(rows) == 1:
+        row = rows[0]
+        if selected_column is not None:
+            return _row_column_value(row, selected_column, columns)
+        if len(columns) == 1:
+            return _row_column_value(row, columns[0], columns)
+        return _STATIC_ACTION_NO_ANSWER
+    if answer_type not in _STATIC_ACTION_TEXT_TYPES:
+        return _STATIC_ACTION_NO_ANSWER
+    if _sql_has_limit_one(sql):
+        return _STATIC_ACTION_NO_ANSWER
+    if selected_column is not None:
+        ranked = _targeted_metric_rank_answer(
+            rows=rows,
+            columns=columns,
+            target_column=selected_column,
+            task=task,
+        )
+        if ranked is not _STATIC_ACTION_NO_ANSWER:
+            return ranked
+    if len(columns) != 1:
+        return _STATIC_ACTION_NO_ANSWER
+    if selected_column is None:
+        selected_column = columns[0]
+    values = [
+        _row_column_value(row, selected_column, columns)
+        for row in rows
+    ]
+    text_values = [
+        str(value).strip()
+        for value in values
+        if value is not None and str(value).strip()
+    ]
+    if len(text_values) != len(rows):
+        return _STATIC_ACTION_NO_ANSWER
+    return ", ".join(text_values)
+
+
+def _targeted_metric_rank_answer(
+    *,
+    rows: list[Any],
+    columns: list[str],
+    target_column: str,
+    task: TaskItem,
+) -> Any:
+    direction = _question_rank_direction(task)
+    if direction is None:
+        return _STATIC_ACTION_NO_ANSWER
+    division_columns = _division_columns_from_question(
+        task=task,
+        columns=columns,
+        target_column=target_column,
+    )
+    if division_columns is not None:
+        numerator_column, denominator_column = division_columns
+        scored = _score_rows_by_division(
+            rows=rows,
+            columns=columns,
+            target_column=target_column,
+            numerator_column=numerator_column,
+            denominator_column=denominator_column,
+        )
+    else:
+        score_column = _metric_column_from_question(
+            task=task,
+            rows=rows,
+            columns=columns,
+            target_column=target_column,
+        )
+        if score_column is None:
+            return _STATIC_ACTION_NO_ANSWER
+        scored = _score_rows_by_column(
+            rows=rows,
+            columns=columns,
+            target_column=target_column,
+            score_column=score_column,
+        )
+    if not scored:
+        return _STATIC_ACTION_NO_ANSWER
+    scores = [score for _, score in scored]
+    best_score = max(scores) if direction == "max" else min(scores)
+    best_targets = [
+        target
+        for target, score in scored
+        if score == best_score
+    ]
+    if len(best_targets) != 1:
+        return _STATIC_ACTION_NO_ANSWER
+    target = best_targets[0]
+    if target is None:
+        return _STATIC_ACTION_NO_ANSWER
+    text = str(target).strip()
+    return text if text else _STATIC_ACTION_NO_ANSWER
+
+
+def _question_rank_direction(task: TaskItem) -> str | None:
+    question = str(task.question or "")
+    has_max = bool(
+        re.search(
+            r"\b(highest|largest|greatest|maximum|max|most|top)\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+    )
+    has_min = bool(
+        re.search(
+            r"\b(lowest|smallest|minimum|min|least|bottom)\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+    )
+    if has_max == has_min:
+        return None
+    return "max" if has_max else "min"
+
+
+def _division_columns_from_question(
+    *,
+    task: TaskItem,
+    columns: list[str],
+    target_column: str,
+) -> tuple[str, str] | None:
+    question = str(task.question or "")
+    match = re.search(r"\bdivided\s+by\b", question, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    candidates = [column for column in columns if column != target_column]
+    before = question[: match.start()]
+    defined_matches = list(re.finditer(r"\bdefined\s+as\b", before, flags=re.IGNORECASE))
+    if defined_matches:
+        before = before[defined_matches[-1].end() :]
+    after = question[match.end() :]
+    after = re.split(r"[.;?]", after, maxsplit=1)[0]
+    numerator = _unique_mentioned_column(before, candidates)
+    denominator = _unique_mentioned_column(after, candidates)
+    if numerator is None or denominator is None or numerator == denominator:
+        return None
+    return numerator, denominator
+
+
+def _metric_column_from_question(
+    *,
+    task: TaskItem,
+    rows: list[Any],
+    columns: list[str],
+    target_column: str,
+) -> str | None:
+    question = str(task.question or "")
+    candidates = [
+        column
+        for column in columns
+        if column != target_column and _numeric_values_available(rows, columns, column)
+    ]
+    if re.search(r"\bdivided\s+by\b", question, flags=re.IGNORECASE):
+        return None
+    if re.search(r"\bper\b", question, flags=re.IGNORECASE):
+        candidates = [
+            column
+            for column in candidates
+            if "per" in _compact_text(column)
+        ]
+    return _unique_mentioned_column(question, candidates)
+
+
+def _unique_mentioned_column(text: str, columns: list[str]) -> str | None:
+    matches = [
+        column
+        for column in columns
+        if _text_mentions_column(text, column)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _text_mentions_column(text: str, column: str) -> bool:
+    compact_column = _compact_text(column)
+    if not compact_column:
+        return False
+    compact_text = _compact_text(text)
+    return compact_column in compact_text
+
+
+def _compact_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+
+
+def _numeric_values_available(rows: list[Any], columns: list[str], column: str) -> bool:
+    return all(
+        _coerce_static_number(_row_column_value(row, column, columns)) is not None
+        for row in rows
+    )
+
+
+def _score_rows_by_column(
+    *,
+    rows: list[Any],
+    columns: list[str],
+    target_column: str,
+    score_column: str,
+) -> list[tuple[Any, float]]:
+    scored: list[tuple[Any, float]] = []
+    for row in rows:
+        score = _coerce_static_number(_row_column_value(row, score_column, columns))
+        if score is None:
+            return []
+        scored.append((_row_column_value(row, target_column, columns), score))
+    return scored
+
+
+def _score_rows_by_division(
+    *,
+    rows: list[Any],
+    columns: list[str],
+    target_column: str,
+    numerator_column: str,
+    denominator_column: str,
+) -> list[tuple[Any, float]]:
+    scored: list[tuple[Any, float]] = []
+    for row in rows:
+        numerator = _coerce_static_number(
+            _row_column_value(row, numerator_column, columns)
+        )
+        denominator = _coerce_static_number(
+            _row_column_value(row, denominator_column, columns)
+        )
+        if numerator is None or denominator in (None, 0):
+            return []
+        scored.append((_row_column_value(row, target_column, columns), numerator / denominator))
+    return scored
+
+
+def _numeric_action_result_reduce_answer(
+    value: Any,
+    *,
+    task: TaskItem,
+    sql: str,
+) -> Any:
+    rows, columns = _table_rows_and_columns(value)
+    if len(rows) != 1:
+        return _STATIC_ACTION_NO_ANSWER
+    if not _question_asks_average_across_range(task) or not _sql_uses_avg(sql):
+        return _STATIC_ACTION_NO_ANSWER
+    if len(columns) == 1:
+        divisor = _avg_summed_identifier_count(sql)
+        if divisor <= 1:
+            return _STATIC_ACTION_NO_ANSWER
+        number = _coerce_static_number(_row_column_value(rows[0], columns[0], columns))
+        if number is None:
+            return _STATIC_ACTION_NO_ANSWER
+        return number / divisor
+    if len(columns) <= 1:
+        return _STATIC_ACTION_NO_ANSWER
+    numbers = _numeric_values_from_row(rows[0], columns)
+    if numbers is None or len(numbers) != len(columns):
+        return _STATIC_ACTION_NO_ANSWER
+    return sum(numbers) / len(numbers)
+
+
+def _question_asks_average_across_range(task: TaskItem) -> bool:
+    question = str(task.question or "")
+    if not re.search(r"\b(avg|average|mean)\b", question, flags=re.IGNORECASE):
+        return False
+    return bool(
+        re.search(r"\bfrom\b.+\bto\b", question, flags=re.IGNORECASE)
+        or re.search(r"\bbetween\b.+\band\b", question, flags=re.IGNORECASE)
+    )
+
+
+def _sql_uses_avg(sql: str) -> bool:
+    return bool(re.search(r"\bavg\s*\(", str(sql), flags=re.IGNORECASE))
+
+
+def _avg_summed_identifier_count(sql: str) -> int:
+    for argument in _avg_function_arguments(sql):
+        if "/" in argument or "+" not in argument:
+            continue
+        identifiers = re.findall(r'"(?:[^"]|"")*"', argument)
+        if len(identifiers) > 1:
+            return len(identifiers)
+    return 0
+
+
+def _avg_function_arguments(sql: str) -> list[str]:
+    text = str(sql)
+    arguments: list[str] = []
+    for match in re.finditer(r"\bavg\s*\(", text, flags=re.IGNORECASE):
+        start = match.end()
+        depth = 1
+        in_quote = False
+        index = start
+        while index < len(text):
+            char = text[index]
+            if char == '"':
+                if in_quote and index + 1 < len(text) and text[index + 1] == '"':
+                    index += 2
+                    continue
+                in_quote = not in_quote
+            elif not in_quote:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        arguments.append(text[start:index])
+                        break
+            index += 1
+    return arguments
+
+
+def _numeric_values_from_row(row: Any, columns: list[str]) -> list[float] | None:
+    numbers: list[float] = []
+    for column in columns:
+        number = _coerce_static_number(_row_column_value(row, column, columns))
+        if number is None:
+            return None
+        numbers.append(number)
+    return numbers
+
+
+def _coerce_static_number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            pass
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip().replace(",", "")
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _table_rows_and_columns(value: Any) -> tuple[list[Any], list[str]]:
+    if isinstance(value, pd.DataFrame):
+        return value.to_dict(orient="records"), [str(column) for column in value.columns]
+    if isinstance(value, dict):
+        rows = value.get("rows")
+        if rows is None:
+            rows = value.get("data")
+        columns = value.get("cols", value.get("columns"))
+        if isinstance(rows, list):
+            normalized_columns = [
+                str(column)
+                for column in columns
+            ] if isinstance(columns, list) else _columns_from_rows(rows)
+            return rows, normalized_columns
+    if isinstance(value, list):
+        return value, _columns_from_rows(value)
+    return [], []
+
+
+def _columns_from_rows(rows: list[Any]) -> list[str]:
+    if not rows:
+        return []
+    first = rows[0]
+    if isinstance(first, dict):
+        return [str(column) for column in first.keys()]
+    return []
+
+
+def _row_column_value(row: Any, column: str, columns: list[str]) -> Any:
+    if isinstance(row, dict):
+        if column in row:
+            return row[column]
+        matched = _matching_column([str(key) for key in row], column)
+        return row.get(matched) if matched is not None else None
+    if isinstance(row, (list, tuple)):
+        try:
+            index = columns.index(column)
+        except ValueError:
+            return None
+        return row[index] if index < len(row) else None
+    return row if len(columns) == 1 else None
+
+
+def _matching_column(columns: list[str], target: str | None) -> str | None:
+    if not target:
+        return None
+    if target in columns:
+        return target
+    normalized_target = target.strip().casefold()
+    matches = [
+        column
+        for column in columns
+        if column.strip().casefold() == normalized_target
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _task_target_column(task: TaskItem) -> str | None:
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    builder = metadata.get("dsl_builder")
+    if not isinstance(builder, dict):
+        return None
+    diagnostics = builder.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return None
+    target = diagnostics.get("target_column")
+    return target.strip() if isinstance(target, str) and target.strip() else None
+
+
+def _sql_has_limit_one(sql: str) -> bool:
+    return bool(re.search(r"\blimit\s+1\b", sql, flags=re.IGNORECASE))
 
 
 def _answer_type_name(task: TaskItem) -> str:
@@ -1187,6 +1851,7 @@ def _execute_sql_action_observation(
     }
     if result.ok:
         observation["res"] = _compact_evidence_value(result.value)
+        observation[_ACTION_FULL_RESULT_KEY] = result.value
     else:
         observation["err"] = result.error
     return observation
@@ -1947,6 +2612,135 @@ def _run_supervisor_synthesis(
     )
 
 
+def _run_supervisor_action_reports_batch(
+    *,
+    report_items: list[tuple[ActionGroupItem, dict[str, Any]]],
+    action_items: list[ActionGroupItem],
+    final_results: list[CaseResult],
+    finalized: set[str],
+    supervisor: SupervisorAgent,
+    max_retries: int,
+    remote_concurrency: int,
+    profiler: PipelineProfiler,
+) -> None:
+    runnable = [
+        (index, item, observation)
+        for index, (item, observation) in enumerate(report_items)
+        if item.task.answer_key not in finalized
+    ]
+    if not runnable:
+        return
+
+    for _, item, _ in runnable:
+        item.task.status = TASK_SUPERVISOR_REVIEW
+
+    max_workers = max(1, min(remote_concurrency, len(runnable)))
+    if max_workers == 1:
+        results = [
+            _run_one_supervisor_action_report_for_batch(
+                order_index=index,
+                item=item,
+                observation=observation,
+                supervisor=supervisor,
+            )
+            for index, item, observation in runnable
+        ]
+    else:
+        results_by_index: dict[int, _ActionReportRunResult] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(
+                    _run_one_supervisor_action_report_for_batch,
+                    order_index=index,
+                    item=item,
+                    observation=observation,
+                    supervisor=supervisor,
+                )
+                for index, item, observation in runnable
+            ]
+            for future in as_completed(futures):
+                result = future.result()
+                results_by_index[result.order_index] = result
+        results = [results_by_index[index] for index, _, _ in runnable]
+
+    for result in results:
+        task = result.item.task
+        _merge_pipeline_profiler(profiler, result.profiler)
+        if task.answer_key in finalized:
+            continue
+        if result.error is not None or result.supervisor_result is None:
+            _finalize_failed(
+                task,
+                final_results=final_results,
+                finalized=finalized,
+                error=_error_payload(
+                    result.error
+                    or RuntimeError("Supervisor synthesis returned no result")
+                ),
+            )
+            continue
+        decision = result.supervisor_result.decision
+        _record_action_memory(
+            task=task,
+            actions=result.item.actions,
+            observation=result.observation,
+            decision=decision,
+        )
+        _apply_action_group_decision(
+            task=task,
+            decision=decision,
+            action_items=action_items,
+            final_results=final_results,
+            finalized=finalized,
+            max_retries=max_retries,
+        )
+
+
+def _run_one_supervisor_action_report_for_batch(
+    *,
+    order_index: int,
+    item: ActionGroupItem,
+    observation: dict[str, Any],
+    supervisor: SupervisorAgent,
+) -> _ActionReportRunResult:
+    local_profiler = PipelineProfiler()
+    try:
+        with local_profiler.measure("supervisor_synthesis", items=1):
+            supervisor_result = supervisor.synthesize(
+                local_dsl=_query_local_dsl(item.task),
+                logic_dag={"task_type": item.task.task_type, "query_plans": []},
+                observation=observation,
+                current_command={
+                    "acts": [_action_to_dict(action) for action in item.actions]
+                },
+            )
+            local_profiler.increment("supervisor_synthesis_calls")
+            _record_remote_token_usage(
+                local_profiler,
+                stage_name="supervisor_synthesis",
+                response_payload=supervisor_result.response_payload,
+            )
+        if supervisor_result.decision is None:
+            raise ValueError("Supervisor synthesis did not return a decision")
+        return _ActionReportRunResult(
+            order_index=order_index,
+            item=item,
+            observation=observation,
+            supervisor_result=supervisor_result,
+            profiler=local_profiler,
+        )
+    except Exception as exc:  # noqa: BLE001 - keep cloud/report failures task-scoped.
+        local_profiler.increment("supervisor_synthesis_failures")
+        return _ActionReportRunResult(
+            order_index=order_index,
+            item=item,
+            observation=observation,
+            supervisor_result=None,
+            profiler=local_profiler,
+            error=exc,
+        )
+
+
 def _run_supervisor_action_report(
     *,
     item: ActionGroupItem,
@@ -1958,46 +2752,15 @@ def _run_supervisor_action_report(
     max_retries: int,
     profiler: PipelineProfiler,
 ) -> None:
-    task = item.task
-    task.status = TASK_SUPERVISOR_REVIEW
-    try:
-        with profiler.measure("supervisor_synthesis", items=1):
-            supervisor_result = supervisor.synthesize(
-                local_dsl=_query_local_dsl(task),
-                logic_dag={"task_type": task.task_type, "query_plans": []},
-                observation=observation,
-                current_command={"acts": [_action_to_dict(action) for action in item.actions]},
-            )
-            profiler.increment("supervisor_synthesis_calls")
-            _record_remote_token_usage(
-                profiler,
-                stage_name="supervisor_synthesis",
-                response_payload=supervisor_result.response_payload,
-            )
-        if supervisor_result.decision is None:
-            raise ValueError("Supervisor synthesis did not return a decision")
-    except Exception as exc:  # noqa: BLE001 - keep cloud/report failures task-scoped.
-        profiler.increment("supervisor_synthesis_failures")
-        _finalize_failed(
-            task,
-            final_results=final_results,
-            finalized=finalized,
-            error=_error_payload(exc),
-        )
-        return
-    _record_action_memory(
-        task=task,
-        actions=item.actions,
-        observation=observation,
-        decision=supervisor_result.decision,
-    )
-    _apply_action_group_decision(
-        task=task,
-        decision=supervisor_result.decision,
+    _run_supervisor_action_reports_batch(
+        report_items=[(item, observation)],
         action_items=action_items,
         final_results=final_results,
         finalized=finalized,
+        supervisor=supervisor,
         max_retries=max_retries,
+        remote_concurrency=1,
+        profiler=profiler,
     )
 
 
@@ -2508,6 +3271,14 @@ def _profile_with_summary(
         "merged_plan_count": profile.get("counters", {}).get("merged_plan_count", 0),
         "reused_nodes": profile.get("counters", {}).get("reused_nodes", 0),
         "remote_token_usage": _remote_token_usage_summary(profile.get("counters", {})),
+        "supervisor_decompose_token_usage": _remote_stage_token_usage_summary(
+            profile.get("counters", {}),
+            "supervisor_decompose",
+        ),
+        "supervisor_synthesis_token_usage": _remote_stage_token_usage_summary(
+            profile.get("counters", {}),
+            "supervisor_synthesis",
+        ),
         "local_slm_token_usage": _local_slm_token_usage_summary(
             profile.get("counters", {})
         ),
@@ -2547,6 +3318,21 @@ def _remote_token_usage_summary(counters: dict[str, int]) -> dict[str, int]:
         "output_tokens": int(counters.get("remote_output_tokens", 0) or 0),
         "reasoning_tokens": int(counters.get("remote_reasoning_tokens", 0) or 0),
         "total_tokens": int(counters.get("remote_total_tokens", 0) or 0),
+    }
+
+
+def _remote_stage_token_usage_summary(
+    counters: dict[str, int],
+    stage_name: str,
+) -> dict[str, int]:
+    return {
+        "input_tokens": int(counters.get(f"{stage_name}_input_tokens", 0) or 0),
+        "cached_input_tokens": int(
+            counters.get(f"{stage_name}_cached_input_tokens", 0) or 0
+        ),
+        "output_tokens": int(counters.get(f"{stage_name}_output_tokens", 0) or 0),
+        "reasoning_tokens": int(counters.get(f"{stage_name}_reasoning_tokens", 0) or 0),
+        "total_tokens": int(counters.get(f"{stage_name}_total_tokens", 0) or 0),
     }
 
 

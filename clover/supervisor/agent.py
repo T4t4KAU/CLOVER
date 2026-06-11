@@ -51,9 +51,13 @@ class SupervisorAgent:
         *,
         remote_config: dict[str, Any],
         client: Any | None = None,
+        synthesize_config: dict[str, Any] | None = None,
+        synthesize_client: Any | None = None,
     ) -> None:
         self.remote_config = remote_config
         self.client = client
+        self.synthesize_config = synthesize_config
+        self.synthesize_client = synthesize_client
 
     def step(self, action: str, **kwargs: Any) -> SupervisorStepResult:
         """Run one Supervisor action."""
@@ -109,8 +113,12 @@ class SupervisorAgent:
         )
         llm_result = generate_remote_text(
             prompt=prompt,
-            remote_config=self.remote_config,
-            client=self.client,
+            remote_config=self.synthesize_config or self.remote_config,
+            client=(
+                self.synthesize_client
+                if self.synthesize_config is not None
+                else self.client
+            ),
         )
         decision = parse_supervisor_decision(llm_result.text)
         return SupervisorStepResult(

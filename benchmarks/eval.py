@@ -28,9 +28,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 loaded_warnings = sys.modules.get("warnings")
 loaded_warnings_file = getattr(loaded_warnings, "__file__", None)
-if loaded_warnings_file and Path(loaded_warnings_file).resolve() == SCRIPT_DIR / "warnings.py":
+shadow_warning_paths = {
+    SCRIPT_DIR / "warnings.py",
+    REPO_ROOT / "warnings.py",
+}
+if loaded_warnings_file and Path(loaded_warnings_file).resolve() in shadow_warning_paths:
     del sys.modules["warnings"]
+warnings_import_path = sys.path[:]
+sys.path = [
+    path
+    for path in sys.path
+    if Path(path or os.getcwd()).resolve() not in {SCRIPT_DIR, REPO_ROOT}
+]
 import warnings as _warnings
+sys.path = warnings_import_path
 
 _warnings.simplefilter("ignore")
 
@@ -38,6 +49,7 @@ from benchmarks.energy import EnergyProfiler
 from benchmarks.warnings import suppress_benchmark_warnings
 from clover.config import load_model_config, load_optional_model_config
 from clover.executor.slm_dispatcher import (
+    DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
     DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
     DEFAULT_MAX_PENDING_SLM_SEQUENCES,
 )
@@ -53,6 +65,10 @@ DEFAULT_STATIC_TOOL_RUN_DIR = (
 )
 DEFAULT_EDGE_ELECTRICITY_PRICE_USD_PER_KWH = 0.1883
 DEFAULT_MAX_CONTEXT_CHARS = 500_000
+DEFAULT_REMOTE_BATCH_SIZE = 64
+DEFAULT_REMOTE_CONCURRENCY = 64
+DEFAULT_MAX_PARALLEL_EXECUTION_UNITS = 64
+DEFAULT_EVAL_WORKERS = 64
 EVAL_MODE_IN_CONTEXT = "inContext"
 SUPPORTED_EVAL_MODES = frozenset(
     {"closedBook", "inContext", "inContext_reverse", "oracle", "oracle_reverse"}
@@ -71,6 +87,12 @@ LOCAL_SLM_ENV_PREFIXES = (
     "CLOVER_SLM",
     "LOCAL_SLM",
     "SLM",
+)
+SYNTHESIZE_LLM_ENV_PREFIXES = (
+    "CLOVER_SYNTHESIZE_LLM",
+    "CLOVER_SYNTHESIS_LLM",
+    "SYNTHESIZE_LLM",
+    "SYNTHESIS_LLM",
 )
 SAMPLING_CONFIG_KEYS = (
     "temperature",
@@ -209,9 +231,11 @@ def _run_selected_mode(
         from benchmarks.tablebench.eval import run_tablebench_eval
 
         remote_config = _load_remote_config(args)
+        synthesize_config = _load_synthesize_config(args)
         local_slm_config = _load_local_config(args)
         print_eval_startup_banner(
             remote_config=remote_config,
+            synthesize_config=synthesize_config,
             local_slm_config=local_slm_config,
             workflow="table_reasoning.tablebench",
             remote_batch_size=args.remote_batch_size,
@@ -225,12 +249,14 @@ def _run_selected_mode(
         preflight_model_api_checks(
             args=args,
             remote_config=remote_config,
+            synthesize_config=synthesize_config,
             local_slm_config=local_slm_config,
         )
         return run_tablebench_eval(
             tablebench_root=tablebench_root,
             output_dir=output_dir,
             remote_config=remote_config,
+            synthesize_config=synthesize_config,
             local_slm_config=local_slm_config,
             max_cases=args.max_cases,
             case_ids=case_ids,
@@ -448,23 +474,32 @@ def _parse_args() -> argparse.Namespace:
     modes.add_argument("--all-databench-tables", action="store_true")
 
     parser.add_argument("--remote-llm-config", type=Path, default=_default_remote_llm_config_path())
+    parser.add_argument("--synthesize-llm-config", type=Path, default=None)
     parser.add_argument("--local-slm-config", type=Path, default=_default_local_slm_config_path())
     parser.add_argument("--run-dir", type=Path, default=DEFAULT_STATIC_TOOL_RUN_DIR)
     parser.add_argument("--max-cases", type=int, default=None)
     parser.add_argument("--sample-size", type=int, default=None)
     parser.add_argument("--seed", type=int, default=20260528)
-    parser.add_argument("--max-workers", type=int, default=None)
+    parser.add_argument("--max-workers", type=int, default=DEFAULT_EVAL_WORKERS)
     parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument("--validation-mode", choices=("none", "remote_supervisor"), default="none")
-    parser.add_argument("--remote-batch-size", type=int, default=16)
-    parser.add_argument("--remote-concurrency", type=int, default=2)
+    parser.add_argument("--remote-batch-size", type=int, default=DEFAULT_REMOTE_BATCH_SIZE)
+    parser.add_argument("--remote-concurrency", type=int, default=DEFAULT_REMOTE_CONCURRENCY)
     parser.add_argument(
         "--slm-scheduler",
         choices=tuple(sorted(SLM_SCHEDULER_CHOICES)),
         default=os.environ.get("CLOVER_SLM_SCHEDULER", SLM_SCHEDULER_TPTT),
     )
-    parser.add_argument("--max-parallel-execution-units", type=int, default=32)
-    parser.add_argument("--max-parallel-slm-node-jobs", type=int, default=1)
+    parser.add_argument(
+        "--max-parallel-execution-units",
+        type=int,
+        default=DEFAULT_MAX_PARALLEL_EXECUTION_UNITS,
+    )
+    parser.add_argument(
+        "--max-parallel-slm-node-jobs",
+        type=int,
+        default=DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
+    )
     parser.add_argument(
         "--max-parallel-slm-sequences",
         type=int,
@@ -569,6 +604,15 @@ def _load_remote_config(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def _load_synthesize_config(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.synthesize_llm_config is None:
+        return None
+    return load_model_config(
+        _resolve_path(args.synthesize_llm_config),
+        env_prefixes=SYNTHESIZE_LLM_ENV_PREFIXES,
+    )
+
+
 def _load_local_config(args: argparse.Namespace) -> dict[str, Any] | None:
     config = load_optional_model_config(
         _resolve_path(args.local_slm_config),
@@ -593,7 +637,8 @@ def preflight_model_api_checks(
     *,
     args: argparse.Namespace,
     remote_config: dict[str, Any] | None,
-    local_slm_config: dict[str, Any] | None,
+    synthesize_config: dict[str, Any] | None = None,
+    local_slm_config: dict[str, Any] | None = None,
 ) -> None:
     """Fail early when configured model endpoints cannot serve a tiny request."""
 
@@ -604,6 +649,8 @@ def preflight_model_api_checks(
     checks: list[tuple[str, dict[str, Any]]] = []
     if remote_config is not None:
         checks.append(("Remote LLM", remote_config))
+    if synthesize_config is not None:
+        checks.append(("Synthesize LLM", synthesize_config))
     if local_slm_config is not None:
         checks.append(("Local SLM", local_slm_config))
     if not checks:
@@ -735,8 +782,9 @@ def _static_tool_output_dir(args: argparse.Namespace, *, output_dir: Path) -> Pa
 def print_eval_startup_banner(
     *,
     remote_config: dict[str, Any],
-    local_slm_config: dict[str, Any] | None,
-    workflow: str,
+    synthesize_config: dict[str, Any] | None = None,
+    local_slm_config: dict[str, Any] | None = None,
+    workflow: str = "unknown",
     remote_batch_size: int | None = None,
     remote_concurrency: int | None = None,
     max_parallel_execution_units: int | None = None,
@@ -768,6 +816,10 @@ def print_eval_startup_banner(
     print("Remote LLM:", file=sys.stderr)
     for line in _model_config_lines(remote_config):
         print(f"  {line}", file=sys.stderr)
+    if synthesize_config is not None:
+        print("Synthesize LLM:", file=sys.stderr)
+        for line in _model_config_lines(synthesize_config):
+            print(f"  {line}", file=sys.stderr)
     print("Local SLM:", file=sys.stderr)
     if local_slm_config is None:
         print("  not configured", file=sys.stderr)

@@ -28,6 +28,7 @@ class EvalRuntimeGroupingTest(unittest.TestCase):
                 results = tablebench_eval._run_system_groups(
                     spec_groups=[[_spec("case_1"), _spec("case_2")], [_spec("case_3")]],
                     remote_config={"model": "fake"},
+                    synthesize_config=None,
                     local_slm_config=None,
                     remote_batch_size=4,
                     remote_concurrency=2,
@@ -86,6 +87,7 @@ class EvalRuntimeGroupingTest(unittest.TestCase):
                     output_dir=output_dir,
                     selected_cases=selected_cases,
                     remote_config={"model": "fake"},
+                    synthesize_config=None,
                     local_slm_config={"model": "fake-slm"},
                     max_workers=None,
                     max_retries=1,

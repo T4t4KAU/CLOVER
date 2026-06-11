@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from clover.resource.dsl_builder import (
@@ -85,7 +83,7 @@ class TableDslBuilderTest(unittest.TestCase):
             {"question", "source_id", "source_file"},
         )
 
-    def test_builder_agent_selects_tool_without_table_schema(self) -> None:
+    def test_builder_agent_entry_uses_static_tool_without_slm(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"
             table_path.write_text(
@@ -97,15 +95,7 @@ class TableDslBuilderTest(unittest.TestCase):
 
             with patch(
                 "clover.resource.dsl_builder._generate_builder_slm_text",
-                return_value=SimpleNamespace(
-                    text=json.dumps(
-                        {
-                            "tool": "build_table_dsl",
-                            "arguments": {"source_id": 0},
-                        }
-                    ),
-                    response_payload={"usage": {"prompt_tokens": 12, "completion_tokens": 5}},
-                ),
+                side_effect=AssertionError("BuilderAgent should be static"),
             ):
                 result = build_table_task_dsl_with_builder_agent(
                     question="Which nation has a total of 13 medals?",
@@ -114,12 +104,12 @@ class TableDslBuilderTest(unittest.TestCase):
                     slm_config={"api_type": "chat_completions", "model": "fake"},
                 )
 
-        self.assertEqual(result.builder_mode, "builder_agent")
+        self.assertEqual(result.builder_mode, "build_table_dsl_tool")
         self.assertEqual(result.tool_call["tool"], BUILD_TABLE_DSL_TOOL_NAME)
         self.assertEqual(result.task_dsl["answer"]["type"], "string")
         self.assertNotIn("hints", result.task_dsl)
-        self.assertNotIn("secret_column", result.prompt)
-        self.assertEqual(result.response_payload["usage"]["prompt_tokens"], 12)
+        self.assertEqual(result.prompt, "")
+        self.assertEqual(result.response_payload, {})
 
     def test_table_profile_truncates_preview(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
