@@ -12,6 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    import pyarrow.feather as _feather
+
+    _HAS_FEATHER = True
+except ImportError:
+    _HAS_FEATHER = False
+
 from clover.executor.result import summarize_output
 from clover.executor.resources.materializers import (
     ResourceMaterializationContext,
@@ -156,8 +163,11 @@ class FileSpilledResourceObject(ResourceObject):
         if self.cached_value is None:
             if self.path is None or not self.path.is_file():
                 raise ResourceError(f"Missing spilled resource file: {self.id}")
-            with self.path.open("rb") as handle:
-                self.cached_value = pickle.load(handle)
+            if self.serializer == "feather" and _HAS_FEATHER:
+                self.cached_value = _feather.read_feather(self.path)
+            else:
+                with self.path.open("rb") as handle:
+                    self.cached_value = pickle.load(handle)
             self.cached_size_bytes = estimate_value_size(self.cached_value)
         self.last_access = time.monotonic()
         return self.cached_value
@@ -234,8 +244,16 @@ def spilled_file_resource(
 ) -> FileSpilledResourceObject:
     path.parent.mkdir(parents=True, exist_ok=True)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as handle:
-        pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    is_dataframe = _is_dataframe_like(value)
+    if is_dataframe and _HAS_FEATHER:
+        _feather.write_feather(value, path)
+        serializer = "feather"
+    else:
+        with path.open("wb") as handle:
+            pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        serializer = "pickle"
+
     size = path.stat().st_size
     metadata = _metadata_from_value(value)
     summary = summarize_output(value)
@@ -243,7 +261,7 @@ def spilled_file_resource(
         "id": resource_id,
         "kind": infer_resource_kind(value),
         "storage": "file_spilled",
-        "serializer": "pickle",
+        "serializer": serializer,
         "path": str(path),
         "size_bytes": size,
         "producer_node": producer_node,
@@ -266,6 +284,7 @@ def spilled_file_resource(
         path=path,
         metadata_path=metadata_path,
         retained=retained,
+        serializer=serializer,
     )
 
 

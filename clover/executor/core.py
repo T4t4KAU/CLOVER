@@ -25,6 +25,7 @@ from clover.executor.slm_dispatcher import (
     DEFAULT_MAX_PENDING_SLM_SEQUENCES,
     LocalSlmSequenceDispatcher,
 )
+from clover.tools.table_reasoning import TABLE_REASONING_STATIC_TOOLS
 
 
 class Executor:
@@ -279,6 +280,13 @@ class Executor:
         ):
             return [(unit, self._run_one_unit(unit, context)) for unit in units]
 
+        # Prioritize Fast Path (deterministic) units so they complete
+        # immediately and release thread-pool slots for SLM-heavy units.
+        ordered = sorted(
+            units,
+            key=lambda u: (0 if u.op in TABLE_REASONING_STATIC_TOOLS else 1, u.index),
+        )
+
         max_workers = min(max_parallel_execution_units, len(units))
         records: list[tuple[ExecutionUnit, NodeExecutionRecord]] = []
         pool = ThreadPoolExecutor(max_workers=max_workers)
@@ -287,7 +295,7 @@ class Executor:
         abandon_timed_out = False
         try:
             futures = {
-                pool.submit(self._run_one_unit, unit, context): unit for unit in units
+                pool.submit(self._run_one_unit, unit, context): unit for unit in ordered
             }
             pending = set(futures)
             deadlines = _future_deadlines(

@@ -19,6 +19,8 @@ from clover.executor.resources.objects import (
     FileExternalResourceObject,
     MemoryResourceObject,
     ResourceObject,
+    _HAS_FEATHER,
+    _is_dataframe_like,
     external_file_resource,
     memory_resource,
     spilled_file_resource,
@@ -33,8 +35,8 @@ SAFE_ID_PATTERN = re.compile(r"[^A-Za-z0-9_.-]+")
 class ResourceLimits:
     """Capacity policy for one executor run."""
 
-    memory_budget_bytes: int = 1024 * 1024 * 1024
-    spill_threshold_bytes: int = 256 * 1024 * 1024
+    memory_budget_bytes: int = 4 * 1024 * 1024 * 1024  # 4 GB
+    spill_threshold_bytes: int = 512 * 1024 * 1024  # 512 MB
     spill_root: Path = DEFAULT_SPILL_ROOT
 
     def __post_init__(self) -> None:
@@ -283,7 +285,8 @@ class ResourceStore:
         retained: bool,
     ) -> ResourceObject:
         safe_name = _safe_resource_name(name)
-        path = self.spill_dir / "resources" / f"{safe_name}.pkl"
+        ext = "feather" if (_is_dataframe_like(value) and _HAS_FEATHER) else "pkl"
+        path = self.spill_dir / "resources" / f"{safe_name}.{ext}"
         metadata_path = self.spill_dir / "metadata" / f"{safe_name}.json"
         resource = spilled_file_resource(
             name,

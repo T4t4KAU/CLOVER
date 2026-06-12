@@ -109,7 +109,14 @@ class RuntimeLoop:
 
             if self.adapter.has_local_work():
                 if self.adapter.execute_local_once():
-                    continue
+                    # Immediately drain remote results that arrived during
+                    # the (blocking) local execution so their commands can
+                    # be parsed without waiting for the next loop iteration.
+                    self.adapter.drain_remote(wait_for_one=False)
+                    if self.adapter.has_commands():
+                        self.adapter.parse_commands()
+                    if self._advance_barriers():
+                        continue
 
             if self._advance_barriers():
                 continue

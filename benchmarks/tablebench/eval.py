@@ -35,6 +35,8 @@ from clover.runtime import (
     run_table_reasoning_system,
 )
 
+import pandas as pd
+
 
 TOKEN_KEYS = (
     "input_tokens",
@@ -372,6 +374,41 @@ def _builder_case_spec(
     )
 
 
+def _resolve_table_paths(case_specs: list[TableReasoningCaseSpec]) -> list[Path]:
+    """Resolve unique absolute table paths from case specs for pre-warming."""
+
+    paths: set[Path] = set()
+    for spec in case_specs:
+        base_dir = Path(spec.base_dir).expanduser()
+        source_file = "table.csv"
+        builder = spec.builder or spec.metadata.get("builder")
+        if isinstance(builder, dict):
+            source_file = str(builder.get("source_file") or "table.csv")
+            table_path = str(builder.get("table_path") or source_file)
+        else:
+            table_path = source_file
+        path = Path(table_path).expanduser()
+        if not path.is_absolute():
+            path = base_dir / path
+        paths.add(path.resolve())
+    return list(paths)
+
+
+def _warm_table_cache(case_specs: list[TableReasoningCaseSpec]) -> dict[str, pd.DataFrame]:
+    """Pre-load all unique table CSV files into a shared cache to avoid
+    repeated disk I/O across batches."""
+
+    table_cache: dict[str, pd.DataFrame] = {}
+    for path in _resolve_table_paths(case_specs):
+        if not path.is_file():
+            continue
+        try:
+            table_cache[str(path)] = pd.read_csv(path, low_memory=False)
+        except Exception:
+            pass
+    return table_cache
+
+
 def _run_system_groups(
     *,
     spec_groups: list[list[TableReasoningCaseSpec]],
@@ -401,6 +438,7 @@ def _run_system_groups(
         return []
 
     def run_all() -> Any:
+        table_cache = _warm_table_cache(all_specs) if all_specs else {}
         return run_table_reasoning_system(
             case_specs=all_specs,
             remote_config=remote_config,
@@ -416,6 +454,7 @@ def _run_system_groups(
             validation_mode=validation_mode,
             case_result_callback=case_result_callback,
             profile_baseline=profile_baseline,
+            table_cache=table_cache,
         )
 
     del max_workers

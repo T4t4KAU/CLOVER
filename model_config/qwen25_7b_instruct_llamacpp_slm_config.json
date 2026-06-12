@@ -1,0 +1,18 @@
+{
+  "provider": "local",
+  "api_type": "chat_completions",
+  "api_key": "EMPTY",
+  "base_url": "http://127.0.0.1:8080/v1",
+  "model": "qwen25-7b",
+  "timeout": 1800,
+  "max_retries": 2,
+  "max_tokens": 512,
+  "temperature": 0,
+  "top_p": 1.0,
+  "http2": false,
+  "trust_env": false,
+  "agent_loop_max_iterations": 3,
+  "tptt_coalesce_ms": 60,
+  "tptt_prefix_tokens": 200,
+  "max_tptt_leaf_sequences_per_tree": 128
+}

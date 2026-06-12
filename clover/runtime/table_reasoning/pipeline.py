@@ -1226,12 +1226,20 @@ def _static_action_group_scalar_answer(
 
 
 def _public_action_group_observation(observation: dict[str, Any]) -> dict[str, Any]:
-    public = copy.deepcopy(observation)
-    obs = public.get("obs")
-    if isinstance(obs, list):
-        for item in obs:
-            if isinstance(item, dict):
-                item.pop(_ACTION_FULL_RESULT_KEY, None)
+    # Build a safe copy without the full-result payloads (typically large
+    # DataFrames).  A full deepcopy would double-copy those large values even
+    # though they are immediately discarded.
+    public: dict[str, Any] = {}
+    for key, value in observation.items():
+        if key == "obs" and isinstance(value, list):
+            public[key] = [
+                {k: v for k, v in item.items() if k != _ACTION_FULL_RESULT_KEY}
+                if isinstance(item, dict)
+                else item
+                for item in value
+            ]
+        else:
+            public[key] = value
     return public
 
 
