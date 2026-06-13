@@ -21,6 +21,7 @@ from clover.executor.resources.objects import (
     ResourceObject,
     _HAS_FEATHER,
     _is_dataframe_like,
+    estimate_value_size,
     external_file_resource,
     memory_resource,
     spilled_file_resource,
@@ -206,7 +207,7 @@ class ResourceStore:
             self._sources.clear()
             try:
                 shutil.rmtree(self.spill_dir)
-            except FileNotFoundError:
+            except (FileNotFoundError, OSError):
                 pass
 
     def current_memory_bytes(self) -> int:
@@ -226,12 +227,7 @@ class ResourceStore:
         producer_node: str | None,
         retained: bool,
     ) -> ResourceObject:
-        estimated_size = memory_resource(
-            name,
-            value,
-            producer_node=producer_node,
-            retained=retained,
-        ).estimate_size()
+        estimated_size = estimate_value_size(value)
         if estimated_size > self.limits.spill_threshold_bytes:
             return self._spill_value(
                 name,
@@ -260,8 +256,11 @@ class ResourceStore:
                 producer_node=candidate.producer_node,
                 retained=candidate.retained,
             )
-            self._artifacts[candidate.id] = spilled
+            # Close the in-memory resource before replacing the dictionary entry
+            # so that an exception in close() does not leave the store with a
+            # spilled resource whose in-memory value was never released.
             candidate.close()
+            self._artifacts[candidate.id] = spilled
 
     def _spill_candidate(self) -> MemoryResourceObject | None:
         candidates = [

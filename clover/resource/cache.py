@@ -423,12 +423,34 @@ class _BuildLock:
 
     def __enter__(self) -> "_BuildLock":
         started = time.monotonic()
+        # Use a temp-file + os.link atomic rename to avoid the TOCTOU race
+        # between _is_stale() and _unlink().  os.link raises FileExistsError
+        # atomically if the target already exists, so only one process wins.
+        temp_path = self.path.with_suffix(f".tmp_{os.getpid()}_{uuid.uuid4().hex[:8]}")
         while True:
             try:
-                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with temp_path.open("w", encoding="utf-8") as handle:
+                    json.dump(
+                        {
+                            "pid": os.getpid(),
+                            "created_at": time.time(),
+                        },
+                        handle,
+                        ensure_ascii=False,
+                    )
+                os.link(str(temp_path), str(self.path))
+                # We won the lock — link succeeded because self.path did not exist.
+                temp_path.unlink()
+                return self
             except FileExistsError:
+                temp_path.unlink(missing_ok=True)
                 if self._is_stale():
-                    self._unlink()
+                    # Stale lock: try a contested unlink + immediate link to
+                    # reduce the window where another process also unlinks.
+                    try:
+                        self.path.unlink()
+                    except FileNotFoundError:
+                        pass
                     continue
                 if time.monotonic() - started >= self.timeout_seconds:
                     raise ResourceCacheError(
@@ -436,17 +458,6 @@ class _BuildLock:
                     )
                 time.sleep(0.1)
                 continue
-
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(
-                    {
-                        "pid": os.getpid(),
-                        "created_at": time.time(),
-                    },
-                    handle,
-                    ensure_ascii=False,
-                )
-            return self
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
         self._unlink()

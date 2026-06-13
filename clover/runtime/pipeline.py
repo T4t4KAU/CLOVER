@@ -187,7 +187,12 @@ class InflightStage(Generic[P, R]):
         return len(ready)
 
     def close(self) -> None:
-        self._executor.shutdown(wait=True)
+        # Cancel any still-running futures so shutdown does not block
+        # indefinitely on a hung remote call.
+        for job in self._jobs:
+            job.future.cancel()
+        self._jobs.clear()
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def __enter__(self) -> "InflightStage[P, R]":
         return self

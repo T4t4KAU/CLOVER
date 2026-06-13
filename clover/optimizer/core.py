@@ -852,7 +852,10 @@ def _validate_physical_plan(physical_plan: dict[str, Any]) -> None:
                 f"Physical node {node_id} has invalid dependencies: "
                 f"{invalid_dependencies}"
             )
-        produced_outputs.add(node.get("output"))
+        output = node.get("output")
+        if not isinstance(output, str) or not output:
+            raise OptimizationError(f"Physical node {node_id} missing output")
+        produced_outputs.add(output)
 
 
 def _validate_document_physical_plan(

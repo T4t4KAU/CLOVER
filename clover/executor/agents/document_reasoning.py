@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from clover.executor.agents.base import BaseNodeAgent, FastPathDecision
@@ -109,34 +108,16 @@ def _load_json_object(text: str) -> Any:
     try:
         return json.loads(stripped)
     except json.JSONDecodeError:
-        return json.loads(_first_json_object(stripped))
+        return _load_first_json_object(stripped)
 
 
-def _first_json_object(text: str) -> str:
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.I)
-    if fenced:
-        return fenced.group(1).strip()
+def _load_first_json_object(text: str) -> Any:
     start = text.find("{")
     if start < 0:
         raise ValueError("No JSON object found in document worker response")
-    depth = 0
-    in_string = False
-    escape = False
-    for index, char in enumerate(text[start:], start=start):
-        if in_string:
-            if escape:
-                escape = False
-            elif char == "\\":
-                escape = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : index + 1]
-    raise ValueError("Unterminated JSON object in document worker response")
+    decoder = json.JSONDecoder()
+    try:
+        obj, _end = decoder.raw_decode(text, idx=start)
+    except json.JSONDecodeError as exc:
+        raise ValueError(str(exc)) from exc
+    return obj

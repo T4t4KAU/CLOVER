@@ -1090,7 +1090,10 @@ def _namespace_has_activity(result: ExecutionResult, namespace: str) -> bool:
             value = trace.get(key)
             if isinstance(value, str) and value.startswith(prefix):
                 return True
-    return result.ok
+    # No evidence that this namespace participated in the execution result.
+    # Returning result.ok here would incorrectly treat a namespace with zero
+    # activity as successful, causing downstream code to produce empty answers.
+    return False
 
 
 def _requeue_entry(adapter: _MixedRuntimeAdapter, entry: _PlanEntry) -> None:

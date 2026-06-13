@@ -8,6 +8,7 @@ and returns jobs in a prefix-friendly leaf order.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right, insort
+import heapq
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -62,16 +63,18 @@ class _TemplateNode:
 class _LeafQueue:
     rank: int
     spec: TemplateLeafSpec
-    items: list[tuple[tuple[str, int, int, str], SlmJob]] = field(default_factory=list)
+    _heap: list[tuple[tuple[str, int, int, str], int, SlmJob]] = field(default_factory=list)
+    _seq: int = 0
 
     def push(self, job: SlmJob) -> None:
-        insort(self.items, (job.locality_key, job))
+        self._seq += 1
+        heapq.heappush(self._heap, (job.locality_key, self._seq, job))
 
     def pop(self) -> SlmJob:
-        return self.items.pop(0)[1]
+        return heapq.heappop(self._heap)[2]
 
     def __bool__(self) -> bool:
-        return bool(self.items)
+        return bool(self._heap)
 
 
 class ThreadedPrefixTemplateQueue:

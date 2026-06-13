@@ -124,8 +124,9 @@ def generate_remote_text(
 
     for attempt_index in range(attempts):
         current_client = client or create_remote_llm_client(remote_config)
+        owned = client is None
         try:
-            return _generate_remote_text_once(
+            result = _generate_remote_text_once(
                 prompt,
                 remote_config=remote_config,
                 client=current_client,
@@ -133,13 +134,16 @@ def generate_remote_text(
         except RETRYABLE_REMOTE_ERRORS:
             if attempt_index + 1 >= attempts:
                 raise
-            _close_client_if_owned(current_client, owned=client is None)
+            _close_client_if_owned(current_client, owned=owned)
             sleep_seconds = min(
                 max_sleep,
                 initial_sleep * (2**attempt_index),
             )
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
+            continue
+        _close_client_if_owned(current_client, owned=owned)
+        return result
 
     raise RemoteLLMConfigError("Remote LLM retry attempts must be positive")
 

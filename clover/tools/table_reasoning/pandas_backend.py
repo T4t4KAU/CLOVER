@@ -313,12 +313,29 @@ class PandasTableReasoningExecutor:
         if not sort_columns:
             return table.copy()
 
-        sorted_frame = frame.sort_values(
-            by=sort_columns,
-            ascending=ascending,
-            na_position=null_positions[0] if null_positions else "last",
-            kind="mergesort",
-        )
+        # pandas sort_values only accepts a single na_position value. When
+        # multiple sort keys specify conflicting null positions, partition the
+        # sort into sequential single-key passes so each key respects its own
+        # null ordering.  Stable sort (mergesort) preserves earlier key order.
+        unique_null_positions = set(null_positions)
+        if len(unique_null_positions) <= 1:
+            sorted_frame = frame.sort_values(
+                by=sort_columns,
+                ascending=ascending,
+                na_position=null_positions[0] if null_positions else "last",
+                kind="mergesort",
+            )
+        else:
+            # Sort from the least significant key to the most significant key
+            # using stable sort so that earlier passes are preserved.
+            sorted_frame = frame
+            for i in reversed(range(len(sort_columns))):
+                sorted_frame = sorted_frame.sort_values(
+                    by=sort_columns[i],
+                    ascending=ascending[i],
+                    na_position=null_positions[i],
+                    kind="mergesort",
+                )
         return PandasTable(
             sorted_frame.drop(
                 columns=[column for column in sort_columns if column.startswith("__sort_key_")],
