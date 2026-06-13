@@ -119,3 +119,4 @@ temp/
 docker-compose.override.yml
 
 benchmark/
+scripts/

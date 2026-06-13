@@ -928,7 +928,9 @@ def _city_average_plan(table_path: Path, *, task_type: str) -> dict:
                                 "left": {"type": "column", "name": "city"},
                                 "right": {
                                     "type": "literal",
-                                    "value": "Winnipeg",
+                                    # Misspelled so static literal binding cannot repair it;
+                                    # these tests need to exercise the agent-loop fallback.
+                                    "value": "Winnippeg",
                                     "value_type": "string",
                                 },
                             },
