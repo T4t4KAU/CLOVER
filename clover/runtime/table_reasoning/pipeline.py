@@ -76,6 +76,12 @@ _STATIC_ACTION_NUMBER_TYPES = frozenset({"number", "float", "integer", "int"})
 _STATIC_ACTION_BOOLEAN_TYPES = frozenset({"boolean", "bool"})
 _STATIC_ACTION_TEXT_TYPES = frozenset({"string", "entity", "category"})
 _ACTION_FULL_RESULT_KEY = "_clover_full_res"
+_CACHE_MISSING = object()
+
+# Maps normalised SQL text to the (evidence_key, DataFrame) produced by a
+# preceding sql action within the same action group.  Used to avoid
+# re-executing an identical seed SQL for a subsequent inspect/analyze action.
+_PriorSqlResults = dict[str, tuple[str, pd.DataFrame]]
 
 
 @dataclass
@@ -716,6 +722,13 @@ def _load_first_json_object(text: str, original_error: json.JSONDecodeError) -> 
 def _normalize_sqls(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         return (extract_sql_statement(value),)
+    if isinstance(value, dict):
+        if "final" in value:
+            raise SqlParseError("sqls must not include final")
+        for key in ("sql", "q", "sqls"):
+            if key in value:
+                return _normalize_sqls(value.get(key))
+        raise SqlParseError("sqls must include sql, q, or sqls")
     if not isinstance(value, list):
         raise SqlParseError("sqls must be a list of SQL strings")
     sqls: list[str] = []
@@ -1740,24 +1753,29 @@ def _execute_table_action_group(
     max_pending_slm_sequences: int,
     profiler: PipelineProfiler,
 ) -> dict[str, Any]:
-    observations = []
+    observations: list[dict[str, Any]] = []
+    prior_sql: _PriorSqlResults = {}
     for index, action in enumerate(actions):
         if action.op == "sql":
-            observations.append(
-                _execute_sql_action_observation(
-                    task=task,
-                    action=action,
-                    index=index,
-                    table_cache=table_cache,
-                    local_slm_config=local_slm_config,
-                    local_slm_dispatcher=local_slm_dispatcher,
-                    max_parallel_execution_units=max_parallel_execution_units,
-                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-                    max_parallel_slm_sequences=max_parallel_slm_sequences,
-                    max_pending_slm_sequences=max_pending_slm_sequences,
-                    profiler=profiler,
-                )
+            obs, sql_exec = _execute_sql_action_observation(
+                task=task,
+                action=action,
+                index=index,
+                table_cache=table_cache,
+                local_slm_config=local_slm_config,
+                local_slm_dispatcher=local_slm_dispatcher,
+                max_parallel_execution_units=max_parallel_execution_units,
+                max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                max_parallel_slm_sequences=max_parallel_slm_sequences,
+                max_pending_slm_sequences=max_pending_slm_sequences,
+                profiler=profiler,
             )
+            observations.append(obs)
+            if sql_exec.ok and sql_exec.frame is not None:
+                normalized_sql = (action.q or "").strip()
+                if normalized_sql:
+                    evidence_key = f"{task.answer_key}__a{index + 1}"
+                    prior_sql[normalized_sql] = (evidence_key, sql_exec.frame)
             continue
         if action.op == "inspect":
             observations.append(
@@ -1773,6 +1791,7 @@ def _execute_table_action_group(
                     max_parallel_slm_sequences=max_parallel_slm_sequences,
                     max_pending_slm_sequences=max_pending_slm_sequences,
                     profiler=profiler,
+                    prior_sql=prior_sql,
                 )
             )
             continue
@@ -1790,6 +1809,7 @@ def _execute_table_action_group(
                     max_parallel_slm_sequences=max_parallel_slm_sequences,
                     max_pending_slm_sequences=max_pending_slm_sequences,
                     profiler=profiler,
+                    prior_sql=prior_sql,
                 )
             )
             continue
@@ -1817,7 +1837,7 @@ def _execute_sql_action_observation(
     max_parallel_slm_sequences: int,
     max_pending_slm_sequences: int,
     profiler: PipelineProfiler,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], _SqlActionExecution]:
     sql = action.q or ""
     result = _execute_sql_action(
         task=task,
@@ -1843,7 +1863,7 @@ def _execute_sql_action_observation(
         observation[_ACTION_FULL_RESULT_KEY] = result.value
     else:
         observation["err"] = result.error
-    return observation
+    return observation, result
 
 
 def _execute_sql_action(
@@ -1906,34 +1926,134 @@ def _execute_sql_action(
         return _SqlActionExecution(ok=False, error=_error_payload(exc))
 
 
+def _physical_plan_from_cached_frame(
+    frame: pd.DataFrame,
+    output_key: str,
+    task: TaskItem,
+    action_index: int,
+) -> tuple[dict[str, Any], str]:
+    """Build a minimal physical plan that yields *frame* under *output_key*.
+
+    Returns ``(physical_plan, synthetic_path)`` where *synthetic_path* is the
+    cache key that must be pre-populated in ``table_cache`` before the plan
+    is executed.
+    """
+    import uuid
+
+    synthetic_id = f"_cached_{action_index + 1}_{uuid.uuid4().hex[:8]}"
+    synthetic_path = f"/__clover_cached__/{synthetic_id}.parquet"
+    resource_spec = {
+        "id": synthetic_id,
+        "type": "table",
+        "path": synthetic_path,
+        "format": "parquet",
+    }
+    scan_node = {
+        "id": f"A{action_index + 1}_cached_scan",
+        "op": "Scan",
+        "dependency": [],
+        "input": [synthetic_id],
+        "params": {"source": synthetic_id},
+        "output": output_key,
+        "output_type": "table",
+    }
+    physical_plan = prepare_physical_plan_resources(
+        {
+            "task_type": task.task_type,
+            "resources": [resource_spec],
+            "resource_processing": [],
+            "nodes": [scan_node],
+            "edges": [],
+        }
+    )
+    return physical_plan, str(Path(synthetic_path).resolve())
+
+
+def _prior_sql_frame(
+    prior_sql: _PriorSqlResults | None,
+    seed: str | None,
+) -> pd.DataFrame | None:
+    if not isinstance(seed, str) or not seed.strip():
+        return None
+    match = (prior_sql or {}).get(seed.strip())
+    if match is None:
+        return None
+    return match[1]
+
+
+def _install_cached_frame(
+    table_cache: dict[str, Any] | None,
+    cache_key: str | None,
+    frame: pd.DataFrame | None,
+) -> tuple[dict[str, Any] | None, Any]:
+    if cache_key is None or frame is None:
+        return table_cache, _CACHE_MISSING
+    selected_cache = table_cache if table_cache is not None else {}
+    previous = selected_cache.get(cache_key, _CACHE_MISSING)
+    selected_cache[cache_key] = frame
+    return selected_cache, previous
+
+
+def _restore_cached_frame(
+    table_cache: dict[str, Any] | None,
+    cache_key: str | None,
+    previous: Any,
+) -> None:
+    if cache_key is None or table_cache is None:
+        return
+    if previous is _CACHE_MISSING:
+        table_cache.pop(cache_key, None)
+    else:
+        table_cache[cache_key] = previous
+
+
 def _inspect_action_physical_plan(
     *,
     task: TaskItem,
     action: SupervisorAction,
     action_index: int,
     profiler: PipelineProfiler,
-) -> tuple[dict[str, Any], str]:
+    prior_sql: _PriorSqlResults | None = None,
+) -> tuple[dict[str, Any], str, str | None]:
+    """Return (physical_plan, evidence_key, cache_key).
+
+    *cache_key* is non-None when the seed SQL matched a prior sql action; the
+    caller must inject the cached DataFrame into ``table_cache`` under this
+    key before executing the plan.
+    """
     evidence_key = f"{task.answer_key}__a{action_index + 1}"
     source_ids = _task_source_ids(task)
     if not source_ids:
         raise ValueError("inspect action requires at least one source table")
 
+    cache_key: str | None = None
+
     if action.seed:
-        seed_key = f"{evidence_key}__seed"
-        seed_dsl = _query_remote_dsl_with_answer(
-            task,
-            {"name": seed_key, "type": "table"},
-        )
-        logic_dag = parse_remote_sql_to_logic_dag(action.seed, seed_dsl)
-        physical_plan = _optimize_table_logic_dag(
-            logic_dag=logic_dag,
-            context=_batch_context(task),
-            local_dsl=_query_local_dsl(task),
-            profiler=profiler,
-            stage_name="action_group_inspect_seed_optimizer",
-            items=1,
-        )
-        dependencies = [seed_key]
+        # Check if the seed SQL was already executed by a preceding sql action.
+        prior_match = (prior_sql or {}).get(action.seed.strip())
+
+        if prior_match is not None:
+            prior_evidence_key, prior_frame = prior_match
+            physical_plan, cache_key = _physical_plan_from_cached_frame(
+                prior_frame, prior_evidence_key, task, action_index,
+            )
+            dependencies = [prior_evidence_key]
+        else:
+            seed_key = f"{evidence_key}__seed"
+            seed_dsl = _query_remote_dsl_with_answer(
+                task,
+                {"name": seed_key, "type": "table"},
+            )
+            logic_dag = parse_remote_sql_to_logic_dag(action.seed, seed_dsl)
+            physical_plan = _optimize_table_logic_dag(
+                logic_dag=logic_dag,
+                context=_batch_context(task),
+                local_dsl=_query_local_dsl(task),
+                profiler=profiler,
+                stage_name="action_group_inspect_seed_optimizer",
+                items=1,
+            )
+            dependencies = [seed_key]
     else:
         physical_plan = prepare_physical_plan_resources(
             {
@@ -1962,7 +2082,7 @@ def _inspect_action_physical_plan(
     }
     physical_plan.setdefault("nodes", []).append(inspect_node)
     physical_plan.setdefault("edges", [])
-    return physical_plan, evidence_key
+    return physical_plan, evidence_key, cache_key
 
 
 def _analyze_action_physical_plan(
@@ -1971,7 +2091,14 @@ def _analyze_action_physical_plan(
     action: SupervisorAction,
     action_index: int,
     profiler: PipelineProfiler,
-) -> tuple[dict[str, Any], str]:
+    prior_sql: _PriorSqlResults | None = None,
+) -> tuple[dict[str, Any], str, str | None]:
+    """Return (physical_plan, evidence_key, cache_key).
+
+    *cache_key* is non-None when the seed SQL matched a prior sql action; the
+    caller must inject the cached DataFrame into ``table_cache`` under this
+    key before executing the plan.
+    """
     evidence_key = f"{task.answer_key}__a{action_index + 1}"
     seed = action.seed
     if not isinstance(seed, str) or not seed.strip():
@@ -1980,21 +2107,33 @@ def _analyze_action_physical_plan(
     if not isinstance(kind, str) or not kind.strip():
         raise ValueError("analyze action requires kind")
 
-    seed_key = f"{evidence_key}__seed"
-    seed_dsl = _query_remote_dsl_with_answer(
-        task,
-        {"name": seed_key, "type": "table"},
-    )
-    logic_dag = parse_remote_sql_to_logic_dag(seed, seed_dsl)
-    physical_plan = _optimize_table_logic_dag(
-        logic_dag=logic_dag,
-        context=_batch_context(task),
-        local_dsl=_query_local_dsl(task),
-        profiler=profiler,
-        stage_name="action_group_analyze_seed_optimizer",
-        items=1,
-    )
-    analyze_dependency = _pre_format_table_dependency(physical_plan, seed_key)
+    # Check if the seed SQL was already executed by a preceding sql action.
+    prior_match = (prior_sql or {}).get(seed.strip())
+    cache_key: str | None = None
+
+    if prior_match is not None:
+        prior_evidence_key, prior_frame = prior_match
+        physical_plan, cache_key = _physical_plan_from_cached_frame(
+            prior_frame, prior_evidence_key, task, action_index,
+        )
+        analyze_dependency = prior_evidence_key
+    else:
+        seed_key = f"{evidence_key}__seed"
+        seed_dsl = _query_remote_dsl_with_answer(
+            task,
+            {"name": seed_key, "type": "table"},
+        )
+        logic_dag = parse_remote_sql_to_logic_dag(seed, seed_dsl)
+        physical_plan = _optimize_table_logic_dag(
+            logic_dag=logic_dag,
+            context=_batch_context(task),
+            local_dsl=_query_local_dsl(task),
+            profiler=profiler,
+            stage_name="action_group_analyze_seed_optimizer",
+            items=1,
+        )
+        analyze_dependency = _pre_format_table_dependency(physical_plan, seed_key)
+
     analyze_node = {
         "id": f"A{action_index + 1}_analyze",
         "op": "AnalyzeEvidence",
@@ -2006,7 +2145,7 @@ def _analyze_action_physical_plan(
     }
     physical_plan.setdefault("nodes", []).append(analyze_node)
     physical_plan.setdefault("edges", [])
-    return physical_plan, evidence_key
+    return physical_plan, evidence_key, cache_key
 
 
 def _pre_format_table_dependency(physical_plan: dict[str, Any], output_key: str) -> str:
@@ -2077,6 +2216,7 @@ def _execute_inspect_action_observation(
     max_parallel_slm_sequences: int,
     max_pending_slm_sequences: int,
     profiler: PipelineProfiler,
+    prior_sql: _PriorSqlResults | None = None,
 ) -> dict[str, Any]:
     observation: dict[str, Any] = {
         "i": index,
@@ -2088,25 +2228,38 @@ def _execute_inspect_action_observation(
         observation["seed"] = action.seed
     try:
         with profiler.measure("action_group_inspect", items=1):
-            physical_plan, evidence_key = _inspect_action_physical_plan(
+            physical_plan, evidence_key, cache_key = _inspect_action_physical_plan(
                 task=task,
                 action=action,
                 action_index=index,
                 profiler=profiler,
+                prior_sql=prior_sql,
             )
-            execution_result = _execute_table_physical_plan(
-                physical_plan=physical_plan,
-                table_cache=table_cache,
-                local_slm_config=local_slm_config,
-                local_slm_dispatcher=local_slm_dispatcher,
-                profiler=profiler,
-                stage_name="action_group_inspect_executor",
-                items=1,
-                max_parallel_execution_units=max_parallel_execution_units,
-                max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-                max_parallel_slm_sequences=max_parallel_slm_sequences,
-                max_pending_slm_sequences=max_pending_slm_sequences,
+            selected_table_cache, previous_cached_frame = _install_cached_frame(
+                table_cache,
+                cache_key,
+                _prior_sql_frame(prior_sql, action.seed),
             )
+            try:
+                execution_result = _execute_table_physical_plan(
+                    physical_plan=physical_plan,
+                    table_cache=selected_table_cache,
+                    local_slm_config=local_slm_config,
+                    local_slm_dispatcher=local_slm_dispatcher,
+                    profiler=profiler,
+                    stage_name="action_group_inspect_executor",
+                    items=1,
+                    max_parallel_execution_units=max_parallel_execution_units,
+                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                    max_parallel_slm_sequences=max_parallel_slm_sequences,
+                    max_pending_slm_sequences=max_pending_slm_sequences,
+                )
+            finally:
+                _restore_cached_frame(
+                    selected_table_cache,
+                    cache_key,
+                    previous_cached_frame,
+                )
         _record_executor_trace_counters(profiler, execution_result)
         if not execution_result.ok:
             observation["err"] = execution_result.error or {
@@ -2139,6 +2292,7 @@ def _execute_analyze_action_observation(
     max_parallel_slm_sequences: int,
     max_pending_slm_sequences: int,
     profiler: PipelineProfiler,
+    prior_sql: _PriorSqlResults | None = None,
 ) -> dict[str, Any]:
     observation: dict[str, Any] = {
         "i": index,
@@ -2149,25 +2303,38 @@ def _execute_analyze_action_observation(
     }
     try:
         with profiler.measure("action_group_analyze", items=1):
-            physical_plan, evidence_key = _analyze_action_physical_plan(
+            physical_plan, evidence_key, cache_key = _analyze_action_physical_plan(
                 task=task,
                 action=action,
                 action_index=index,
                 profiler=profiler,
+                prior_sql=prior_sql,
             )
-            execution_result = _execute_table_physical_plan(
-                physical_plan=physical_plan,
-                table_cache=table_cache,
-                local_slm_config=local_slm_config,
-                local_slm_dispatcher=local_slm_dispatcher,
-                profiler=profiler,
-                stage_name="action_group_analyze_executor",
-                items=1,
-                max_parallel_execution_units=max_parallel_execution_units,
-                max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-                max_parallel_slm_sequences=max_parallel_slm_sequences,
-                max_pending_slm_sequences=max_pending_slm_sequences,
+            selected_table_cache, previous_cached_frame = _install_cached_frame(
+                table_cache,
+                cache_key,
+                _prior_sql_frame(prior_sql, action.seed),
             )
+            try:
+                execution_result = _execute_table_physical_plan(
+                    physical_plan=physical_plan,
+                    table_cache=selected_table_cache,
+                    local_slm_config=local_slm_config,
+                    local_slm_dispatcher=local_slm_dispatcher,
+                    profiler=profiler,
+                    stage_name="action_group_analyze_executor",
+                    items=1,
+                    max_parallel_execution_units=max_parallel_execution_units,
+                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                    max_parallel_slm_sequences=max_parallel_slm_sequences,
+                    max_pending_slm_sequences=max_pending_slm_sequences,
+                )
+            finally:
+                _restore_cached_frame(
+                    selected_table_cache,
+                    cache_key,
+                    previous_cached_frame,
+                )
         _record_executor_trace_counters(profiler, execution_result)
         if not execution_result.ok:
             observation["err"] = execution_result.error or {

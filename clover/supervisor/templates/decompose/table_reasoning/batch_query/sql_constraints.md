@@ -3,4 +3,9 @@ Rules:
 - Double-quote tables, columns, and answer aliases.
 - Return one item per `questions[i]`; order and length must match.
 - Each item is {"sql":"..."}.
+- Compute deterministic totals, averages, differences, percentages, and ranks in SQL.
+- For highest/lowest ties, return all tied rows; do not use LIMIT 1 unless one answer is guaranteed.
+- Exclude summary rows such as total, all, overall, or all ages unless explicitly requested.
+- Parenthesize mixed AND/OR filters.
+- Parse years/dates from text cells or date-like column names before comparing them.
 - No comments, markdown, or text outside the JSON array.

@@ -204,6 +204,15 @@ class SupervisorTest(unittest.TestCase):
             action_group.actions[1].seed,
             'SELECT "year", "sales" FROM "table_1";',
         )
+        wrapped_seed = parse_supervisor_decision(
+            '{"acts":[{"op":"analyze","kind":"statistical",'
+            '"seed":{"sql":"SELECT \\"year\\", \\"sales\\" FROM \\"table_1\\";"}}]}'
+        )
+        self.assertEqual(wrapped_seed.actions[0].op, "analyze")
+        self.assertEqual(
+            wrapped_seed.actions[0].seed,
+            'SELECT "year", "sales" FROM "table_1";',
+        )
         analyze_action = parse_supervisor_decision(
             '{"acts":[{"op":"analyze","kind":"correlation",'
             '"seed":"SELECT \\"year\\", \\"sales\\" FROM \\"table_1\\";"}]}'

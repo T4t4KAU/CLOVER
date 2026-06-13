@@ -264,6 +264,13 @@ def _normalize_sqls(value: Any) -> tuple[str, ...]:
     if isinstance(value, str):
         stripped = value.strip()
         return (stripped,) if _looks_like_sql(stripped) else ()
+    if isinstance(value, dict):
+        if "final" in value:
+            raise SupervisorParseError("sqls must not include final")
+        for key in ("sql", "q", "sqls"):
+            if key in value:
+                return _normalize_sqls(value.get(key))
+        raise SupervisorParseError("sqls must include sql, q, or sqls")
     if not isinstance(value, list):
         raise SupervisorParseError("sqls must be a list of SQL strings")
     sqls: list[str] = []

@@ -18,6 +18,9 @@ Rules:
 - `acts` may contain only `sql`, `inspect`, or `analyze` actions.
 - Never put `{"op":"answer"}` inside `acts`.
 - SQL actions retrieve evidence only; they do not encode final answers.
-- Use sql for exact data. Use inspect for open evidence.
-- Use analyze for deterministic numeric statistics or correlation over selected rows.
+- Prefer SQL for exact deterministic work: totals, averages, differences, percentages, ranks, and ties.
+- Use inspect for open evidence.
+- Use analyze only when the requested statistic cannot be expressed directly in SQL.
+- Exclude summary rows such as total, all, overall, or all ages unless explicitly requested.
+- Parenthesize mixed AND/OR filters.
 - Use terminal answer only when no table evidence is needed.

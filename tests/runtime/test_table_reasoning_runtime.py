@@ -26,6 +26,22 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             {"op": "sql", "q": "SELECT COUNT(*) FROM table_1"},
         )
 
+    def test_table_action_parser_accepts_wrapped_seed_sql(self) -> None:
+        actions = table_pipeline._normalize_table_actions(  # noqa: SLF001
+            {
+                "acts": [
+                    {
+                        "op": "analyze",
+                        "kind": "statistical",
+                        "seed": {"sql": 'SELECT "year" FROM "table_1";'},
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(actions[0].op, "analyze")
+        self.assertEqual(actions[0].seed, 'SELECT "year" FROM "table_1"')
+
     def test_query_with_explicit_local_sql_skips_remote_decompose(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
