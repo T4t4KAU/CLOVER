@@ -12,6 +12,9 @@ from typing import Any
 
 BUILD_TABLE_DSL_TOOL_NAME = "build_table_dsl"
 BUILDER_AGENT_MODE = "builder_agent"
+SOURCE_CONTEXT_HINT_KEY = "source_context"
+SOURCE_CONTEXT_USAGE_KEY = "source_context_usage"
+_MAX_SOURCE_CONTEXT_FIELD_CHARS = 360
 
 ANSWER_TYPES = {
     "boolean",
@@ -138,14 +141,18 @@ class BuildTableDSLTool:
         question: str,
         source_id: int = 0,
         source_file: str = "table.csv",
+        source_context_path: str | Path | None = None,
     ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "question": question,
+            "source_id": source_id,
+            "source_file": source_file,
+        }
+        if source_context_path is not None:
+            arguments["source_context_path"] = str(source_context_path)
         return {
             "tool": self.name,
-            "arguments": {
-                "question": question,
-                "source_id": source_id,
-                "source_file": source_file,
-            },
+            "arguments": arguments,
         }
 
     def run(
@@ -154,6 +161,7 @@ class BuildTableDSLTool:
         question: str,
         table_path: str | Path,
         source_file: str = "table.csv",
+        source_context_path: str | Path | None = None,
         answer_type: str | None = None,
         task_type: str = "table_reasoning.analyze",
         source_id: int = 0,
@@ -169,12 +177,16 @@ class BuildTableDSLTool:
             question=question,
             source_id=source_id,
             source_file=source_file,
+            source_context_path=source_context_path,
         )
         diagnostics = static_table_dsl_metadata(
             question=question,
             table_path=table_path,
             table_profile=profile,
         )
+        source_context_hints = _source_context_hints(source_context_path)
+        if source_context_hints:
+            diagnostics["source_context_hints"] = source_context_hints
         selected_answer_type = _normalize_answer_type(
             answer_type,
             fallback=diagnostics["answer_type"],
@@ -185,7 +197,7 @@ class BuildTableDSLTool:
             source_id=source_id,
             task_type=task_type,
             answer_type=selected_answer_type,
-            hints={},
+            hints=source_context_hints,
         )
         return TableDslBuilderResult(
             task_dsl=task_dsl,
@@ -210,6 +222,7 @@ def build_table_task_dsl_with_builder_agent(
     question: str,
     table_path: str | Path,
     source_file: str = "table.csv",
+    source_context_path: str | Path | None = None,
     answer_type: str | None = None,
     task_type: str = "table_reasoning.analyze",
     source_id: int = 0,
@@ -227,6 +240,7 @@ def build_table_task_dsl_with_builder_agent(
         question=question,
         table_path=table_path,
         source_file=source_file,
+        source_context_path=source_context_path,
         answer_type=answer_type,
         task_type=task_type,
         source_id=source_id,
@@ -389,6 +403,111 @@ def static_table_dsl_metadata(
         "value_hits": value_hits,
         "tool": BUILD_TABLE_DSL_TOOL_NAME,
     }
+
+
+def _source_context_hints(source_context_path: str | Path | None) -> dict[str, Any]:
+    if source_context_path is None:
+        return {}
+    source_path = Path(source_context_path).expanduser().resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Source context file not found: {source_path}")
+    context_id, source_root = _wikitq_context_id_and_root(source_path)
+    metadata = _read_wikitq_table_metadata(
+        source_root=source_root,
+        context_id=context_id,
+    )
+    context_hint = _source_context_hint(metadata=metadata)
+    if not context_hint:
+        return {}
+    return {
+        SOURCE_CONTEXT_HINT_KEY: context_hint,
+        SOURCE_CONTEXT_USAGE_KEY: (
+            "These fields describe the source page or section containing the "
+            "table. Use them to resolve references such as this film, this "
+            "city, or the page title. Do not add them as SQL row filters unless "
+            "the same value appears in a table column."
+        ),
+    }
+
+
+def _wikitq_context_id_and_root(source_path: Path) -> tuple[str, Path]:
+    parts = source_path.parts
+    for index, part in enumerate(parts):
+        if part != "csv" or index + 2 >= len(parts):
+            continue
+        batch_dir = parts[index + 1]
+        file_name = parts[index + 2]
+        if not re.fullmatch(r"\d+-csv", batch_dir):
+            continue
+        if not re.fullmatch(r"\d+\.csv", file_name):
+            continue
+        source_root = Path(*parts[:index])
+        context_id = f"csv/{batch_dir}/{file_name}"
+        return context_id, source_root
+    raise ValueError(
+        "source_context_path must point to a WikiTQ CSV path like "
+        f"csv/200-csv/11.csv: {source_path}"
+    )
+
+
+def _read_wikitq_table_metadata(
+    *,
+    source_root: Path,
+    context_id: str,
+) -> dict[str, str]:
+    metadata_path = source_root / "misc" / "table-metadata.tsv"
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"WikiTQ table metadata not found: {metadata_path}")
+    with metadata_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            if row.get("contextId") == context_id:
+                return {
+                    str(key): _wikitq_tsv_unescape(value)
+                    for key, value in row.items()
+                }
+    raise ValueError(
+        f"WikiTQ table metadata row not found for contextId={context_id!r} "
+        f"in {metadata_path}"
+    )
+
+
+def _source_context_hint(
+    *,
+    metadata: dict[str, str],
+) -> dict[str, str]:
+    field_map = (
+        ("title", "page_title"),
+        ("headers", "table_headers"),
+        ("caption", "caption"),
+        ("textAbove", "section_before"),
+        ("textBelow", "section_after"),
+    )
+    hint = {}
+    for source_key, target_key in field_map:
+        text = _compact_source_context_text(metadata.get(source_key))
+        if text:
+            hint[target_key] = text
+    return hint
+
+
+def _compact_source_context_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = " ".join(text.split())
+    if len(text) <= _MAX_SOURCE_CONTEXT_FIELD_CHARS:
+        return text
+    return text[: _MAX_SOURCE_CONTEXT_FIELD_CHARS - 3].rstrip() + "..."
+
+
+def _wikitq_tsv_unescape(value: Any) -> str:
+    return (
+        str(value or "")
+        .replace(r"\n", "\n")
+        .replace(r"\p", "|")
+        .replace("\\\\", "\\")
+    )
 
 
 def _task_dsl_from_parts(

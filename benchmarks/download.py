@@ -53,6 +53,11 @@ from benchmarks.tablebench.download import (
     DEFAULT_SPLITS as TABLEBENCH_DEFAULT_SPLITS,
     download_and_convert_tablebench,
 )
+from benchmarks.wikitq.download import (
+    DEFAULT_SOURCE_ROOT as WIKITQ_DEFAULT_SOURCE_ROOT,
+    DEFAULT_SPLIT as WIKITQ_DEFAULT_SPLIT,
+    download_and_convert_wikitq,
+)
 
 DEFAULT_DATASETS_ROOT = Path("datasets")
 
@@ -79,6 +84,10 @@ def download_and_convert_benchmarks(
     tablebench_qsubtypes: Sequence[str] | None = None,
     tablebench_limit_cases: int | None = None,
     tablebench_include_visualization: bool = False,
+    wikitq_source_root: str | Path = WIKITQ_DEFAULT_SOURCE_ROOT,
+    wikitq_split: str = WIKITQ_DEFAULT_SPLIT,
+    wikitq_case_ids: Sequence[str] | None = None,
+    wikitq_limit_cases: int | None = None,
     financebench_download: bool = True,
     financebench_github_repo: str = FINANCEBENCH_DEFAULT_GITHUB_REPO,
     financebench_github_ref: str = FINANCEBENCH_DEFAULT_GITHUB_REF,
@@ -135,6 +144,16 @@ def download_and_convert_benchmarks(
             download_overwrite=download_overwrite,
         )
 
+    if "wikitq" in selected:
+        summaries["wikitq"] = download_and_convert_wikitq(
+            source_root=wikitq_source_root,
+            output_root=root / "wikitq",
+            split=wikitq_split,
+            case_ids=wikitq_case_ids,
+            limit_cases=wikitq_limit_cases,
+            overwrite=overwrite,
+        )
+
     if "financebench" in selected:
         summaries["financebench"] = download_and_convert_financebench(
             output_root=root / "financebench",
@@ -180,10 +199,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--dataset",
         action="append",
         default=None,
-        metavar="{databench,tablebench,financebench,all}",
+        metavar="{databench,tablebench,wikitq,financebench,all}",
         help=(
-            "Dataset to prepare. Repeat for multiple datasets. Defaults to all. "
-            "Choices: databench, tablebench, financebench, all."
+            "Dataset to prepare. Repeat for multiple datasets. Defaults to "
+            "databench, tablebench, and financebench. Choose wikitq explicitly "
+            "when a local WikiTableQuestions source root is available."
         ),
     )
     parser.add_argument(
@@ -274,6 +294,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    wikitq = parser.add_argument_group("WikiTableQuestions")
+    wikitq.add_argument("--wikitq-source-root", default=str(WIKITQ_DEFAULT_SOURCE_ROOT))
+    wikitq.add_argument("--wikitq-split", default=WIKITQ_DEFAULT_SPLIT)
+    wikitq.add_argument(
+        "--wikitq-case-id",
+        action="append",
+        default=None,
+        help="WikiTQ case id to include. Repeat or comma-separate.",
+    )
+    wikitq.add_argument("--wikitq-limit-cases", type=int, default=None)
+
     financebench = parser.add_argument_group("FinanceBench")
     financebench.add_argument(
         "--financebench-skip-download",
@@ -338,6 +369,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         tablebench_qsubtypes=_expand_csv_values(args.tablebench_qsubtype),
         tablebench_limit_cases=args.tablebench_limit_cases,
         tablebench_include_visualization=args.include_tablebench_visualization,
+        wikitq_source_root=args.wikitq_source_root,
+        wikitq_split=args.wikitq_split,
+        wikitq_case_ids=_expand_csv_values(args.wikitq_case_id),
+        wikitq_limit_cases=args.wikitq_limit_cases,
         financebench_download=args.financebench_download,
         financebench_github_repo=args.financebench_github_repo,
         financebench_github_ref=args.financebench_github_ref,
@@ -359,7 +394,7 @@ def _normalize_datasets(datasets: Sequence[str]) -> set[str]:
     expanded = set(_expand_csv_values(datasets))
     if not expanded or "all" in expanded:
         expanded = {"databench", "tablebench", "financebench"}
-    unknown = sorted(expanded - {"databench", "tablebench", "financebench"})
+    unknown = sorted(expanded - {"databench", "tablebench", "wikitq", "financebench"})
     if unknown:
         raise ValueError(f"Unknown dataset selection: {unknown}")
     return expanded

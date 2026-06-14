@@ -336,6 +336,7 @@ def _run_table_builder_job(
         question=question,
         table_path=table_path,
         source_file=source_file,
+        source_context_path=builder.get("source_context_path"),
         answer_type=answer_type,
         task_type=task_type,
         source_id=source_id,
@@ -404,7 +405,13 @@ def _table_builder_task_dsl(
     updated = copy.deepcopy(task_dsl)
     hints = builder.get("hints")
     if isinstance(hints, dict) and hints:
-        updated["hints"] = copy.deepcopy(hints)
+        merged_hints = (
+            copy.deepcopy(updated["hints"])
+            if isinstance(updated.get("hints"), dict)
+            else {}
+        )
+        merged_hints.update(copy.deepcopy(hints))
+        updated["hints"] = merged_hints
     updated["task_type"] = str(builder.get("task_type") or updated.get("task_type"))
     for key in ("profile", "metadata", "reasoning_profile", "reasoning_context"):
         updated.pop(key, None)
