@@ -1322,8 +1322,18 @@ def _column_series(frame: pd.DataFrame, expr: dict[str, Any]) -> pd.Series:
 
 
 def _normalize_column_name(name: Any) -> str:
-    base = str(name).split("<gx:", 1)[0]
+    base = _column_name_base(name)
     return re.sub(r"[^a-z0-9]+", "", base.lower())
+
+
+def _column_name_base(name: Any) -> str:
+    base = str(name).split("<gx:", 1)[0]
+    return (
+        base
+        .replace("\\n", " ")
+        .replace("\\r", " ")
+        .replace("\\t", " ")
+    )
 
 
 def _series_for_frame(value: Any, frame: pd.DataFrame) -> pd.Series:
@@ -1392,6 +1402,8 @@ def _is_collection_for_membership(value: Any) -> bool:
 
 
 def _coerce_comparison_values(left: Any, right: Any) -> tuple[Any, Any]:
+    left = _unwrap_singleton_collection(left)
+    right = _unwrap_singleton_collection(right)
     if isinstance(left, pd.Series) and _is_number_like(right):
         numeric_left = _coerce_numeric_series(left)
         if numeric_left.notna().any():
@@ -1408,6 +1420,8 @@ def _coerce_comparison_values(left: Any, right: Any) -> tuple[Any, Any]:
 
 
 def _coerce_arithmetic_values(left: Any, right: Any) -> tuple[Any, Any]:
+    left = _unwrap_singleton_collection(left)
+    right = _unwrap_singleton_collection(right)
     if isinstance(left, pd.Series):
         left = _coerce_numeric_series(left)
     if isinstance(right, pd.Series):
@@ -1417,6 +1431,12 @@ def _coerce_arithmetic_values(left: Any, right: Any) -> tuple[Any, Any]:
     if isinstance(right, str):
         right = _to_number(right)
     return left, right
+
+
+def _unwrap_singleton_collection(value: Any) -> Any:
+    if isinstance(value, (list, tuple, set)) and len(value) == 1:
+        return next(iter(value))
+    return value
 
 
 def _is_number_like(value: Any) -> bool:
@@ -1519,9 +1539,19 @@ def _coerce_bool_numeric_series(series: pd.Series) -> pd.Series:
 def _cast_value(value: Any, target_type: str) -> Any:
     target = target_type.lower()
     if "int" in target:
-        return pd.to_numeric(value, errors="coerce").astype("Int64") if isinstance(value, pd.Series) else int(value)
+        if isinstance(value, pd.Series):
+            numeric = _coerce_numeric_series(value)
+            truncated = numeric.map(
+                lambda item: math.trunc(item) if not pd.isna(item) else pd.NA
+            )
+            return truncated.astype("Int64")
+        number = _to_number(value)
+        return None if number is None else int(number)
     if any(name in target for name in ("double", "float", "real", "decimal", "numeric")):
-        return pd.to_numeric(value, errors="coerce")
+        if isinstance(value, pd.Series):
+            return _coerce_numeric_series(value)
+        number = _to_number(value)
+        return None if number is None else float(number)
     if any(name in target for name in ("varchar", "text", "string")):
         return value.astype("string") if isinstance(value, pd.Series) else str(value)
     if "bool" in target:

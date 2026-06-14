@@ -409,6 +409,8 @@ def _update_record_from_result_metadata(
         ("split", "split"),
         ("context", "context"),
         ("task_answer_type", "task_answer_type"),
+        ("final_answer_source", "final_answer_source"),
+        ("table_diagnostics", "table_diagnostics"),
     ):
         value = metadata.get(source_key)
         if value is not None:

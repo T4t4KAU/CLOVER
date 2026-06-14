@@ -1430,7 +1430,7 @@ def _expr_ast(
             ],
         }
     if isinstance(expression, (exp.Like, exp.ILike)):
-        return {
+        payload = {
             "type": "like",
             "case_sensitive": isinstance(expression, exp.Like),
             "expr": _expr_ast(expression.this, aggregate_aliases, scalar_subquery_refs),
@@ -1440,6 +1440,9 @@ def _expr_ast(
                 scalar_subquery_refs,
             ),
         }
+        if expression.args.get("negate"):
+            return {"type": "not", "expr": payload}
+        return payload
     if isinstance(expression, exp.Cast):
         return {
             "type": "cast",

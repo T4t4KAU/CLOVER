@@ -468,6 +468,53 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
 
         self.assertEqual(outputs["answer"], 2)
 
+    def test_cast_numeric_reuses_formatted_number_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                "term\n"
+                "1961–1974\n"
+                "1980–1982\n",
+                encoding="utf-8",
+            )
+            remote_dsl = _remote_dsl("number", ["term"])
+            logic_dag = parse_remote_sql_to_logic_dag(
+                'SELECT MIN(CAST("term" AS INTEGER)) AS answer FROM "table_1";',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                logic_dag,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], 1961)
+
+    def test_matches_literal_backslash_n_column_to_multiline_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                '"Club performance\nClub\nNorway",answer\n'
+                "Rosenborg,yes\n",
+                encoding="utf-8",
+            )
+            remote_dsl = _remote_dsl(
+                "string",
+                ["Club performance\nClub\nNorway", "answer"],
+            )
+            logic_dag = parse_remote_sql_to_logic_dag(
+                'SELECT "answer" FROM "table_1" '
+                'WHERE "Club performance\\nClub\\nNorway" = \'Rosenborg\';',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                logic_dag,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], "yes")
+
     def test_filter_literal_binding_repairs_unique_case_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"
@@ -570,6 +617,30 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
             )
 
         self.assertIs(outputs["answer"], True)
+
+    def test_comparison_against_single_row_set_ref_unwraps_scalar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                "name,score\n"
+                "baseline,10\n"
+                "winner,12\n",
+                encoding="utf-8",
+            )
+            remote_dsl = _remote_dsl("string", ["name", "score"])
+            logic_dag = parse_remote_sql_to_logic_dag(
+                'SELECT "name" AS answer FROM "table_1" '
+                'WHERE "score" > (SELECT "score" FROM "table_1" '
+                'WHERE "name" = \'baseline\');',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                logic_dag,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], "winner")
 
     def test_executes_replace_function_from_sql(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

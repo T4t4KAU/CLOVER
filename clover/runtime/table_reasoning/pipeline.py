@@ -76,6 +76,8 @@ _STATIC_ACTION_NUMBER_TYPES = frozenset({"number", "float", "integer", "int"})
 _STATIC_ACTION_BOOLEAN_TYPES = frozenset({"boolean", "bool"})
 _STATIC_ACTION_TEXT_TYPES = frozenset({"string", "entity", "category"})
 _ACTION_FULL_RESULT_KEY = "_clover_full_res"
+_TABLE_DIAGNOSTICS_KEY = "table_diagnostics"
+_FINAL_ANSWER_SOURCE_KEY = "final_answer_source"
 _CACHE_MISSING = object()
 
 # Maps normalised SQL text to the (evidence_key, DataFrame) produced by a
@@ -164,6 +166,14 @@ class _ActionReportRunResult:
     supervisor_result: Any | None
     profiler: PipelineProfiler
     error: Exception | None = None
+
+
+@dataclass(frozen=True)
+class _StaticFinalAnswer:
+    value: Any
+    reason: str
+    source: str
+    column: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1138,6 +1148,19 @@ def _try_finalize_static_action_group_answer(
 ) -> bool:
     answer = _static_action_group_scalar_answer(item=item, observation=observation)
     if answer is _STATIC_ACTION_NO_ANSWER:
+        _record_table_diagnostic(
+            item.task,
+            _action_group_diagnostic(
+                item=item,
+                observation=observation,
+                finalization={
+                    "source": "action_static",
+                    "bypass_synthesis": False,
+                    "confidence": "ambiguous",
+                    "reason": "no_high_confidence_static_answer",
+                },
+            ),
+        )
         return False
     profiler.increment("action_group_static_answer_hits")
     answer_type = _answer_type_name(item.task)
@@ -1147,6 +1170,20 @@ def _try_finalize_static_action_group_answer(
         profiler.increment("action_group_static_answer_boolean_hits")
     elif answer_type in _STATIC_ACTION_TEXT_TYPES:
         profiler.increment("action_group_static_answer_text_hits")
+    item.task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "action_static"
+    _record_table_diagnostic(
+        item.task,
+        _action_group_diagnostic(
+            item=item,
+            observation=observation,
+            finalization={
+                "source": "action_static",
+                "bypass_synthesis": True,
+                "confidence": "high",
+                "reason": "single_sql_action_static_answer",
+            },
+        ),
+    )
     _finalize_success(
         item.task,
         answer=answer,
@@ -1242,6 +1279,66 @@ def _public_action_group_observation(observation: dict[str, Any]) -> dict[str, A
         else:
             public[key] = value
     return public
+
+
+def _action_group_diagnostic(
+    *,
+    item: ActionGroupItem,
+    observation: dict[str, Any],
+    finalization: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "stage": "action_group_execution",
+        "answer_key": item.task.answer_key,
+        "actions": [_action_to_dict(action) for action in item.actions],
+        "observation": json_ready(_public_action_group_observation(observation)),
+        "finalization": json_ready(finalization),
+    }
+
+
+def _action_group_synthesis_diagnostic(
+    *,
+    item: ActionGroupItem,
+    observation: dict[str, Any],
+    supervisor_result: Any | None,
+    error: dict[str, Any] | None,
+) -> dict[str, Any]:
+    decision = supervisor_result.decision if supervisor_result is not None else None
+    finalization = {
+        "source": "synthesis",
+        "bypass_synthesis": False,
+        "confidence": "model",
+        "reason": "action_group_supervisor_synthesis",
+    }
+    if decision is not None:
+        finalization.update(
+            {
+                "done": decision.done,
+                "retry": decision.retry,
+                "action_op": decision.action_op,
+            }
+        )
+    if error is not None:
+        finalization.update({"confidence": "invalid", "reason": "synthesis_error"})
+    return {
+        "stage": "action_group_supervisor_synthesis",
+        "answer_key": item.task.answer_key,
+        "actions": [_action_to_dict(action) for action in item.actions],
+        "synthesis_input": {
+            "current_command": {"acts": [_action_to_dict(action) for action in item.actions]},
+            "observation": json_ready(observation),
+        },
+        "synthesis_output": json_ready(
+            {
+                "remote_output": supervisor_result.remote_output
+                if supervisor_result is not None
+                else None,
+                "decision": decision.raw if decision is not None else None,
+                "error": error,
+            }
+        ),
+        "finalization": json_ready(finalization),
+    }
 
 
 def _targeted_action_result_answer(
@@ -2441,6 +2538,7 @@ def _apply_action_group_decision(
     max_retries: int,
 ) -> None:
     if decision.done:
+        task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "synthesis"
         _finalize_success(
             task,
             answer=decision.answer,
@@ -2541,24 +2639,24 @@ def _finish_table_execution_batch(
     profiler: PipelineProfiler,
 ) -> bool:
     if execution_result.ok:
-        if _needs_supervisor_review(batch, validation_mode):
+        remaining = _run_static_synthesis_review(
+            batch=batch,
+            execution_result=execution_result,
+            final_results=final_results,
+            finalized=finalized,
+            profiler=profiler,
+            fail_unfinalized=not _needs_supervisor_review(batch, validation_mode),
+        )
+        if remaining and _needs_supervisor_review(remaining, validation_mode):
             _run_supervisor_synthesis(
-                batch=batch,
+                batch=remaining,
                 execution_result=execution_result,
-                logic_dag=logic_dag,
+                logic_dag=_batch_logic_dag(remaining),
                 sql_items=sql_items,
                 final_results=final_results,
                 finalized=finalized,
                 supervisor=supervisor,
                 max_retries=max_retries,
-                profiler=profiler,
-            )
-        else:
-            _run_static_synthesis_review(
-                batch=batch,
-                execution_result=execution_result,
-                final_results=final_results,
-                finalized=finalized,
                 profiler=profiler,
             )
         return True
@@ -2592,24 +2690,24 @@ def _finish_table_execution_batch(
             execution_result,
             unaffected,
         )
-        if _needs_supervisor_review(unaffected, validation_mode):
+        remaining = _run_static_synthesis_review(
+            batch=unaffected,
+            execution_result=subset_result,
+            final_results=final_results,
+            finalized=finalized,
+            profiler=profiler,
+            fail_unfinalized=not _needs_supervisor_review(unaffected, validation_mode),
+        )
+        if remaining and _needs_supervisor_review(remaining, validation_mode):
             _run_supervisor_synthesis(
-                batch=unaffected,
+                batch=remaining,
                 execution_result=subset_result,
-                logic_dag=_batch_logic_dag(unaffected),
+                logic_dag=_batch_logic_dag(remaining),
                 sql_items=sql_items,
                 final_results=final_results,
                 finalized=finalized,
                 supervisor=supervisor,
                 max_retries=max_retries,
-                profiler=profiler,
-            )
-        else:
-            _run_static_synthesis_review(
-                batch=unaffected,
-                execution_result=subset_result,
-                final_results=final_results,
-                finalized=finalized,
                 profiler=profiler,
             )
 
@@ -2646,31 +2744,347 @@ def _run_static_synthesis_review(
     final_results: list[CaseResult],
     finalized: set[str],
     profiler: PipelineProfiler,
-) -> None:
+    fail_unfinalized: bool,
+) -> list[LogicDagItem]:
     for item in batch:
         item.task.status = TASK_SUPERVISOR_REVIEW
+    remaining: list[LogicDagItem] = []
     with profiler.measure("static_synthesis", items=len(batch)):
         profiler.increment("static_synthesis_calls")
         answer_map = _execution_answer_map(execution_result, batch)
         for item in batch:
             key = item.task.answer_key
-            if key in answer_map:
+            if item.task.answer_key in finalized:
+                continue
+            if key not in answer_map:
+                reason = "missing_execution_answer"
+                _record_table_diagnostic(
+                    item.task,
+                    _table_execution_diagnostic(
+                        item=item,
+                        execution_result=execution_result,
+                        answer_value=None,
+                        finalization={
+                            "source": "static",
+                            "bypass_synthesis": False,
+                            "confidence": "empty",
+                            "reason": reason,
+                        },
+                    ),
+                )
+                if fail_unfinalized:
+                    _finalize_failed(
+                        item.task,
+                        final_results=final_results,
+                        finalized=finalized,
+                        error={
+                            "type": "MissingExecutionAnswer",
+                            "message": f"Executor result did not include answer {key}",
+                        },
+                    )
+                else:
+                    remaining.append(item)
+                continue
+            raw_answer = answer_map[key]
+            static_answer = _static_final_answer_from_value(
+                raw_answer,
+                task=item.task,
+                source="format_answer",
+            )
+            if static_answer is not None:
+                profiler.increment("static_final_answer_hits")
+                item.task.metadata[_FINAL_ANSWER_SOURCE_KEY] = static_answer.source
+                _record_table_diagnostic(
+                    item.task,
+                    _table_execution_diagnostic(
+                        item=item,
+                        execution_result=execution_result,
+                        answer_value=raw_answer,
+                        finalization={
+                            "source": static_answer.source,
+                            "bypass_synthesis": True,
+                            "confidence": "high",
+                            "reason": static_answer.reason,
+                            **(
+                                {"column": static_answer.column}
+                                if static_answer.column
+                                else {}
+                            ),
+                        },
+                    ),
+                )
                 _finalize_success(
                     item.task,
-                    answer=answer_map[key],
+                    answer=static_answer.value,
                     final_results=final_results,
                     finalized=finalized,
                 )
                 continue
-            _finalize_failed(
+            reason = _static_final_answer_reject_reason(raw_answer, item.task)
+            _record_table_diagnostic(
                 item.task,
-                final_results=final_results,
-                finalized=finalized,
-                error={
-                    "type": "MissingExecutionAnswer",
-                    "message": f"Executor result did not include answer {key}",
-                },
+                _table_execution_diagnostic(
+                    item=item,
+                    execution_result=execution_result,
+                    answer_value=raw_answer,
+                    finalization={
+                        "source": "static",
+                        "bypass_synthesis": False,
+                        "confidence": "invalid",
+                        "reason": reason,
+                    },
+                ),
             )
+            if fail_unfinalized:
+                _finalize_failed(
+                    item.task,
+                    final_results=final_results,
+                    finalized=finalized,
+                    error={
+                        "type": "InvalidStaticAnswer",
+                        "message": f"Static answer for {key} is not valid: {reason}",
+                    },
+                )
+            else:
+                remaining.append(item)
+    return remaining
+
+
+def _static_final_answer_from_value(
+    value: Any,
+    *,
+    task: TaskItem,
+    source: str,
+) -> _StaticFinalAnswer | None:
+    answer_type = _answer_type_name(task)
+    if _is_missing_static_value(value):
+        return None
+    if answer_type in _STATIC_ACTION_NUMBER_TYPES:
+        normalized = _normalize_number_answer(value)
+        if _valid_static_number(normalized):
+            return _StaticFinalAnswer(
+                value=normalized,
+                reason="typed_number",
+                source=source,
+            )
+        return None
+    if answer_type in _STATIC_ACTION_BOOLEAN_TYPES:
+        normalized = _normalize_boolean_answer(value)
+        if isinstance(normalized, bool):
+            return _StaticFinalAnswer(
+                value=normalized,
+                reason="typed_boolean",
+                source=source,
+            )
+        return None
+    if answer_type.startswith("list"):
+        normalized = _normalize_static_list_answer(value, answer_type)
+        if normalized is not None:
+            return _StaticFinalAnswer(
+                value=normalized,
+                reason="typed_list",
+                source=source,
+            )
+        return None
+    if answer_type in _STATIC_ACTION_TEXT_TYPES:
+        if isinstance(value, str) and value.strip() and not _looks_like_structured_row(value):
+            return _StaticFinalAnswer(
+                value=value.strip(),
+                reason="typed_string",
+                source=source,
+            )
+        return None
+    if value is not None:
+        return _StaticFinalAnswer(value=value, reason="typed_value", source=source)
+    return None
+
+
+def _static_final_answer_reject_reason(value: Any, task: TaskItem) -> str:
+    answer_type = _answer_type_name(task)
+    if _is_missing_static_value(value):
+        return "empty_or_null"
+    if answer_type in _STATIC_ACTION_NUMBER_TYPES:
+        return "number_parse_failed"
+    if answer_type in _STATIC_ACTION_BOOLEAN_TYPES:
+        return "boolean_parse_failed"
+    if answer_type.startswith("list"):
+        return "list_type_mismatch"
+    if answer_type in _STATIC_ACTION_TEXT_TYPES:
+        if isinstance(value, (dict, list, tuple)):
+            return "string_contains_structured_row"
+        if isinstance(value, str) and _looks_like_structured_row(value):
+            return "string_looks_structured"
+        return "string_empty_or_non_scalar"
+    return "unsupported_answer_type"
+
+
+def _normalize_static_list_answer(value: Any, answer_type: str) -> list[Any] | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                value = json.loads(stripped)
+            except json.JSONDecodeError:
+                return None
+        else:
+            return None
+    if not isinstance(value, list) or not value:
+        return None
+    item_type = _static_list_item_type(answer_type)
+    normalized: list[Any] = []
+    for item in value:
+        if item_type in _STATIC_ACTION_NUMBER_TYPES:
+            number = _normalize_number_answer(item)
+            if not _valid_static_number(number):
+                return None
+            normalized.append(number)
+            continue
+        if item_type in _STATIC_ACTION_BOOLEAN_TYPES:
+            boolean = _normalize_boolean_answer(item)
+            if not isinstance(boolean, bool):
+                return None
+            normalized.append(boolean)
+            continue
+        if item is None:
+            return None
+        text = str(item).strip()
+        if not text or _looks_like_structured_row(text):
+            return None
+        normalized.append(text)
+    return normalized if normalized else None
+
+
+def _static_list_item_type(answer_type: str) -> str:
+    match = re.search(r"\[\s*([^\]]+)\s*\]", answer_type)
+    return match.group(1).strip().lower() if match else "string"
+
+
+def _valid_static_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return not bool(pd.isna(value))
+    except TypeError:
+        return True
+
+
+def _is_missing_static_value(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        return False
+    try:
+        return bool(missing)
+    except (TypeError, ValueError):
+        return False
+
+
+def _looks_like_structured_row(value: str) -> bool:
+    stripped = value.strip()
+    if len(stripped) < 2 or stripped[0] not in "[{":
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, (dict, list))
+
+
+def _record_table_diagnostic(task: TaskItem, entry: dict[str, Any]) -> None:
+    diagnostics = task.metadata.setdefault(_TABLE_DIAGNOSTICS_KEY, [])
+    if isinstance(diagnostics, list):
+        diagnostics.append(json_ready(entry))
+
+
+def _table_execution_diagnostic(
+    *,
+    item: LogicDagItem,
+    execution_result: ExecutionResult,
+    answer_value: Any,
+    finalization: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "stage": "sql_execution",
+        "answer_key": item.task.answer_key,
+        "sql": list(item.sqls),
+        "current_command": item.task.current_command,
+        "logic_dag": json_ready(item.logic_dag),
+        "execution_result": _execution_result_diagnostic(
+            execution_result,
+            answer_value=answer_value,
+        ),
+        "format_answer": json_ready(answer_value),
+        "finalization": json_ready(finalization),
+    }
+
+
+def _execution_result_diagnostic(
+    execution_result: ExecutionResult,
+    *,
+    answer_value: Any,
+) -> dict[str, Any]:
+    return {
+        "ok": execution_result.ok,
+        "answer": json_ready(answer_value),
+        "collector_outputs": json_ready(execution_result.collector_outputs),
+        "traces": json_ready(execution_result.traces),
+        "output_summaries": json_ready(execution_result.output_summaries),
+        "error": json_ready(execution_result.error),
+        "failing_node": json_ready(execution_result.failing_node),
+        "elapsed_ms": execution_result.elapsed_ms,
+    }
+
+
+def _supervisor_synthesis_diagnostic(
+    *,
+    item: LogicDagItem,
+    logic_dag: dict[str, Any],
+    observation: ExecutionResult,
+    supervisor_result: Any | None,
+    error: dict[str, Any] | None,
+) -> dict[str, Any]:
+    decision = supervisor_result.decision if supervisor_result is not None else None
+    finalization = {
+        "source": "synthesis",
+        "bypass_synthesis": False,
+        "confidence": "model",
+        "reason": "supervisor_synthesis",
+    }
+    if decision is not None:
+        finalization.update(
+            {
+                "done": decision.done,
+                "retry": decision.retry,
+                "action_op": decision.action_op,
+            }
+        )
+    if error is not None:
+        finalization.update({"confidence": "invalid", "reason": "synthesis_error"})
+    return {
+        "stage": "supervisor_synthesis",
+        "answer_key": item.task.answer_key,
+        "sql": list(item.sqls),
+        "current_command": item.task.current_command,
+        "logic_dag": json_ready(logic_dag),
+        "synthesis_input": {
+            "current_command": _sql_map([item]),
+            "observation": observation.to_dict(include_outputs=False),
+        },
+        "synthesis_output": json_ready(
+            {
+                "remote_output": supervisor_result.remote_output
+                if supervisor_result is not None
+                else None,
+                "decision": decision.raw if decision is not None else None,
+                "error": error,
+            }
+        ),
+        "finalization": json_ready(finalization),
+    }
 
 
 def _needs_supervisor_review(
@@ -2698,6 +3112,20 @@ def _run_static_synthesis_failure(
     with profiler.measure("static_synthesis", items=len(batch)):
         profiler.increment("static_synthesis_calls")
         for item in batch:
+            _record_table_diagnostic(
+                item.task,
+                _table_execution_diagnostic(
+                    item=item,
+                    execution_result=execution_result,
+                    answer_value=None,
+                    finalization={
+                        "source": "static",
+                        "bypass_synthesis": False,
+                        "confidence": "invalid",
+                        "reason": "execution_failed",
+                    },
+                ),
+            )
             _finalize_failed(
                 item.task,
                 final_results=final_results,
@@ -2758,6 +3186,16 @@ def _run_supervisor_synthesis(
     except Exception as exc:  # noqa: BLE001 - keep cloud/report failures task-scoped.
         profiler.increment("supervisor_synthesis_failures")
         for item in batch:
+            _record_table_diagnostic(
+                item.task,
+                _supervisor_synthesis_diagnostic(
+                    item=item,
+                    logic_dag=logic_dag,
+                    observation=execution_result,
+                    supervisor_result=None,
+                    error=_error_payload(exc),
+                ),
+            )
             _finalize_failed(
                 item.task,
                 final_results=final_results,
@@ -2765,6 +3203,17 @@ def _run_supervisor_synthesis(
                 error=_error_payload(exc),
             )
         return
+    for item in batch:
+        _record_table_diagnostic(
+            item.task,
+            _supervisor_synthesis_diagnostic(
+                item=item,
+                logic_dag=logic_dag,
+                observation=execution_result,
+                supervisor_result=supervisor_result,
+                error=None,
+            ),
+        )
     _apply_supervisor_decision(
         batch=batch,
         decision=supervisor_result.decision,
@@ -2832,6 +3281,18 @@ def _run_supervisor_action_reports_batch(
         if task.answer_key in finalized:
             continue
         if result.error is not None or result.supervisor_result is None:
+            _record_table_diagnostic(
+                task,
+                _action_group_synthesis_diagnostic(
+                    item=result.item,
+                    observation=result.observation,
+                    supervisor_result=result.supervisor_result,
+                    error=_error_payload(
+                        result.error
+                        or RuntimeError("Supervisor synthesis returned no result")
+                    ),
+                ),
+            )
             _finalize_failed(
                 task,
                 final_results=final_results,
@@ -2843,6 +3304,15 @@ def _run_supervisor_action_reports_batch(
             )
             continue
         decision = result.supervisor_result.decision
+        _record_table_diagnostic(
+            task,
+            _action_group_synthesis_diagnostic(
+                item=result.item,
+                observation=result.observation,
+                supervisor_result=result.supervisor_result,
+                error=None,
+            ),
+        )
         _record_action_memory(
             task=task,
             actions=result.item.actions,
@@ -3003,6 +3473,7 @@ def _finalize_batch_from_answer(
         for item in batch:
             key = item.task.answer_key
             if key in answer:
+                item.task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "synthesis"
                 _finalize_success(
                     item.task,
                     answer=answer.get(key),
@@ -3022,6 +3493,7 @@ def _finalize_batch_from_answer(
         return
     if len(batch) == 1:
         item = batch[0]
+        item.task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "synthesis"
         _finalize_success(
             item.task,
             answer=answer,

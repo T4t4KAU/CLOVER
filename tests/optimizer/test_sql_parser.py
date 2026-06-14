@@ -368,6 +368,27 @@ class SqlParserTest(unittest.TestCase):
             },
         )
 
+    def test_parses_not_like_as_negated_like(self) -> None:
+        logic_dag = parse_remote_sql_to_logic_dag(
+            'SELECT "country" AS answer FROM "table_1" '
+            'WHERE "country" NOT LIKE \'United%\';',
+            REMOTE_DSL,
+        )
+
+        filter_node = next(node for node in logic_dag["nodes"] if node["op"] == "Filter")
+        self.assertEqual(
+            filter_node["params"]["predicate"],
+            {
+                "type": "not",
+                "expr": {
+                    "type": "like",
+                    "case_sensitive": True,
+                    "expr": {"type": "column", "name": "country"},
+                    "pattern": {"type": "literal", "value": "United%", "value_type": "string"},
+                },
+            },
+        )
+
     def test_preserves_binary_regression_aggregate_arguments(self) -> None:
         remote_dsl = {
             **REMOTE_DSL,

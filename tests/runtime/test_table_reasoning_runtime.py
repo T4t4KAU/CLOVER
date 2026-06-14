@@ -134,6 +134,44 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertIn("baseline_executor", result.profile["stages"])
         self.assertIn("local_executor_speedup", result.profile["summary"])
 
+    def test_remote_validation_bypasses_synthesis_for_valid_format_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        [
+                            _country_sql("answer_1"),
+                        ]
+                    ),
+                ],
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        Path(tmpdir),
+                        table_path,
+                        "What is the country of the person with the highest net worth?",
+                        "string",
+                    ),
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=8,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        case_result = result.case_results[0]
+        self.assertEqual(case_result.answer, "United States")
+        self.assertEqual(len(client.chat.completions.requests), 1)
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+        self.assertEqual(case_result.metadata["final_answer_source"], "format_answer")
+        diagnostics = case_result.metadata["table_diagnostics"]
+        self.assertEqual(diagnostics[-1]["stage"], "sql_execution")
+        self.assertIs(diagnostics[-1]["finalization"]["bypass_synthesis"], True)
+
     def test_batch_supervisor_report_accepts_keyed_answers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
@@ -141,9 +179,10 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                 [
                     json.dumps(
                         [
-                            _self_made_sql("answer_1"),
+                            'SELECT "selfMade" AS "answer_1" FROM "table_1" '
+                            'WHERE "country" = \'missing\';',
                             'SELECT "country" AS "answer_2" FROM "table_1" '
-                            'ORDER BY "finalWorth" ASC LIMIT 1;',
+                            'WHERE "country" = \'missing\';',
                         ]
                     ),
                     json.dumps(
@@ -425,12 +464,6 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                             "q": 'SELECT COUNT(*) AS "answer_1" FROM "table_1";',
                         }
                     ),
-                    json.dumps(
-                        {
-                            "op": "answer",
-                            "a": 2,
-                        }
-                    ),
                 ]
             )
 
@@ -449,7 +482,8 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertTrue(result.case_results[0].ok)
         self.assertEqual(result.case_results[0].answer, 2)
         self.assertEqual(result.case_results[0].retry_count, 1)
-        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 2)
+        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
+        self.assertEqual(result.profile["counters"]["static_final_answer_hits"], 1)
         self.assertNotIn("supervisor_repair_calls", result.profile["counters"])
 
     def test_default_validation_mode_does_not_retry_execution_errors(self) -> None:
