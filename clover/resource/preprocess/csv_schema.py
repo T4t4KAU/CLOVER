@@ -11,11 +11,17 @@ from typing import Any
 COMMON_DELIMITERS = {",", "\t", ";", "|"}
 
 
+_SAMPLE_MAX_ROWS = 5
+_SAMPLE_MAX_CHARS = 80
+
+
 def extract_csv_schema(path: str | Path) -> dict[str, Any]:
     """Extract structural CSV schema.
 
     CSV files do not carry a strict column type system. The schema therefore
-    records only the table shape and header names.
+    records only the table shape and header names, plus a small sample of
+    values per column so that the Supervisor can detect patterns (e.g. country
+    codes hidden inside parentheses).
     """
 
     csv_path = Path(path)
@@ -36,9 +42,23 @@ def extract_csv_schema(path: str | Path) -> dict[str, Any]:
             raise ValueError(f"CSV file has no header: {csv_path}")
 
         row_count = 0
+        column_samples: dict[str, list[str]] = {col: [] for col in reader.fieldnames}
 
-        for _row in reader:
+        for row in reader:
             row_count += 1
+            if row_count <= _SAMPLE_MAX_ROWS:
+                for col in reader.fieldnames:
+                    val = row.get(col, "")
+                    if val is not None and len(column_samples[col]) < _SAMPLE_MAX_ROWS:
+                        truncated = str(val)[:_SAMPLE_MAX_CHARS]
+                        column_samples[col].append(truncated)
+
+    columns_detail = []
+    for col in reader.fieldnames:
+        entry: dict[str, Any] = {"name": col}
+        if column_samples.get(col):
+            entry["sample"] = column_samples[col]
+        columns_detail.append(entry)
 
     return {
         "format": "csv",
@@ -47,6 +67,7 @@ def extract_csv_schema(path: str | Path) -> dict[str, Any]:
             "columns": len(reader.fieldnames),
         },
         "columns": list(reader.fieldnames),
+        "columns_detail": columns_detail,
     }
 
 
