@@ -773,6 +773,11 @@ class _ExpressionEvaluator:
                 replacement,
                 regex=function == "REGEXP_REPLACE",
             )
+        if function == "SPLIT_PART":
+            values = _series_for_frame(args[0], self.frame)
+            separator = str(_to_python_scalar(args[1])) if len(args) > 1 else ","
+            part_index = int(_to_python_scalar(args[2])) if len(args) > 2 else 1
+            return values.astype("string").str.split(separator).str[part_index - 1]
         if function in {"SPLIT", "STRING_TO_ARRAY", "REGEXP_SPLIT_TO_ARRAY"}:
             values = _series_for_frame(args[0], self.frame)
             separator = str(_to_python_scalar(args[1])) if len(args) > 1 else ","
