@@ -265,6 +265,11 @@ class TableReasoningSandboxPolicy:
         source_sql = state.node.get("source_sql")
         if isinstance(source_sql, str) and source_sql.strip():
             world["source_sql"] = source_sql.strip()
+        # Inject a one-line few-shot hint tailored to the node op so the SLM
+        # sees a concrete pattern without bloating the static prompt prefix.
+        few_shot_hint = _few_shot_hint_for_op(state.node)
+        if few_shot_hint:
+            world["few_shot_hint"] = few_shot_hint
         diag = _failure_diagnostic(state)
         if diag is not None:
             world["diag"] = diag
@@ -1555,6 +1560,43 @@ def _frame_prompt_summary(frame: pd.DataFrame) -> dict[str, Any]:
     if sample_values:
         summary["sample_values"] = sample_values
     return summary
+
+
+def _few_shot_hint_for_op(node: dict[str, Any]) -> str | None:
+    """Return a one-line pattern hint tailored to the node op.
+
+    The hint is injected into the dynamic payload (world.few_shot_hint) so it
+    stays out of the static prompt prefix and only appears for ops that need
+    guidance. Returns None for ops with no tailored hint.
+    """
+    op = node.get("op")
+    params = node.get("params", {}) if isinstance(node.get("params"), dict) else {}
+    if op == "Derive":
+        return (
+            "Pattern: parse text to numbers with regex; "
+            "strip currency symbols, multiply by suffix (K=1e3, M=1e6, B=1e9)."
+        )
+    if op == "Filter":
+        predicate = params.get("predicate")
+        if isinstance(predicate, dict) and predicate.get("type") in {
+            "like",
+            "logical_op",
+        }:
+            return (
+                "Pattern: normalize both sides (casefold, keep alnum only), "
+                "then use str.contains for fuzzy text match."
+            )
+        return None
+    if op == "FormatAnswer":
+        return (
+            "Pattern: return pd.DataFrame({\"answer\": [value]}) with exactly one row."
+        )
+    if op == "Join":
+        return (
+            "Pattern: use pd.merge(left, right, on=key, how='inner'); "
+            "rename conflicting columns with suffixes."
+        )
+    return None
 
 
 def _failure_diagnostic(

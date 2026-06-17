@@ -117,6 +117,8 @@ def run_sandbox_agent_loop(
                         prompt_kind=prompt_kind,
                         token_usage=token_usage,
                         sequence_trace=sequence_result.trace_metadata(),
+                        prompt_text=prompt,
+                        response_text=result.text,
                     )
                 )
                 last_error_signature, repeat_error_count, early_stopped = (
@@ -154,6 +156,8 @@ def run_sandbox_agent_loop(
                     error=action_result.error,
                     token_usage=token_usage,
                     sequence_trace=sequence_result.trace_metadata(),
+                    prompt_text=prompt,
+                    response_text=result.text,
                 )
             )
             if action_result.accepted:
@@ -319,6 +323,8 @@ def _trace_step(
     error: dict[str, Any] | None = None,
     token_usage: dict[str, int] | None = None,
     sequence_trace: dict[str, Any] | None = None,
+    prompt_text: str | None = None,
+    response_text: str | None = None,
 ) -> dict[str, Any]:
     step = {
         "iteration": iteration + 1,
@@ -339,6 +345,10 @@ def _trace_step(
         step["token_usage"] = dict(token_usage)
     if sequence_trace is not None:
         step["sequence"] = dict(sequence_trace)
+    if prompt_text is not None:
+        step["prompt"] = prompt_text
+    if response_text is not None:
+        step["response"] = response_text
     return step
 
 

@@ -182,6 +182,8 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
         _shared_prefix = (
             "common/root.md",
             "table_reasoning/feedback_decoding.md",
+            "table_reasoning/context_guide.md",
+            "table_reasoning/few_shot_examples.md",
         )
         _repair_ops = ("filter", "project", "derive", "join")
 

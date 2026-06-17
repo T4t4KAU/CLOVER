@@ -12,6 +12,7 @@ COMMON_DELIMITERS = {",", "\t", ";", "|"}
 
 
 _SAMPLE_MAX_ROWS = 5
+_SAMPLE_TAIL_ROWS = 2
 _SAMPLE_MAX_CHARS = 80
 
 
@@ -21,7 +22,9 @@ def extract_csv_schema(path: str | Path) -> dict[str, Any]:
     CSV files do not carry a strict column type system. The schema therefore
     records only the table shape and header names, plus a small sample of
     values per column so that the Supervisor can detect patterns (e.g. country
-    codes hidden inside parentheses).
+    codes hidden inside parentheses). The sample combines the first
+    ``_SAMPLE_MAX_ROWS`` rows and the last ``_SAMPLE_TAIL_ROWS`` rows so that
+    trailing summary rows (e.g. Total, Turnout) are visible to the Supervisor.
     """
 
     csv_path = Path(path)
@@ -41,20 +44,32 @@ def extract_csv_schema(path: str | Path) -> dict[str, Any]:
         if reader.fieldnames is None:
             raise ValueError(f"CSV file has no header: {csv_path}")
 
-        row_count = 0
-        column_samples: dict[str, list[str]] = {col: [] for col in reader.fieldnames}
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+        row_count = len(rows)
 
-        for row in reader:
-            row_count += 1
-            if row_count <= _SAMPLE_MAX_ROWS:
-                for col in reader.fieldnames:
-                    val = row.get(col, "")
-                    if val is not None and len(column_samples[col]) < _SAMPLE_MAX_ROWS:
-                        truncated = str(val)[:_SAMPLE_MAX_CHARS]
-                        column_samples[col].append(truncated)
+        column_samples: dict[str, list[str]] = {col: [] for col in fieldnames}
+
+        # Indices of rows to sample: first _SAMPLE_MAX_ROWS + last _SAMPLE_TAIL_ROWS.
+        head_end = min(_SAMPLE_MAX_ROWS, row_count)
+        tail_start = max(head_end, row_count - _SAMPLE_TAIL_ROWS)
+        sampled_indices = set(range(head_end)) | set(range(tail_start, row_count))
+
+        for idx in sorted(sampled_indices):
+            row = rows[idx]
+            for col in fieldnames:
+                val = row.get(col, "")
+                if val is None:
+                    continue
+                truncated = str(val)[:_SAMPLE_MAX_CHARS]
+                # Skip duplicates to keep the sample compact when head and tail
+                # overlap or when the same value repeats.
+                samples = column_samples[col]
+                if truncated not in samples:
+                    samples.append(truncated)
 
     columns_detail = []
-    for col in reader.fieldnames:
+    for col in fieldnames:
         entry: dict[str, Any] = {"name": col}
         if column_samples.get(col):
             entry["sample"] = column_samples[col]
@@ -64,9 +79,9 @@ def extract_csv_schema(path: str | Path) -> dict[str, Any]:
         "format": "csv",
         "shape": {
             "rows": row_count,
-            "columns": len(reader.fieldnames),
+            "columns": len(fieldnames),
         },
-        "columns": list(reader.fieldnames),
+        "columns": list(fieldnames),
         "columns_detail": columns_detail,
     }
 

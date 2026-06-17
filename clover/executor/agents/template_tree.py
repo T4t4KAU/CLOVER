@@ -154,6 +154,8 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                     template="common/root.md",
                                     additional_templates=(
                                         "table_reasoning/feedback_decoding.md",
+                                        "table_reasoning/context_guide.md",
+                                        "table_reasoning/few_shot_examples.md",
                                     ),
                                     children=(
                                         TemplateNode(
