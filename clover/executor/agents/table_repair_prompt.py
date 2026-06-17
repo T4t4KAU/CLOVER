@@ -136,7 +136,8 @@ def _repair_state_hint(observation: dict[str, Any]) -> list[str]:
     if not observation or "empty" in message_lower:
         return [
             "Do not repeat exact text equality.",
-            "Normalize both cell text and target text before comparing.",
+            "Normalize both cell text and target text with .str.casefold() and .str.replace(r'[^a-z0-9]', '', regex=True) before comparing.",
+            "Use str.contains(pattern, case=False, regex=False) for substring match. Do NOT pass casefold= as a keyword argument.",
             "Return matching rows from the original DataFrame.",
         ]
     return ["Use the check field to make the smallest repair."]

@@ -933,9 +933,12 @@ def _python_function_contract_feedback(
     if "empty" in message_lower:
         feedback["column_values"] = _predicate_value_feedback(state.python_task)
         feedback["hint"] = (
-            "Empty output often means the predicate matched nothing. "
-            "Inspect 'column_values' and relax the match (normalize text, "
-            "use casefold, or use substring matching)."
+            "Empty output means the predicate matched nothing. "
+            "Inspect 'column_values' for the actual values in the data, then "
+            "relax the match: use str.contains(pattern, case=False, regex=False) "
+            "for substring match, or normalize both sides with "
+            ".str.casefold().str.replace(r'[^a-z0-9]', '', regex=True) before "
+            "comparing. Do NOT pass casefold= as a keyword argument to str.contains."
         )
     if "missing required columns" in message_lower:
         feedback["expected_columns"] = list(

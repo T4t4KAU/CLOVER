@@ -350,10 +350,33 @@ def _load_json_object(text: str) -> dict[str, Any]:
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
-        payload = _load_first_json_object(stripped)
+        # Small models often embed regex escapes (\W, \b, \d, \s) inside JSON
+        # string values, which are invalid JSON. Try fixing them before falling
+        # back to the slower first-object scan.
+        try:
+            payload = json.loads(_fix_invalid_json_escapes(stripped))
+        except json.JSONDecodeError:
+            payload = _load_first_json_object(stripped)
     if not isinstance(payload, dict):
         raise ValueError("Agent action JSON must be an object")
     return payload
+
+
+# Valid single-character JSON escapes (besides \uXXXX).
+_VALID_JSON_ESCAPES = set('"\\/bfnrt')
+_INVALID_JSON_ESCAPE_RE = re.compile(r'\\([^"\\/bfnrtu])')
+
+
+def _fix_invalid_json_escapes(text: str) -> str:
+    """Double-escape invalid JSON backslash sequences produced by small models.
+
+    Small models frequently write regex patterns (e.g. ``\\b``, ``\\W``, ``\\d``)
+    inside JSON string values. In JSON, ``\\b`` is the backspace control char and
+    ``\\W``/``\\d`` are invalid escapes. Doubling the backslash turns them into
+    literal backslashes so the downstream regex engine still sees the intended
+    pattern.
+    """
+    return _INVALID_JSON_ESCAPE_RE.sub(lambda m: "\\\\" + m.group(1), text)
 
 
 def _load_first_json_object(text: str) -> Any:
