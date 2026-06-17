@@ -551,6 +551,32 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(result.output_summaries["T0"]["rows"], 2)
         self.assertNotIn("T0", result.outputs)
 
+    def test_agent_loop_early_stops_on_repeated_error(self) -> None:
+        """Repeated identical errors should trigger early-stop before max_iterations."""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text("value\n7\n8\n", encoding="utf-8")
+
+            result = _execute_plan(
+                _first_value_plan(table_path),
+                slm_config={
+                    "api_type": "chat_completions",
+                    "model": "fake-slm",
+                    "temperature": 0,
+                    "agent_loop_repeat_error_early_stop": 2,
+                },
+                slm_client=_FakeChatClient("not json"),
+                agent_loop_max_iterations=5,
+            )
+
+        self.assertFalse(result.ok)
+        agent_loop_trace = result.traces[1]["agent_loop"]
+        # Early-stop threshold is 2, so the loop should stop at 2 iterations,
+        # well below the max_iterations of 5.
+        self.assertLess(agent_loop_trace["iterations"], 5)
+        self.assertIn("early-stopped", result.error["message"].lower())
+
     def test_fast_path_execution_error_reports_failing_node(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"

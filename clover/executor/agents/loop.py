@@ -71,10 +71,14 @@ def run_sandbox_agent_loop(
         context.slm_config or load_slm_config(),
         node_timeout_seconds=context.node_timeout_seconds,
     )
+    repeat_error_limit = _repeat_error_limit(slm_config)
     observations: list[dict[str, Any]] = []
     trace_steps: list[dict[str, Any]] = []
     prompt_steps: list[dict[str, Any]] = []
     last_error_message: str | None = None
+    last_error_signature: str | None = None
+    repeat_error_count = 0
+    early_stopped = False
     sandbox.start(decision=decision, trigger=trigger, error=error)
 
     try:
@@ -115,6 +119,20 @@ def run_sandbox_agent_loop(
                         sequence_trace=sequence_result.trace_metadata(),
                     )
                 )
+                last_error_signature, repeat_error_count, early_stopped = (
+                    _update_repeat_error_state(
+                        observation,
+                        last_error_signature,
+                        repeat_error_count,
+                        repeat_error_limit,
+                    )
+                )
+                if early_stopped:
+                    last_error_message = (
+                        f"Agent Loop early-stopped: same error repeated "
+                        f"{repeat_error_count} times. {last_error_message or ''}"
+                    )
+                    break
                 continue
 
             action_result = sandbox.run_action(action)
@@ -168,6 +186,20 @@ def run_sandbox_agent_loop(
                     last_error_message = str(
                         action_result.observation["error"].get("message") or ""
                     )
+                last_error_signature, repeat_error_count, early_stopped = (
+                    _update_repeat_error_state(
+                        action_result.observation,
+                        last_error_signature,
+                        repeat_error_count,
+                        repeat_error_limit,
+                    )
+                )
+                if early_stopped:
+                    last_error_message = (
+                        f"Agent Loop early-stopped: same error repeated "
+                        f"{repeat_error_count} times. {last_error_message or ''}"
+                    )
+                    break
     finally:
         sandbox.close()
 
@@ -181,10 +213,67 @@ def run_sandbox_agent_loop(
         node=node,
         trace={
             "trigger": trigger,
-            "iterations": iterations,
+            "iterations": len(trace_steps),
             "steps": trace_steps,
         },
     )
+
+
+def _repeat_error_limit(slm_config: dict[str, Any]) -> int:
+    """Read the early-stop threshold from SLM config; default 2."""
+
+    value = (
+        slm_config.get("agent_loop_repeat_error_early_stop")
+        if isinstance(slm_config, dict)
+        else None
+    )
+    if value is None:
+        return 2
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 2
+    return parsed if parsed > 0 else 2
+
+
+def _error_signature(observation: dict[str, Any] | None) -> str | None:
+    """Build a coarse signature for an error observation to detect repeats.
+
+    Two observations with the same signature are treated as the same failure
+    mode, so the loop can early-stop instead of wasting iterations.
+    """
+
+    if not isinstance(observation, dict):
+        return None
+    error = observation.get("error")
+    if not isinstance(error, dict):
+        return None
+    error_type = str(error.get("type") or observation.get("type") or "")
+    message = str(error.get("message") or error.get("msg") or "")
+    # Take the first 80 chars of the message: enough to identify the failure
+    # mode, robust to small variations in row counts or column lists.
+    return f"{error_type}:{message[:80]}"
+
+
+def _update_repeat_error_state(
+    observation: dict[str, Any] | None,
+    last_signature: str | None,
+    count: int,
+    limit: int,
+) -> tuple[str | None, int, bool]:
+    """Track repeated error signatures and signal early-stop.
+
+    Returns (new_signature, new_count, should_stop).
+    """
+
+    signature = _error_signature(observation)
+    if signature is None:
+        return None, 0, False
+    if signature == last_signature:
+        new_count = count + 1
+    else:
+        new_count = 1
+    return signature, new_count, new_count >= limit
 
 
 def _generate_local_slm_sequence(

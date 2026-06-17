@@ -22,6 +22,7 @@ STRING_FIELDS = {
 }
 INTEGER_FIELDS = {
     "agent_loop_max_iterations",
+    "agent_loop_repeat_error_early_stop",
     "max_parallel_slm_node_jobs",
     "max_parallel_slm_sequences",
     "max_pending_slm_sequences",

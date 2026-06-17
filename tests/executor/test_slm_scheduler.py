@@ -151,6 +151,7 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
                 "tool:pandas_env",
                 "contract:number",
                 "mode:empty_filter_repair",
+                "op:filter",
             ),
             tree.leaf_keys(),
         )
@@ -178,22 +179,37 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
         )
 
     def test_default_leaf_specs_are_derived_from_static_template_tree(self) -> None:
-        expected_paths = {
-            TABLE_NUMBER_LEAF_KEY: ("common/root.md", "table_reasoning/agent_loop.md"),
-            TABLE_STRING_LEAF_KEY: ("common/root.md", "table_reasoning/agent_loop.md"),
-            TABLE_BOOLEAN_LEAF_KEY: ("common/root.md", "table_reasoning/agent_loop.md"),
-            TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY: (
-                "table_reasoning/empty_filter_repair.md",
-            ),
-            TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY: (
-                "table_reasoning/empty_filter_repair.md",
-            ),
-            TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY: (
-                "table_reasoning/empty_filter_repair.md",
-            ),
+        _shared_prefix = (
+            "common/root.md",
+            "table_reasoning/feedback_decoding.md",
+        )
+        _repair_ops = ("filter", "project", "derive", "join")
+
+        def _repair_key(contract: str, op: str) -> tuple[str, ...]:
+            return (
+                "agent:data",
+                "family:table_reasoning",
+                "interface:solve_python",
+                "tool:pandas_env",
+                f"contract:{contract}",
+                "mode:empty_filter_repair",
+                f"op:{op}",
+            )
+
+        expected_paths: dict[tuple[str, ...], tuple[str, ...]] = {
+            TABLE_NUMBER_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
+            TABLE_STRING_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
+            TABLE_BOOLEAN_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
             TABLE_EVIDENCE_LEAF_KEY: ("table_reasoning/evidence.md",),
             DOCUMENT_WORKER_LEAF_KEY: ("document_reasoning/worker.md",),
         }
+        for contract in ("number", "string", "boolean"):
+            for op in _repair_ops:
+                key = _repair_key(contract, op)
+                expected_paths[key] = _shared_prefix + (
+                    "table_reasoning/empty_filter_repair.md",
+                    f"table_reasoning/repair_hints/{op}.md",
+                )
 
         self.assertEqual(slm_template_leaf_specs(), NODE_AGENT_SLM_TEMPLATE_LEAVES)
         for spec in slm_template_leaf_specs():
@@ -247,6 +263,7 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
             view=view,
             iteration=1,
             steps=[],
+            node={"op": "Filter"},
         )
 
         self.assertLess(prompt.index("Repair with the smallest change."), prompt.index("Case:"))

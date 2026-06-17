@@ -8,6 +8,7 @@ import io
 import importlib
 import json
 import re
+import traceback
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from types import ModuleType
@@ -784,6 +785,7 @@ def _solve_action(
                 "type": "python_error",
                 "ok": False,
                 "error": _compact_error(exc),
+                "traceback_tail": _traceback_tail(exc),
                 "stdout": stdout,
                 "feedback": _python_function_error_feedback(state, exc),
             },
@@ -868,11 +870,49 @@ def _python_function_error_feedback(
 ) -> dict[str, Any]:
     feedback: dict[str, Any] = {
         "available_args": list(state.python_task.args),
+        "available_libs": ["pd", "np", "helpers", "print"],
+        "error_type": type(exc).__name__,
     }
     if isinstance(exc, NameError):
-        feedback["message"] = "Only solve arguments and provided libraries are visible."
-    if isinstance(exc, KeyError):
+        feedback["message"] = (
+            "Only solve arguments and provided libraries are visible. "
+            "Use the exact argument names listed in available_args."
+        )
+        feedback["hint"] = "Check for typos in column names or undefined variables."
+    elif isinstance(exc, KeyError):
         feedback["columns"] = _input_columns_feedback(state.python_task)
+        feedback["message"] = (
+            "KeyError: the requested column does not exist. "
+            "Use one of the columns listed in 'columns'."
+        )
+        feedback["hint"] = (
+            "Column names are case-sensitive. Compare against 'columns' field."
+        )
+    elif isinstance(exc, (TypeError, ValueError)):
+        feedback["message"] = (
+            f"{type(exc).__name__}: check operand types before comparison or arithmetic. "
+            "Use pd.to_numeric(series, errors='coerce') for numeric coercion, "
+            "or str(series).str.strip() for text normalization."
+        )
+        feedback["hint"] = (
+            "Mixed-type columns often need explicit coercion before comparison."
+        )
+    elif isinstance(exc, AttributeError):
+        feedback["columns"] = _input_columns_feedback(state.python_task)
+        feedback["message"] = (
+            "AttributeError: the object does not have the requested attribute. "
+            "Verify the column exists and is a Series before calling .str/.dt/.apply."
+        )
+        feedback["hint"] = "Use df['col'] access; check dtype with df['col'].dtype."
+    elif isinstance(exc, IndexError):
+        feedback["message"] = (
+            "IndexError: index out of range. Avoid positional indexing on "
+            "DataFrames; use .iloc with explicit bounds or boolean masks."
+        )
+    else:
+        feedback["message"] = (
+            f"{type(exc).__name__}: inspect the traceback and fix the root cause."
+        )
     return feedback
 
 
@@ -884,10 +924,29 @@ def _python_function_contract_feedback(
     feedback: dict[str, Any] = {
         "contract": state.python_task.contract,
     }
-    if "empty" in message.lower():
+    message_lower = message.lower()
+    if "empty" in message_lower:
         feedback["column_values"] = _predicate_value_feedback(state.python_task)
+        feedback["hint"] = (
+            "Empty output often means the predicate matched nothing. "
+            "Inspect 'column_values' and relax the match (normalize text, "
+            "use casefold, or use substring matching)."
+        )
+    if "missing required columns" in message_lower:
+        feedback["expected_columns"] = list(
+            state.python_task.contract.get("columns", [])
+        )
+        feedback["hint"] = (
+            "Add the missing columns listed in 'expected_columns' to the result."
+        )
+    if "one row" in message_lower:
+        feedback["hint"] = (
+            "Aggregate must produce exactly one row. "
+            "Wrap the result in a single-row DataFrame: pd.DataFrame({...})."
+        )
     if isinstance(candidate, pd.DataFrame):
         feedback["columns"] = [str(column) for column in candidate.columns]
+        feedback["rows"] = int(len(candidate))
     return feedback
 
 
@@ -1793,6 +1852,14 @@ def _compact_error(exc: Exception) -> dict[str, Any]:
         "type": payload["type"],
         "message": _redact_local_paths(payload["message"]),
     }
+
+
+def _traceback_tail(exc: Exception, *, max_lines: int = 8) -> list[str]:
+    """Return the last few traceback lines so the Agent can locate the error."""
+
+    frames = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    tail = frames[-max_lines:]
+    return [_redact_local_paths(line.rstrip("\n")) for line in tail]
 
 
 def _reserved_workspace_names() -> set[str]:

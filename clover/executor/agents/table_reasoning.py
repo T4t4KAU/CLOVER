@@ -159,7 +159,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
             return False
         return (
             _supports_empty_filter_repair(self.context.task_type)
-            and self.node.get("op") == "Filter"
+            and self.node.get("op") in _EMPTY_OUTPUT_REPAIRABLE_OPS
             and _is_empty_table_output(output)
         )
 
@@ -175,7 +175,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         return (
             trigger == "fast_path_empty_output"
             and _supports_empty_filter_repair(self.context.task_type)
-            and self.node.get("op") == "Filter"
+            and self.node.get("op") in _EMPTY_OUTPUT_REPAIRABLE_OPS
             and _is_empty_table_output(output)
         )
 
@@ -214,6 +214,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
                         view=view,
                         iteration=iteration,
                         steps=steps,
+                        node=self.node,
                     )
                     if use_empty_filter_repair
                     else render_agent_loop_prompt(
@@ -288,6 +289,9 @@ def _optional_text(value: Any) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
+_EMPTY_OUTPUT_REPAIRABLE_OPS = frozenset({"Filter", "Project", "Derive", "Join"})
+
+
 def _use_empty_filter_repair_prompt(
     *,
     task_type: str,
@@ -297,7 +301,7 @@ def _use_empty_filter_repair_prompt(
     return (
         trigger == "fast_path_empty_output"
         and _supports_empty_filter_repair(task_type)
-        and node.get("op") == "Filter"
+        and node.get("op") in _EMPTY_OUTPUT_REPAIRABLE_OPS
     )
 
 

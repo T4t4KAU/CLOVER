@@ -6,10 +6,11 @@
   "model": "qwen2.5-coder-7b-local",
   "timeout": 1800,
   "max_retries": 2,
-  "max_tokens": 512,
+  "max_tokens": 768,
   "temperature": 0,
   "top_p": 1.0,
   "http2": false,
   "trust_env": false,
-  "agent_loop_max_iterations": 3
+  "agent_loop_max_iterations": 5,
+  "agent_loop_repeat_error_early_stop": 2
 }

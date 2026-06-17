@@ -79,6 +79,7 @@ TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY = (
     "tool:pandas_env",
     "contract:number",
     "mode:empty_filter_repair",
+    "op:filter",
 )
 TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY = (
     "agent:data",
@@ -87,6 +88,7 @@ TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY = (
     "tool:pandas_env",
     "contract:string",
     "mode:empty_filter_repair",
+    "op:filter",
 )
 TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY = (
     "agent:data",
@@ -95,6 +97,7 @@ TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY = (
     "tool:pandas_env",
     "contract:boolean",
     "mode:empty_filter_repair",
+    "op:filter",
 )
 TABLE_EVIDENCE_LEAF_KEY = (
     "agent:data",
@@ -114,6 +117,26 @@ DOCUMENT_WORKER_LEAF_KEY = (
 )
 
 
+_REPAIR_OP_LEAF_SUFFIXES: dict[str, str] = {
+    "Filter": "op:filter",
+    "Project": "op:project",
+    "Derive": "op:derive",
+    "Join": "op:join",
+}
+_DEFAULT_REPAIR_OP_SUFFIX = "op:filter"
+
+
+_EMPTY_OUTPUT_REPAIR_OP_CHILDREN: tuple[TemplateNode, ...] = tuple(
+    TemplateNode(
+        name=op_name,
+        additional_templates=(f"table_reasoning/repair_hints/{op_suffix.split(':', 1)[1]}.md",),
+        leaf_description=f"Empty {op_suffix.split(':', 1)[1].capitalize()} repair.",
+    )
+    for op_suffix in ("op:filter", "op:project", "op:derive", "op:join")
+    for op_name in (op_suffix,)
+)
+
+
 NODE_AGENT_TEMPLATE_TREE = TemplateNode(
     name="root",
     children=(
@@ -128,13 +151,16 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                             children=(
                                 TemplateNode(
                                     name="tool:pandas_env",
+                                    template="common/root.md",
+                                    additional_templates=(
+                                        "table_reasoning/feedback_decoding.md",
+                                    ),
                                     children=(
                                         TemplateNode(
                                             name="contract:number",
                                             children=(
                                                 TemplateNode(
                                                     name="mode:initial",
-                                                    template="common/root.md",
                                                     additional_templates=(
                                                         "table_reasoning/agent_loop.md",
                                                     ),
@@ -149,10 +175,8 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                                         "table_reasoning/"
                                                         "empty_filter_repair.md"
                                                     ),
-                                                    leaf_description=(
-                                                        "Table empty Filter repair "
-                                                        "with numeric output contract."
-                                                    ),
+                                                    children=_EMPTY_OUTPUT_REPAIR_OP_CHILDREN,
+                                                    leaf_description="",
                                                 ),
                                             ),
                                         ),
@@ -161,7 +185,6 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                             children=(
                                                 TemplateNode(
                                                     name="mode:initial",
-                                                    template="common/root.md",
                                                     additional_templates=(
                                                         "table_reasoning/agent_loop.md",
                                                     ),
@@ -176,10 +199,8 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                                         "table_reasoning/"
                                                         "empty_filter_repair.md"
                                                     ),
-                                                    leaf_description=(
-                                                        "Table empty Filter repair "
-                                                        "with string output contract."
-                                                    ),
+                                                    children=_EMPTY_OUTPUT_REPAIR_OP_CHILDREN,
+                                                    leaf_description="",
                                                 ),
                                             ),
                                         ),
@@ -188,7 +209,6 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                             children=(
                                                 TemplateNode(
                                                     name="mode:initial",
-                                                    template="common/root.md",
                                                     additional_templates=(
                                                         "table_reasoning/agent_loop.md",
                                                     ),
@@ -203,10 +223,8 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                                         "table_reasoning/"
                                                         "empty_filter_repair.md"
                                                     ),
-                                                    leaf_description=(
-                                                        "Table empty Filter repair "
-                                                        "with boolean output contract."
-                                                    ),
+                                                    children=_EMPTY_OUTPUT_REPAIR_OP_CHILDREN,
+                                                    leaf_description="",
                                                 ),
                                             ),
                                         ),
@@ -298,12 +316,18 @@ def render_table_empty_filter_repair_prompt(
     view: NodeView,
     iteration: int,
     steps: list[dict[str, Any]] | None = None,
+    node: dict[str, Any] | None = None,
 ) -> str:
-    """Render the compact table Filter repair prompt used after empty output."""
+    """Render the compact table empty-output repair prompt.
+
+    The leaf key is selected by the node's op so that the op-specific hint
+    template is appended after the shared repair prefix.
+    """
 
     del iteration
+    leaf_key = _table_reasoning_empty_filter_repair_leaf_key_for_node(node or {})
     return _render_templates(
-        template_paths_for_leaf_key(TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY),
+        template_paths_for_leaf_key(leaf_key),
         context={
             "CASE_JSON": empty_filter_repair_case_json(
                 view=view,
@@ -456,10 +480,18 @@ def _table_reasoning_empty_filter_repair_leaf_key_for_node(
 ) -> tuple[str, ...]:
     initial_leaf = _table_reasoning_leaf_key_for_node(node)
     if initial_leaf == TABLE_BOOLEAN_LEAF_KEY:
-        return TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY
-    if initial_leaf == TABLE_STRING_LEAF_KEY:
-        return TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY
-    return TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY
+        base = TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY
+    elif initial_leaf == TABLE_STRING_LEAF_KEY:
+        base = TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY
+    else:
+        base = TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY
+    # base already ends with the default op suffix (op:filter).
+    # Replace the trailing op segment with the node's actual op when available.
+    op = node.get("op") if isinstance(node, dict) else None
+    op_suffix = _REPAIR_OP_LEAF_SUFFIXES.get(str(op or ""), _DEFAULT_REPAIR_OP_SUFFIX)
+    if op_suffix == _DEFAULT_REPAIR_OP_SUFFIX:
+        return base
+    return base[:-1] + (op_suffix,)
 
 
 def _template_paths_for_nodes(nodes: tuple[TemplateNode, ...]) -> tuple[str, ...]:
