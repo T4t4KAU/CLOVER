@@ -78,6 +78,9 @@ _STATIC_ACTION_TEXT_TYPES = frozenset({"string", "entity", "category"})
 _ACTION_FULL_RESULT_KEY = "_clover_full_res"
 _TABLE_DIAGNOSTICS_KEY = "table_diagnostics"
 _FINAL_ANSWER_SOURCE_KEY = "final_answer_source"
+_DECOMPOSE_TRACE_KEY = "decompose_trace"
+_SYNTHESIS_TRACE_KEY = "synthesis_trace"
+_AGENT_LOOP_TRACE_KEY = "agent_loop_trace"
 _CACHE_MISSING = object()
 
 # Maps normalised SQL text to the (evidence_key, DataFrame) produced by a
@@ -439,6 +442,7 @@ def _table_builder_metadata(
         "diagnostics": builder_result.diagnostics,
         "raw_output": builder_result.raw_output,
         "parsed_output": builder_result.parsed_output,
+        "prompt": builder_result.prompt,
         "prompt_chars": len(builder_result.prompt),
         "token_usage": extract_token_usage(builder_result.response_payload),
         "task_answer_type": task_dsl.get("answer", {}).get("type"),
@@ -588,6 +592,15 @@ def _enqueue_planned_table_command(
     )
 
 
+def _model_config_from_response(response_payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract non-secret model config from a remote LLM response payload."""
+    return {
+        "model": response_payload.get("model"),
+        "api_type": response_payload.get("api_type") or response_payload.get("object"),
+        "base_url": response_payload.get("base_url"),
+    }
+
+
 def _finish_remote_decompose_job(
     *,
     job: _RemoteDecomposeJob,
@@ -617,7 +630,18 @@ def _finish_remote_decompose_job(
             response_payload=result.response_payload,
         )
         parsed = _parse_remote_decompose_output(result.command or "", job)
+        decompose_round = {
+            "round": 1,
+            "prompt": result.prompt,
+            "response": result.remote_output,
+            "response_id": result.response_id,
+            "token_usage": extract_token_usage(result.response_payload),
+        }
         for task, command in zip(job.batch, parsed, strict=True):
+            task.metadata[_DECOMPOSE_TRACE_KEY] = {
+                "model_config": _model_config_from_response(result.response_payload),
+                "rounds": [decompose_round],
+            }
             _enqueue_planned_table_command(
                 task=task,
                 command=command,
@@ -910,6 +934,8 @@ class _SqlActionExecution:
     value: Any = None
     frame: pd.DataFrame | None = None
     error: dict[str, Any] | None = None
+    logic_dag: dict[str, Any] | None = None
+    execution_traces: list[dict[str, Any]] | None = None
 
 
 def _run_one_action_group(
@@ -1967,6 +1993,10 @@ def _execute_sql_action_observation(
         observation[_ACTION_FULL_RESULT_KEY] = result.value
     else:
         observation["err"] = result.error
+    if result.logic_dag is not None:
+        observation["logic_dag"] = result.logic_dag
+    if result.execution_traces is not None:
+        observation["execution_traces"] = result.execution_traces
     return observation, result
 
 
@@ -2023,9 +2053,17 @@ def _execute_sql_action(
                 ok=False,
                 error=execution_result.error
                 or {"type": "ExecutionFailed", "message": "SQL action failed"},
+                logic_dag=json_ready(logic_dag),
+                execution_traces=json_ready(execution_result.traces),
             )
         value = _execution_value_for_key(execution_result, evidence_key)
-        return _SqlActionExecution(ok=True, value=value, frame=_value_to_frame(value))
+        return _SqlActionExecution(
+            ok=True,
+            value=value,
+            frame=_value_to_frame(value),
+            logic_dag=json_ready(logic_dag),
+            execution_traces=json_ready(execution_result.traces),
+        )
     except Exception as exc:  # noqa: BLE001 - surfaced as action observation.
         return _SqlActionExecution(ok=False, error=_error_payload(exc))
 
@@ -3214,6 +3252,21 @@ def _run_supervisor_synthesis(
                 error=None,
             ),
         )
+        synthesis_round = {
+            "round": len(item.task.metadata.get(_SYNTHESIS_TRACE_KEY, {}).get("rounds", [])) + 1,
+            "prompt": supervisor_result.prompt,
+            "response": supervisor_result.remote_output,
+            "response_id": supervisor_result.response_id,
+            "token_usage": extract_token_usage(supervisor_result.response_payload),
+            "decision": supervisor_result.decision.raw if supervisor_result.decision else None,
+        }
+        trace = item.task.metadata.setdefault(_SYNTHESIS_TRACE_KEY, {})
+        if not isinstance(trace.get("rounds"), list):
+            trace["rounds"] = []
+            trace["model_config"] = _model_config_from_response(
+                supervisor_result.response_payload
+            )
+        trace["rounds"].append(synthesis_round)
     _apply_supervisor_decision(
         batch=batch,
         decision=supervisor_result.decision,
@@ -3313,6 +3366,21 @@ def _run_supervisor_action_reports_batch(
                 error=None,
             ),
         )
+        synthesis_round = {
+            "round": len(task.metadata.get(_SYNTHESIS_TRACE_KEY, {}).get("rounds", [])) + 1,
+            "prompt": result.supervisor_result.prompt,
+            "response": result.supervisor_result.remote_output,
+            "response_id": result.supervisor_result.response_id,
+            "token_usage": extract_token_usage(result.supervisor_result.response_payload),
+            "decision": decision.raw if decision else None,
+        }
+        trace = task.metadata.setdefault(_SYNTHESIS_TRACE_KEY, {})
+        if not isinstance(trace.get("rounds"), list):
+            trace["rounds"] = []
+            trace["model_config"] = _model_config_from_response(
+                result.supervisor_result.response_payload
+            )
+        trace["rounds"].append(synthesis_round)
         _record_action_memory(
             task=task,
             actions=result.item.actions,

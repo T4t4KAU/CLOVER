@@ -29,6 +29,7 @@ from benchmarks.tablebench.eval import (
     _slm_scheduler_summary,
     _sum_dsl_builder_token_usage,
     _update_record_from_task_item,
+    _write_case_trace_artifacts,
     _write_runtime_task_artifacts,
 )
 from benchmarks.warnings import suppress_benchmark_warnings
@@ -248,10 +249,9 @@ def _run_wikitq_cases(
             record["elapsed_seconds"] = (
                 time.perf_counter() - started_by_case[case_result.case_id]
             )
-            write_json(
-                output_dir / "cases" / case_result.case_id / "case_result.json",
-                record,
-            )
+            case_dir = output_dir / "cases" / case_result.case_id
+            write_json(case_dir / "case_result.json", record)
+            _write_case_trace_artifacts(case_dir, case_result)
             completed_records.append(record)
             if progress_bar is not None:
                 progress_bar.update(completed_records)

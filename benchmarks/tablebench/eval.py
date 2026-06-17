@@ -260,10 +260,9 @@ def _run_tablebench_cases(
             record["elapsed_seconds"] = (
                 time.perf_counter() - started_by_case[case_result.case_id]
             )
-            write_json(
-                output_dir / "cases" / case_result.case_id / "case_result.json",
-                record,
-            )
+            case_dir = output_dir / "cases" / case_result.case_id
+            write_json(case_dir / "case_result.json", record)
+            _write_case_trace_artifacts(case_dir, case_result)
             completed_records.append(record)
             if progress_bar is not None:
                 progress_bar.update(completed_records)
@@ -652,6 +651,30 @@ def _fail_group(
             progress_bar.update(completed_records)
 
 
+def _write_case_trace_artifacts(case_dir: Path, case_result: Any) -> None:
+    """Write trace artifacts from case_result.metadata in real-time.
+
+    Called from on_case_result callback so traces are available immediately
+    after each case finishes, not only after the full run completes.
+    """
+    metadata = getattr(case_result, "metadata", None) or {}
+    decompose_trace = metadata.get("decompose_trace")
+    if isinstance(decompose_trace, dict):
+        write_json(case_dir / "decompose.json", json_ready(decompose_trace))
+    synthesis_trace = metadata.get("synthesis_trace")
+    if isinstance(synthesis_trace, dict):
+        write_json(case_dir / "synthesis.json", json_ready(synthesis_trace))
+    agent_loop_trace = _extract_agent_loop_trace(metadata)
+    if agent_loop_trace:
+        write_json(case_dir / "agent_loop.json", json_ready(agent_loop_trace))
+    dsl_builder = metadata.get("dsl_builder")
+    if isinstance(dsl_builder, dict):
+        write_json(case_dir / "dsl_builder.json", json_ready(dsl_builder))
+    table_diagnostics = metadata.get("table_diagnostics")
+    if isinstance(table_diagnostics, list) and table_diagnostics:
+        write_json(case_dir / "execution.json", json_ready(table_diagnostics))
+
+
 def _write_runtime_task_artifacts(case_dir: Path, task_item: Any) -> None:
     write_json(case_dir / "task_dsl.json", json_ready(task_item.task_dsl))
     write_json(case_dir / "local_dsl.json", json_ready(task_item.local_dsl))
@@ -660,6 +683,37 @@ def _write_runtime_task_artifacts(case_dir: Path, task_item: Any) -> None:
     dsl_builder = task_item.metadata.get("dsl_builder")
     if isinstance(dsl_builder, dict):
         write_json(case_dir / "dsl_builder.json", json_ready(dsl_builder))
+    metadata = getattr(task_item, "metadata", None) or {}
+    decompose_trace = metadata.get("decompose_trace")
+    if isinstance(decompose_trace, dict):
+        write_json(case_dir / "decompose.json", json_ready(decompose_trace))
+    synthesis_trace = metadata.get("synthesis_trace")
+    if isinstance(synthesis_trace, dict):
+        write_json(case_dir / "synthesis.json", json_ready(synthesis_trace))
+    agent_loop_trace = _extract_agent_loop_trace(metadata)
+    if agent_loop_trace:
+        write_json(case_dir / "agent_loop.json", json_ready(agent_loop_trace))
+
+
+def _extract_agent_loop_trace(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract agent_loop steps (with prompt/response) from table_diagnostics traces."""
+    diagnostics = metadata.get("table_diagnostics")
+    if not isinstance(diagnostics, list):
+        return []
+    traces: list[dict[str, Any]] = []
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, dict):
+            continue
+        execution_result = diagnostic.get("execution_result")
+        if not isinstance(execution_result, dict):
+            continue
+        for trace in execution_result.get("traces", []) or []:
+            if not isinstance(trace, dict):
+                continue
+            agent_loop = trace.get("agent_loop")
+            if isinstance(agent_loop, dict):
+                traces.append(agent_loop)
+    return traces
 
 
 def _dsl_builder_record_summary(dsl_builder: dict[str, Any]) -> dict[str, Any]:
