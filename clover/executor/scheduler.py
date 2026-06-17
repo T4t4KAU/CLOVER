@@ -511,12 +511,17 @@ class PhysicalNodeBuilder:
         start_index: int,
     ) -> PlanNodeBuildResult:
         task_type = str(physical_plan["task_type"])
+        source_sql = physical_plan.get("source_sql")
         units: list[ExecutionUnit] = []
         for offset, node in enumerate(physical_plan.get("nodes", [])):
             if not isinstance(node, dict):
                 raise PlanValidationError(f"Physical node must be an object: {node!r}")
             node_id = _required_string(node, "id", label="physical node")
             output = _required_string(node, "output", label=f"physical node {node_id}")
+            # Propagate plan-level source_sql into each node so the Edge Agent
+            # sandbox can inject the original cloud SQL as a hint.
+            if source_sql and "source_sql" not in node:
+                node = {**node, "source_sql": source_sql}
             unit_metadata = {
                 "source_kind": "node",
                 "output_type": node.get("output_type"),

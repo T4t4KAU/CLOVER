@@ -31,6 +31,9 @@ def render_table_node_view(
     }
     if isinstance(selected_world.get("diag"), dict):
         view_world["diag"] = dict(selected_world["diag"])
+    source_sql = selected_world.get("source_sql")
+    if isinstance(source_sql, str) and source_sql.strip():
+        view_world["source_sql"] = source_sql.strip()
     return NodeView(
         kind=f"table_reasoning.{op.lower()}",
         language="python",

@@ -119,6 +119,8 @@ class Optimizer:
             "nodes": copy.deepcopy(logic_dag.get("nodes", [])),
             "edges": copy.deepcopy(logic_dag.get("edges", [])),
         }
+        if "source_sql" in logic_dag:
+            physical_plan["source_sql"] = logic_dag["source_sql"]
         if isinstance(local_dsl.get("answer"), dict):
             physical_plan["answer"] = copy.deepcopy(local_dsl["answer"])
         if "static_collectors" in logic_dag:

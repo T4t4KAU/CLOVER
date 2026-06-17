@@ -260,6 +260,10 @@ class TableReasoningSandboxPolicy:
             "observations": _compact_observations(observations),
             "output_contract": state.task.get("output_contract"),
         }
+        # Inject the original cloud SQL as a hint for the Edge Agent.
+        source_sql = state.node.get("source_sql")
+        if isinstance(source_sql, str) and source_sql.strip():
+            world["source_sql"] = source_sql.strip()
         diag = _failure_diagnostic(state)
         if diag is not None:
             world["diag"] = diag
@@ -1479,6 +1483,18 @@ def _frame_prompt_summary(frame: pd.DataFrame) -> dict[str, Any]:
     }
     if len(columns) > 80:
         summary["more_cols"] = len(columns) - 80
+    # Inject top distinct values per column so the Edge Agent can see actual
+    # data formats (e.g. "$1.2M", "Name (CODE)") without needing a separate
+    # observation step.
+    sample_values: dict[str, list[Any]] = {}
+    for column in columns[:20]:
+        series = frame[column]
+        top_values = series.value_counts(dropna=True).head(3)
+        sample_values[column] = [
+            _to_json_scalar(index) for index in top_values.index
+        ]
+    if sample_values:
+        summary["sample_values"] = sample_values
     return summary
 
 

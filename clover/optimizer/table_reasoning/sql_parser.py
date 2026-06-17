@@ -102,6 +102,7 @@ def _parsed_sql_to_logic_dag(
     return {
         "task_type": remote_dsl["task_type"],
         "resource_processing": [],
+        "source_sql": parsed_sql.sql,
         "query_plans": [
             {
                 "id": str(answer_name),
