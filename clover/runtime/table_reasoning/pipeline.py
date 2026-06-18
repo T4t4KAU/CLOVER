@@ -4426,7 +4426,19 @@ def _finalize_success(
 def _normalize_answer_for_task(task: TaskItem, answer: Any) -> Any:
     answer_type = str(task.answer_type or "").strip().lower()
     if answer_type in {"number", "float", "integer", "int"}:
-        return _normalize_number_answer(answer)
+        normalized = _normalize_number_answer(answer)
+        if (
+            isinstance(normalized, (int, float))
+            and not isinstance(normalized, bool)
+            and normalized < 0
+            and re.search(
+                r"\bdifference\b",
+                str(task.question or ""),
+                flags=re.IGNORECASE,
+            )
+        ):
+            return abs(normalized)
+        return normalized
     if answer_type in {"boolean", "bool"}:
         return _normalize_boolean_answer(answer)
     if answer_type in {"string", "entity"}:

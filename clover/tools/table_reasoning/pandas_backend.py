@@ -763,7 +763,8 @@ class _ExpressionEvaluator:
             return result
         if function in {"SUBSTRING", "SUBSTR"}:
             series = _series_for_frame(args[0], self.frame).astype("string")
-            start = int(_to_python_scalar(args[1])) - 1 if len(args) > 1 else 0
+            sql_start = int(_to_python_scalar(args[1])) if len(args) > 1 else 1
+            start = sql_start - 1 if sql_start > 0 else sql_start
             if len(args) > 2 and args[2] is not None:
                 length = int(_to_python_scalar(args[2]))
                 return series.str.slice(start, start + length)

@@ -107,6 +107,19 @@ class SqlParserTest(unittest.TestCase):
 
         self.assertEqual(sql, 'SELECT COUNT(*) AS "answer" FROM "table_1"')
 
+    def test_lowers_negative_literals_and_string_concatenation(self) -> None:
+        logic_dag = parse_remote_sql_to_logic_dag(
+            'SELECT SUBSTR("finalWorth", -4) || \'-\' AS answer '
+            'FROM "table_1" WHERE "finalWorth" > -3 LIMIT 1;',
+            REMOTE_DSL,
+        )
+
+        serialized = str(logic_dag)
+        self.assertNotIn("sql_expr", serialized)
+        self.assertIn("'function': 'CONCAT'", serialized)
+        self.assertIn("'value': -4", serialized)
+        self.assertIn("'value': -3", serialized)
+
     def test_rejects_final_protocol_marker(self) -> None:
         with self.assertRaises(SqlParseError):
             extract_sql_statement(

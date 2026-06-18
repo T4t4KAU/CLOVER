@@ -53,6 +53,17 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_pipeline._latest_repair_evidence_changed(changed)  # noqa: SLF001
         )
 
+    def test_difference_answers_are_normalized_to_absolute_magnitude(self) -> None:
+        task = SimpleNamespace(
+            answer_type="number",
+            question="What is the difference between the two scores?",
+        )
+
+        self.assertEqual(
+            table_pipeline._normalize_answer_for_task(task, -18),  # noqa: SLF001
+            18,
+        )
+
     def test_query_with_explicit_local_sql_skips_remote_decompose(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))

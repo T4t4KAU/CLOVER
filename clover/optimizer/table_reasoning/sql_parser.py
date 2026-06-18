@@ -1324,6 +1324,28 @@ def _expr_ast(
         return {"type": "wildcard"}
     if isinstance(expression, exp.Literal):
         return _literal_ast(expression)
+    if isinstance(expression, exp.Neg):
+        operand = _expr_ast(
+            expression.this,
+            aggregate_aliases,
+            scalar_subquery_refs,
+        )
+        if (
+            operand.get("type") == "literal"
+            and operand.get("value_type") == "number"
+            and isinstance(operand.get("value"), (int, float))
+        ):
+            return {
+                "type": "literal",
+                "value": -operand["value"],
+                "value_type": "number",
+            }
+        return {
+            "type": "binary_op",
+            "op": "-",
+            "left": {"type": "literal", "value": 0, "value_type": "number"},
+            "right": operand,
+        }
     if isinstance(expression, exp.Var):
         return {"type": "identifier", "name": str(expression.this)}
     if isinstance(expression, exp.Placeholder):
@@ -1432,6 +1454,23 @@ def _expr_ast(
                     scalar_subquery_refs,
                 ),
             }
+    if isinstance(expression, exp.DPipe):
+        return {
+            "type": "function_call",
+            "function": "CONCAT",
+            "args": [
+                _expr_ast(
+                    expression.this,
+                    aggregate_aliases,
+                    scalar_subquery_refs,
+                ),
+                _expr_ast(
+                    expression.expression,
+                    aggregate_aliases,
+                    scalar_subquery_refs,
+                ),
+            ],
+        }
     if isinstance(expression, exp.In):
         query = expression.args.get("query")
         if query is not None:
