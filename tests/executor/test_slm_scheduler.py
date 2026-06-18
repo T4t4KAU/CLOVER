@@ -198,6 +198,16 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
                 f"op:{op}",
             )
 
+        def _rewrite_key(contract: str) -> tuple[str, ...]:
+            return (
+                "agent:data",
+                "family:table_reasoning",
+                "interface:solve_python",
+                "tool:pandas_env",
+                f"contract:{contract}",
+                "mode:rewrite_predicate",
+            )
+
         expected_paths: dict[tuple[str, ...], tuple[str, ...]] = {
             TABLE_NUMBER_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
             TABLE_STRING_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
@@ -206,6 +216,9 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
             DOCUMENT_WORKER_LEAF_KEY: ("document_reasoning/worker.md",),
         }
         for contract in ("number", "string", "boolean"):
+            expected_paths[_rewrite_key(contract)] = _shared_prefix + (
+                "table_reasoning/rewrite_predicate.md",
+            )
             for op in _repair_ops:
                 key = _repair_key(contract, op)
                 expected_paths[key] = _shared_prefix + (

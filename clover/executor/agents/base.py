@@ -27,6 +27,24 @@ class FastPathDecision:
     miss_detail: str | None = None
 
 
+@dataclass(frozen=True)
+class FastPathReview:
+    """Post-execution verdict for a successful Fast Path output."""
+
+    route: str = "accept"
+    trigger: str | None = None
+    reason: str | None = None
+    evidence: dict[str, Any] | None = None
+
+    def to_trace(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"route": self.route}
+        if self.reason:
+            payload["reason"] = self.reason
+        if self.evidence:
+            payload["evidence"] = self.evidence
+        return payload
+
+
 class BaseNodeAgent:
     """Base class for task-specific node agents."""
 
@@ -65,21 +83,25 @@ class BaseNodeAgent:
                         trigger="fast_path_execution_error",
                         error=exc,
                     )
-                if self.should_run_agent_loop_after_fast_path(decision, output):
+                review = self.review_fast_path_output(decision, output)
+                if review.route != "accept":
+                    trace["verification_verdict"] = review.to_trace()
+                if review.route == "edge_repair":
+                    trigger = review.trigger or "fast_path_empty_output"
                     trace["execution_path"] = "agent_loop"
-                    trace["agent_loop_trigger"] = "fast_path_empty_output"
+                    trace["agent_loop_trigger"] = trigger
                     trace["fast_path_output_summary"] = summarize_output(output)
                     try:
                         output = self._run_agent_loop_with_limit(
                             decision,
-                            trigger="fast_path_empty_output",
+                            trigger=trigger,
                             error=None,
                         )
                     except Exception as exc:  # noqa: BLE001 - optional non-destructive inspection.
                         if not self.should_keep_fast_path_output_on_agent_loop_failure(
                             decision,
                             output,
-                            trigger="fast_path_empty_output",
+                            trigger=trigger,
                             error=exc,
                         ):
                             raise
@@ -186,6 +208,21 @@ class BaseNodeAgent:
 
         del decision, output
         return False
+
+    def review_fast_path_output(
+        self,
+        decision: FastPathDecision,
+        output: Any,
+    ) -> FastPathReview:
+        """Route a successful Fast Path output after deterministic review."""
+
+        if self.should_run_agent_loop_after_fast_path(decision, output):
+            return FastPathReview(
+                route="edge_repair",
+                trigger="fast_path_empty_output",
+                reason="fast_path_empty_output",
+            )
+        return FastPathReview()
 
     def should_keep_fast_path_output_on_agent_loop_failure(
         self,

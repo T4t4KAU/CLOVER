@@ -873,11 +873,32 @@ def _rewrite_predicate_action(
         )
 
     node = state.node
+    original_predicate = node.get("params", {}).get("predicate")
+    if not _same_predicate_structure(original_predicate, new_predicate):
+        return SandboxActionResult(
+            ok=False,
+            observation={
+                "type": "invalid_predicate_patch",
+                "ok": False,
+                "error": {
+                    "message": (
+                        "Predicate rewrite may change literals only; "
+                        "columns, operators, and condition structure must stay unchanged."
+                    )
+                },
+            },
+        )
     node_params = copy.deepcopy(node.get("params", {}))
     node_params["predicate"] = new_predicate
     upstream_outputs: dict[str, Any] = {}
-    for name, frame in state.python_task.inputs.items():
-        upstream_outputs[name] = _tool_runtime_value(frame)
+    input_handles = state.task.get("input_handles", [])
+    for dependency, handle in zip(
+        node.get("dependency", []),
+        input_handles,
+        strict=False,
+    ):
+        if handle in state.inputs:
+            upstream_outputs[dependency] = _tool_runtime_value(state.inputs[handle])
 
     call = {
         "task_type": state.task.get("task_type"),
@@ -940,6 +961,24 @@ def _candidate_is_empty(candidate: Any) -> bool:
         if candidate.get("type") == "table":
             return int(candidate.get("rows", 0)) == 0
     return False
+
+
+def _same_predicate_structure(original: Any, rewritten: Any) -> bool:
+    return _predicate_structure(original) == _predicate_structure(rewritten)
+
+
+def _predicate_structure(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_predicate_structure(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") == "literal":
+        return {"type": "literal"}
+    return {
+        key: _predicate_structure(item)
+        for key, item in value.items()
+        if key not in {"value", "value_type"}
+    }
 
 
 def _rewrite_predicate_feedback(

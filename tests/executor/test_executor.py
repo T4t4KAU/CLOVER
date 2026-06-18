@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -327,6 +328,187 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(filter_trace["agent_loop_fallback"], "fast_path_output")
         self.assertIn("agent_loop_error", filter_trace)
         self.assertEqual(filter_trace["output_summary"]["rows"], 0)
+
+    def test_empty_filter_does_not_retry_downstream_empty_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text("city\nwinnipeg\n", encoding="utf-8")
+            client = _FakeChatClient("not json")
+
+            result = _execute_plan(
+                _empty_filter_project_plan(table_path),
+                slm_config={
+                    "api_type": "chat_completions",
+                    "model": "fake-slm",
+                    "temperature": 0,
+                },
+                slm_client=client,
+                agent_loop_max_iterations=1,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.answer)
+        self.assertEqual(len(client.chat.completions.requests), 1)
+        self.assertIn("agent_loop", result.traces[1])
+        self.assertNotIn("agent_loop", result.traces[2])
+
+    def test_wrong_column_mismatch_routes_directly_to_cloud_replan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text("city\n1\n2\n", encoding="utf-8")
+            plan = _empty_filter_project_plan(table_path)
+            plan["nodes"][1]["params"]["predicate"]["right"]["value"] = "April 8"
+            client = _FakeChatClient("not json")
+
+            result = _execute_plan(
+                plan,
+                slm_config={
+                    "api_type": "chat_completions",
+                    "model": "fake-slm",
+                    "temperature": 0,
+                },
+                slm_client=client,
+                agent_loop_max_iterations=2,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertIsNone(result.answer)
+        self.assertEqual(len(client.chat.completions.requests), 0)
+        verdict = result.traces[1]["verification_verdict"]
+        self.assertEqual(verdict["route"], "cloud_replan")
+        self.assertEqual(verdict["reason"], "predicate_wrong_column")
+        self.assertEqual(
+            verdict["evidence"]["mismatch"]["roots"][0]["mismatch"],
+            "wrong_column",
+        )
+
+    def test_rewrite_predicate_executes_with_original_dependency_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                'title\n"""Keep Hustlin"""\n"Other"\n',
+                encoding="utf-8",
+            )
+            client = _FakeChatClient(
+                json.dumps(
+                    {
+                        "action": "rewrite_predicate",
+                        "predicate": '"title" = \'"Keep Hustlin"\'',
+                    }
+                )
+            )
+
+            result = _execute_plan(
+                _quoted_title_plan(table_path),
+                slm_config={
+                    "api_type": "chat_completions",
+                    "model": "fake-slm",
+                    "temperature": 0,
+                },
+                slm_client=client,
+                agent_loop_max_iterations=2,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.answer, '"Keep Hustlin"')
+        filter_trace = result.traces[1]
+        self.assertEqual(filter_trace["agent_loop"]["iterations"], 1)
+        self.assertTrue(filter_trace["agent_loop"]["steps"][0]["accepted"])
+
+    def test_failed_predicate_rewrite_falls_back_to_python_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                'title\n"""Keep Hustlin"""\n"Other"\n',
+                encoding="utf-8",
+            )
+            client = _FakeChatClient(
+                [
+                    json.dumps(
+                        {
+                            "action": "rewrite_predicate",
+                            "predicate": '"title" = \'Nope\'',
+                        }
+                    ),
+                    (
+                        '{"s":"def solve(df):\\n'
+                        "    return df[df['title'].str.contains("
+                        "'Keep Hustlin', regex=False)]"
+                        '"}'
+                    ),
+                ]
+            )
+
+            result = _execute_plan(
+                _quoted_title_plan(table_path),
+                slm_config={
+                    "api_type": "chat_completions",
+                    "model": "fake-slm",
+                    "temperature": 0,
+                },
+                slm_client=client,
+                agent_loop_max_iterations=2,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.answer, '"Keep Hustlin"')
+        steps = result.traces[1]["agent_loop"]["steps"]
+        self.assertEqual(
+            [step["prompt_kind"] for step in steps],
+            [
+                "table_reasoning_rewrite_predicate",
+                "table_reasoning_empty_filter_repair",
+            ],
+        )
+        self.assertTrue(steps[1]["accepted"])
+
+    def test_predicate_rewrite_cannot_expand_condition_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                'title\n"""Keep Hustlin"""\n"Other"\n',
+                encoding="utf-8",
+            )
+            client = _FakeChatClient(
+                [
+                    json.dumps(
+                        {
+                            "action": "rewrite_predicate",
+                            "predicate": (
+                                '"title" = \'"Keep Hustlin"\' '
+                                'OR "title" = \'Other\''
+                            ),
+                        }
+                    ),
+                    (
+                        '{"s":"def solve(df):\\n'
+                        "    return df[df['title'].str.contains("
+                        "'Keep Hustlin', regex=False)]"
+                        '"}'
+                    ),
+                ]
+            )
+
+            result = _execute_plan(
+                _quoted_title_plan(table_path),
+                slm_config={
+                    "api_type": "chat_completions",
+                    "model": "fake-slm",
+                    "temperature": 0,
+                },
+                slm_client=client,
+                agent_loop_max_iterations=2,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.answer, '"Keep Hustlin"')
+        steps = result.traces[1]["agent_loop"]["steps"]
+        self.assertEqual(steps[0]["observation_type"], "invalid_predicate_patch")
+        self.assertEqual(
+            steps[1]["prompt_kind"],
+            "table_reasoning_empty_filter_repair",
+        )
+        self.assertTrue(steps[1]["accepted"])
 
     def test_agent_loop_accepts_result_created_by_run_python(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1008,6 +1190,87 @@ def _city_average_plan(table_path: Path, *, task_type: str) -> dict:
             {"from": "N2", "to": "N3"},
         ],
     }
+
+
+def _empty_filter_project_plan(table_path: Path) -> dict:
+    return {
+        "task_type": "table_reasoning.analyze",
+        "resources": [_table_resource("table_1", table_path, ["city"])],
+        "answer": {"name": "answer", "type": "string"},
+        "nodes": [
+            {
+                "id": "N0",
+                "op": "Scan",
+                "dependency": [],
+                "input": ["table_1"],
+                "params": {"source": "table_1"},
+                "output": "T0",
+            },
+            {
+                "id": "N1",
+                "op": "Filter",
+                "dependency": ["T0"],
+                "input": [],
+                "params": {
+                    "predicate": {
+                        "type": "binary_op",
+                        "op": "=",
+                        "left": {"type": "column", "name": "city"},
+                        "right": {
+                            "type": "literal",
+                            "value": "missing",
+                            "value_type": "string",
+                        },
+                    }
+                },
+                "output": "T1",
+            },
+            {
+                "id": "N2",
+                "op": "Project",
+                "dependency": ["T1"],
+                "input": [],
+                "params": {
+                    "expressions": [
+                        {"expr": {"type": "column", "name": "city"}}
+                    ]
+                },
+                "output": "T2",
+            },
+            {
+                "id": "N3",
+                "op": "FormatAnswer",
+                "dependency": ["T2"],
+                "input": [],
+                "params": {"answer": {"name": "answer", "type": "string"}},
+                "output": "answer",
+            },
+        ],
+        "edges": [
+            {"from": "N0", "to": "N1"},
+            {"from": "N1", "to": "N2"},
+            {"from": "N2", "to": "N3"},
+        ],
+    }
+
+
+def _quoted_title_plan(table_path: Path) -> dict:
+    plan = _empty_filter_project_plan(table_path)
+    plan["resources"] = [_table_resource("table_1", table_path, ["title"])]
+    plan["nodes"][1]["params"]["predicate"] = {
+        "type": "binary_op",
+        "op": "=",
+        "left": {"type": "column", "name": "title"},
+        "right": {
+            "type": "literal",
+            "value": "Keep Hustlin",
+            "value_type": "string",
+        },
+    }
+    plan["nodes"][2]["params"]["expressions"] = [
+        {"expr": {"type": "column", "name": "title"}}
+    ]
+    return plan
 
 
 def _resource(source_id: str, table_path: Path) -> dict:

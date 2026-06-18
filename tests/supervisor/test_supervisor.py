@@ -109,7 +109,7 @@ class SupervisorTest(unittest.TestCase):
         self.assertNotIn("hints", json.dumps(payload))
         self.assertNotIn("/home/user/private/table.csv", json.dumps(payload))
 
-    def test_table_synthesis_payload_keeps_small_context_for_failed_evidence(self) -> None:
+    def test_table_synthesis_payload_builds_compact_repair_packet(self) -> None:
         observation = {
             "ok": True,
             "answer": None,
@@ -138,8 +138,142 @@ class SupervisorTest(unittest.TestCase):
         )
 
         self.assertEqual(payload["ev"][0]["res"]["n"], 0)
-        self.assertEqual(payload["ctx"]["t"], {"table_1": ["value"]})
-        self.assertEqual(payload["ctx"]["act"][0]["op"], "sql")
+        self.assertEqual(payload["repair"]["schema"], {"table_1": ["value"]})
+        self.assertEqual(
+            payload["repair"]["sql"],
+            'SELECT "value" FROM "table_1" WHERE "value" = 99',
+        )
+        self.assertEqual(payload["repair"]["failure"]["kind"], "zero_rows")
+        self.assertNotIn("ctx", payload)
+
+    def test_table_repair_packet_removes_unverified_candidate_column(self) -> None:
+        observation = {
+            "ok": True,
+            "answer": None,
+            "obs": [
+                {
+                    "i": 0,
+                    "op": "sql",
+                    "ok": True,
+                    "q": 'SELECT "Title" FROM "table_1" WHERE "Title" = \'1905\'',
+                    "res": {"n": 0, "cols": ["Title"], "rows": []},
+                    "ev": {
+                        "route": "cloud_replan",
+                        "reason": "predicate_candidate_column",
+                        "mismatch": {
+                            "roots": [
+                                {
+                                    "col": "Title",
+                                    "sql_lit": ["1905"],
+                                    "actual": ["Example title"],
+                                }
+                            ],
+                            "candidates": [
+                                {"col": "Year", "sample": ["Another title"]}
+                            ],
+                        },
+                    },
+                }
+            ],
+        }
+        local_dsl = {
+            **_local_dsl(),
+            "sources": [
+                {
+                    "id": "table_1",
+                    "type": "table",
+                    "schema": {"columns": ["Title", "Year"]},
+                }
+            ],
+        }
+
+        payload = synthesis_payload(
+            local_dsl=local_dsl,
+            observation=observation,
+            current_command={
+                "acts": [
+                    {
+                        "op": "sql",
+                        "q": 'SELECT "Title" FROM "table_1" WHERE "Title" = \'1905\'',
+                    }
+                ]
+            },
+        )
+
+        evidence = payload["repair"]["evidence"]
+        self.assertEqual(evidence["reason"], "predicate_unclassified")
+        self.assertEqual(evidence["route"], "edge_repair")
+        self.assertNotIn("candidates", evidence["mismatch"])
+
+    def test_table_repair_history_drops_execution_trace_payloads(self) -> None:
+        local_dsl = {
+            **_local_dsl(),
+            "mem": [
+                {
+                    "act": [{"op": "sql", "q": "SELECT old"}],
+                    "obs": [
+                        {
+                            "ok": False,
+                            "logic_dag": {"secret": "FULL_DAG"},
+                            "execution_traces": [{"prompt": "FULL_AGENT_PROMPT"}],
+                            "err": {"type": "SqlParseError", "message": "bad sql"},
+                        }
+                    ],
+                }
+            ],
+        }
+        observation = {
+            "ok": True,
+            "obs": [
+                {
+                    "i": 0,
+                    "op": "sql",
+                    "ok": False,
+                    "err": {"type": "SqlParseError", "message": "bad sql"},
+                }
+            ],
+        }
+
+        payload = synthesis_payload(
+            local_dsl=local_dsl,
+            observation=observation,
+            current_command={"acts": [{"op": "sql", "q": "SELECT bad"}]},
+        )
+
+        serialized = json.dumps(payload)
+        self.assertNotIn("FULL_DAG", serialized)
+        self.assertNotIn("FULL_AGENT_PROMPT", serialized)
+        self.assertEqual(
+            payload["repair"]["prior"][0]["act"],
+            [{"op": "sql", "q": "SELECT old"}],
+        )
+
+    def test_table_final_repair_round_forbids_more_actions(self) -> None:
+        local_dsl = {
+            **_local_dsl(),
+            "task_type": "table_reasoning.analyze",
+            "profile": "analyze",
+        }
+        prompt = render_synthesis_prompt(
+            local_dsl=local_dsl,
+            logic_dag={"task_type": "table_reasoning.analyze", "query_plans": []},
+            observation={
+                "ok": True,
+                "obs": [
+                    {
+                        "i": 0,
+                        "op": "sql",
+                        "ok": True,
+                        "res": {"n": 0, "cols": ["value"], "rows": []},
+                    }
+                ],
+            },
+            current_command={"acts": [{"op": "sql", "q": "SELECT value"}]},
+            force_final_answer=True,
+        )
+
+        self.assertIn("No more execution rounds are available", prompt)
+        self.assertIn("Do not return `acts`", prompt)
 
     def test_parses_answer_and_action_decisions(self) -> None:
         answer_decision = parse_supervisor_decision('{"op":"answer","a":2}')

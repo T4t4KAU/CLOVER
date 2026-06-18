@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -394,17 +395,32 @@ def _table_evidence_payload(
             "ty": _answer_type(source),
             "ev": _table_evidence_observations(observation),
         }
-    ctx = _table_repair_context(
+    repair = _table_repair_packet(
         source=source,
         observation=observation,
         current_command=current_command,
     )
-    if ctx:
-        payload["ctx"] = ctx
-    mem = source.get("mem")
-    if mem:
-        payload["mem"] = _compact_table_memory(mem)
+    if repair:
+        payload["repair"] = repair
+        payload["ev"] = _repair_result_observations(payload.get("ev"))
     return json_ready(payload)
+
+
+def _repair_result_observations(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    output = []
+    for item in value[:4]:
+        if not isinstance(item, dict):
+            continue
+        output.append(
+            {
+                key: item.get(key)
+                for key in ("i", "op", "kind", "ok", "res", "err")
+                if item.get(key) is not None
+            }
+        )
+    return output
 
 
 def _batch_questions(source: dict[str, Any]) -> list[dict[str, Any]]:
@@ -546,7 +562,7 @@ def _table_object_observation(observation: Any) -> dict[str, Any]:
     return {"ok": True, "res": _table_result_value(observation)}
 
 
-def _table_repair_context(
+def _table_repair_packet(
     *,
     source: dict[str, Any],
     observation: Any,
@@ -554,14 +570,447 @@ def _table_repair_context(
 ) -> dict[str, Any]:
     if not _table_evidence_needs_repair(observation):
         return {}
-    ctx: dict[str, Any] = {}
     actions = _current_actions_list(current_command)
-    if actions:
-        ctx["act"] = actions
-    columns = _table_columns_map(source)
-    if columns:
-        ctx["t"] = columns
-    return ctx
+    compact_observations = _table_evidence_observations(observation)
+    failed = next(
+        (
+            item
+            for item in compact_observations
+            if _action_observation_needs_repair(item)
+        ),
+        compact_observations[0] if compact_observations else {},
+    )
+    sql = _repair_sql(actions, failed)
+    evidence = failed.get("ev") if isinstance(failed, dict) else None
+    if not isinstance(evidence, dict):
+        evidence = {}
+    evidence = _validated_repair_evidence(evidence)
+    fault = _repair_fault(
+        question=str(source.get("question") or ""),
+        sql=sql,
+        failed=failed,
+        evidence=evidence,
+    )
+    packet: dict[str, Any] = {
+        "fault": fault,
+        "sql": sql,
+        "failure": _repair_failure(failed=failed, evidence=evidence),
+        "requirements": _repair_requirements(
+            answer_type=_answer_type(source),
+            fault=fault,
+        ),
+    }
+    schema = _relevant_table_schema(source=source, sql=sql, evidence=evidence)
+    if schema:
+        packet["schema"] = schema
+    if evidence:
+        packet["evidence"] = evidence
+    history = _compact_repair_history(source.get("mem"))
+    if history:
+        packet["prior"] = history
+    return {
+        key: value
+        for key, value in packet.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _repair_sql(actions: list[dict[str, Any]], failed: Any) -> str:
+    if isinstance(failed, dict):
+        query = failed.get("q")
+        if isinstance(query, str) and query.strip():
+            return query.strip()[:2000]
+    for action in actions:
+        query = action.get("q")
+        if action.get("op") == "sql" and isinstance(query, str) and query.strip():
+            return query.strip()[:2000]
+    return ""
+
+
+def _repair_fault(
+    *,
+    question: str,
+    sql: str,
+    failed: Any,
+    evidence: dict[str, Any],
+) -> str:
+    reason = str(evidence.get("reason") or "")
+    if reason in {"predicate_wrong_column", "predicate_candidate_column"}:
+        return "wrong_column"
+    if reason.startswith("predicate_"):
+        suffix = reason.removeprefix("predicate_")
+        if suffix in {"quoting", "format", "not_found"}:
+            return "predicate_mismatch"
+        if suffix == "system_bug":
+            return "local_execution_error"
+        return "predicate_semantic_error"
+    if isinstance(failed, dict) and (
+        failed.get("ok") is False or failed.get("err") is not None
+    ):
+        return "sql_execution_error"
+    if _is_relative_row_question(question):
+        return "relative_row_semantic_error"
+    lowered_sql = sql.casefold()
+    if "count(" in lowered_sql:
+        return "count_logic"
+    if "order by" in lowered_sql or "limit 1" in lowered_sql:
+        return "ordering_logic"
+    return "empty_result"
+
+
+def _repair_failure(
+    *,
+    failed: Any,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    failure: dict[str, Any] = {}
+    if isinstance(failed, dict):
+        error = failed.get("err")
+        if error is not None:
+            failure["kind"] = "action_error"
+            failure["error"] = _compact_error(error)
+        result = failed.get("res")
+        if isinstance(result, dict):
+            count = result.get("n")
+            if count == 0:
+                failure["kind"] = "zero_rows"
+            if isinstance(count, int):
+                failure["rows"] = count
+    node = evidence.get("node")
+    if isinstance(node, dict):
+        failure["node"] = {
+            key: node.get(key)
+            for key in ("id", "op")
+            if node.get(key) is not None
+        }
+    reason = evidence.get("reason")
+    if isinstance(reason, str) and reason:
+        failure["reason"] = reason
+    return failure or {"kind": "insufficient_evidence"}
+
+
+def _repair_requirements(
+    *,
+    answer_type: str | None,
+    fault: str,
+) -> list[str]:
+    requirements = [
+        "return one corrected SQL action",
+        "do not repeat any prior SQL",
+        "use only listed tables and columns",
+        "use SQLite-compatible expressions",
+    ]
+    if answer_type:
+        requirements.append(f"produce answer type {answer_type}")
+    if fault == "wrong_column":
+        requirements.append(
+            "change a predicate column only when evidence shows the literal in that column"
+        )
+    elif fault == "relative_row_semantic_error":
+        requirements.append(
+            "implement the requested previous/next row relation instead of returning the anchor"
+        )
+    elif fault == "count_logic":
+        requirements.append(
+            "verify filtering and distinctness before applying the final count"
+        )
+    elif fault == "ordering_logic":
+        requirements.append(
+            "parse the ordering key using its actual numeric/date/time format"
+        )
+    return requirements
+
+
+def _relevant_table_schema(
+    *,
+    source: dict[str, Any],
+    sql: str,
+    evidence: dict[str, Any],
+) -> dict[str, list[Any]]:
+    tables = _table_columns_map(source)
+    if not tables:
+        return {}
+    mentioned = {
+        match.group(1).replace('""', '"')
+        for match in re.finditer(r'"((?:""|[^"])*)"', sql)
+    }
+    mismatch = evidence.get("mismatch")
+    if isinstance(mismatch, dict):
+        for root in mismatch.get("roots", []):
+            if isinstance(root, dict) and isinstance(root.get("col"), str):
+                mentioned.add(root["col"])
+        for candidate in mismatch.get("candidates", []):
+            if isinstance(candidate, dict) and isinstance(candidate.get("col"), str):
+                mentioned.add(candidate["col"])
+    output: dict[str, list[Any]] = {}
+    for table_id, columns in tables.items():
+        relevant = [column for column in columns if str(column) in mentioned]
+        if not relevant and len(columns) <= 12:
+            relevant = list(columns)
+        if relevant:
+            output[table_id] = relevant[:20]
+    return output
+
+
+def _validated_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    output = _compact_repair_evidence(evidence)
+    mismatch = output.get("mismatch")
+    if not isinstance(mismatch, dict):
+        return output
+    candidates = mismatch.get("candidates")
+    roots = mismatch.get("roots")
+    if not isinstance(candidates, list) or not isinstance(roots, list):
+        return output
+    literals = [
+        literal
+        for root in roots
+        if isinstance(root, dict)
+        for literal in root.get("sql_lit", [])
+        if isinstance(literal, str) and literal.strip()
+    ]
+    validated = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and _candidate_matches_literals(candidate, literals)
+    ]
+    if validated:
+        mismatch["candidates"] = validated[:3]
+    else:
+        mismatch.pop("candidates", None)
+        if output.get("reason") == "predicate_candidate_column":
+            output["reason"] = "predicate_unclassified"
+            if output.get("route") == "cloud_replan":
+                output["route"] = "edge_repair"
+    return output
+
+
+def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key in ("route", "reason", "fault", "dialect", "input_rows", "output_rows"):
+        value = evidence.get(key)
+        if value is not None:
+            output[key] = _short_repair_value(value)
+    node = evidence.get("node")
+    if isinstance(node, dict):
+        output["node"] = {
+            key: _short_repair_value(node.get(key))
+            for key in ("id", "op")
+            if node.get(key) is not None
+        }
+    error = evidence.get("error")
+    if error is not None:
+        output["error"] = _compact_error(error)
+    mismatch = evidence.get("mismatch")
+    if isinstance(mismatch, dict):
+        compact_mismatch: dict[str, Any] = {}
+        if isinstance(mismatch.get("sql"), str):
+            compact_mismatch["sql"] = mismatch["sql"][:500]
+        roots = []
+        root_values = mismatch.get("roots")
+        if not isinstance(root_values, list):
+            root_values = []
+        for root in root_values[:4]:
+            if not isinstance(root, dict):
+                continue
+            roots.append(
+                {
+                    "col": _short_repair_value(root.get("col")),
+                    "sql_lit": [
+                        _short_repair_value(item)
+                        for item in root.get("sql_lit", [])[:4]
+                    ],
+                    "actual": [
+                        _short_repair_value(item)
+                        for item in root.get("actual", [])[:4]
+                    ],
+                    "mismatch": _short_repair_value(root.get("mismatch")),
+                }
+            )
+        if roots:
+            compact_mismatch["roots"] = roots
+        candidates = []
+        candidate_values = mismatch.get("candidates")
+        if not isinstance(candidate_values, list):
+            candidate_values = []
+        for candidate in candidate_values[:3]:
+            if not isinstance(candidate, dict):
+                continue
+            candidates.append(
+                {
+                    "col": _short_repair_value(candidate.get("col")),
+                    "literal": _short_repair_value(candidate.get("literal")),
+                    "matches": [
+                        _short_repair_value(item)
+                        for item in candidate.get("matches", [])[:3]
+                    ],
+                    "sample": [
+                        _short_repair_value(item)
+                        for item in candidate.get("sample", [])[:3]
+                    ],
+                }
+            )
+        if candidates:
+            compact_mismatch["candidates"] = candidates
+        if compact_mismatch:
+            output["mismatch"] = compact_mismatch
+    column_values = evidence.get("column_values")
+    if isinstance(column_values, dict):
+        output["column_values"] = {
+            str(column): [
+                {
+                    "value": _short_repair_value(
+                        item.get("value") if isinstance(item, dict) else item
+                    ),
+                    **(
+                        {"count": item.get("count")}
+                        if isinstance(item, dict) and item.get("count") is not None
+                        else {}
+                    ),
+                }
+                for item in items[:4]
+            ]
+            for column, items in list(column_values.items())[:4]
+            if isinstance(items, list)
+        }
+    local_attempt = evidence.get("local_attempt")
+    if isinstance(local_attempt, dict):
+        output["local_attempt"] = {
+            key: _short_repair_value(local_attempt.get(key))
+            for key in ("iterations", "accepted", "last_error")
+            if local_attempt.get(key) is not None
+        }
+    return output
+
+
+def _short_repair_value(value: Any, limit: int = 160) -> Any:
+    if not isinstance(value, str):
+        return json_ready(value)
+    text = value.strip()
+    return text if len(text) <= limit else text[:limit] + "...<truncated>"
+
+
+def _candidate_matches_literals(
+    candidate: dict[str, Any],
+    literals: list[str],
+) -> bool:
+    samples = candidate.get("matches") or candidate.get("sample")
+    if not isinstance(samples, list):
+        return False
+    normalized_literals = [_normalized_match_text(item) for item in literals]
+    for sample in samples:
+        normalized_sample = _normalized_match_text(sample)
+        if not normalized_sample:
+            continue
+        for literal in normalized_literals:
+            if literal and (
+                literal == normalized_sample
+                or literal in normalized_sample
+                or normalized_sample in literal
+            ):
+                return True
+    return False
+
+
+def _normalized_match_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+
+
+def _is_relative_row_question(question: str) -> bool:
+    if re.search(
+        r"\b(how many|number of|total|years?|days?|months?)\b",
+        question,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(next|previous|immediately\s+(?:after|before)|"
+            r"comes?\s+(?:after|before)|came\s+(?:after|before)|"
+            r"following|prior\s+to)\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _compact_repair_history(mem: Any) -> list[dict[str, Any]]:
+    if not isinstance(mem, list):
+        return []
+    output: list[dict[str, Any]] = []
+    for entry in mem[-2:]:
+        if not isinstance(entry, dict):
+            continue
+        compact: dict[str, Any] = {}
+        actions = entry.get("act")
+        if isinstance(actions, list):
+            compact["act"] = [
+                action
+                for item in actions[:2]
+                if isinstance(item, dict)
+                for action in [_compact_action_dict(item)]
+                if action
+            ]
+        result = entry.get("result", entry.get("obs"))
+        if result is not None:
+            compact["result"] = _compact_repair_history_result(result)
+        fault = entry.get("fault")
+        if isinstance(fault, str) and fault:
+            compact["fault"] = fault
+        if compact:
+            output.append(compact)
+    return output
+
+
+def _compact_repair_history_result(value: Any) -> Any:
+    if isinstance(value, dict) and isinstance(value.get("obs"), list):
+        return {
+            "ok": bool(value.get("ok", True)),
+            "obs": _compact_repair_history_result(value["obs"]),
+        }
+    if isinstance(value, list):
+        output = []
+        for item in value[:4]:
+            if not isinstance(item, dict):
+                continue
+            compact = {
+                key: (
+                    _compact_history_evidence(item.get(key))
+                    if key == "ev"
+                    else _compact_result_payload(item.get(key))
+                )
+                for key in ("i", "op", "kind", "ok", "q", "res", "err", "ev")
+                if item.get(key) is not None
+            }
+            if compact:
+                output.append(compact)
+        return output
+    return _compact_result_payload(value)
+
+
+def _compact_history_evidence(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    output = {
+        key: _short_repair_value(value.get(key))
+        for key in ("route", "reason", "fault", "input_rows", "output_rows")
+        if value.get(key) is not None
+    }
+    node = value.get("node")
+    if isinstance(node, dict):
+        output["node"] = {
+            key: _short_repair_value(node.get(key))
+            for key in ("id", "op")
+            if node.get(key) is not None
+        }
+    local_attempt = value.get("local_attempt")
+    if isinstance(local_attempt, dict):
+        output["local_attempt"] = {
+            key: _short_repair_value(local_attempt.get(key))
+            for key in ("accepted", "last_error")
+            if local_attempt.get(key) is not None
+        }
+    return output
 
 
 def _table_evidence_needs_repair(observation: Any) -> bool:
@@ -690,12 +1139,6 @@ def _table_result_rows(rows: list[Any], columns: list[Any], max_rows: int = 10) 
         else:
             output.append(row)
     return output
-
-
-def _compact_table_memory(mem: Any, max_items: int = 2) -> list[Any]:
-    if not isinstance(mem, list):
-        return []
-    return json_ready(mem[-max_items:])
 
 
 def _is_table_batch_task(source: dict[str, Any] | None) -> bool:

@@ -19,6 +19,25 @@ class PythonFunctionActionTest(unittest.TestCase):
         self.assertEqual(action["action"], "solve")
         self.assertIn("def solve", action["code"])
 
+    def test_repairs_regex_backslashes_in_solve_json(self) -> None:
+        action = parse_python_function_action(
+            '{"s":"def solve(df):\\n'
+            "    values = df['name'].str.replace(r'[^\\w\\s]', '', regex=True)\\n"
+            '    return df.loc[values.ne(\'\')]"}'
+        )
+
+        self.assertEqual(action["action"], "solve")
+        self.assertIn(r"[^\w\s]", action["code"])
+
+    def test_preserves_json_valid_regex_boundary_escape(self) -> None:
+        action = parse_python_function_action(
+            '{"s":"def solve(df):\\n'
+            "    return df[df['name'].str.contains(r'\\bfoo\\b', regex=True)]"
+            '"}'
+        )
+
+        self.assertIn(r"\bfoo\b", action["code"])
+
     def test_validates_only_expected_solve_function(self) -> None:
         task = PythonFunctionTask(
             name="solve",

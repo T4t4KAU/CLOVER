@@ -1172,7 +1172,10 @@ def _try_finalize_static_action_group_answer(
     finalized: set[str],
     profiler: PipelineProfiler,
 ) -> bool:
-    answer = _static_action_group_scalar_answer(item=item, observation=observation)
+    answer = _static_relative_row_answer(item=item, observation=observation)
+    relative_row_hit = answer is not _STATIC_ACTION_NO_ANSWER
+    if not relative_row_hit:
+        answer = _static_action_group_scalar_answer(item=item, observation=observation)
     if answer is _STATIC_ACTION_NO_ANSWER:
         _record_table_diagnostic(
             item.task,
@@ -1189,6 +1192,8 @@ def _try_finalize_static_action_group_answer(
         )
         return False
     profiler.increment("action_group_static_answer_hits")
+    if relative_row_hit:
+        profiler.increment("action_group_edge_relative_row_hits")
     answer_type = _answer_type_name(item.task)
     if answer_type in _STATIC_ACTION_NUMBER_TYPES:
         profiler.increment("action_group_static_answer_number_hits")
@@ -1196,7 +1201,11 @@ def _try_finalize_static_action_group_answer(
         profiler.increment("action_group_static_answer_boolean_hits")
     elif answer_type in _STATIC_ACTION_TEXT_TYPES:
         profiler.increment("action_group_static_answer_text_hits")
-    item.task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "action_static"
+    item.task.metadata[_FINAL_ANSWER_SOURCE_KEY] = (
+        "edge_static_relative_row"
+        if relative_row_hit
+        else "action_static"
+    )
     _record_table_diagnostic(
         item.task,
         _action_group_diagnostic(
@@ -1206,7 +1215,11 @@ def _try_finalize_static_action_group_answer(
                 "source": "action_static",
                 "bypass_synthesis": True,
                 "confidence": "high",
-                "reason": "single_sql_action_static_answer",
+                "reason": (
+                    "edge_verified_relative_row"
+                    if relative_row_hit
+                    else "single_sql_action_static_answer"
+                ),
             },
         ),
     )
@@ -1217,6 +1230,263 @@ def _try_finalize_static_action_group_answer(
         finalized=finalized,
     )
     return True
+
+
+def _static_relative_row_answer(
+    *,
+    item: ActionGroupItem,
+    observation: dict[str, Any],
+) -> Any:
+    if len(item.actions) != 1 or item.actions[0].op != "sql":
+        return _STATIC_ACTION_NO_ANSWER
+    if _answer_type_name(item.task) not in _STATIC_ACTION_TEXT_TYPES:
+        return _STATIC_ACTION_NO_ANSWER
+    direction = _relative_row_direction(item.task.question)
+    if direction is None:
+        return _STATIC_ACTION_NO_ANSWER
+    sql = item.actions[0].q or ""
+    literals = _sql_anchor_literals(sql, question=item.task.question)
+    if not _relative_observation_needs_repair(
+        observation=observation,
+        literals=literals,
+    ):
+        return _STATIC_ACTION_NO_ANSWER
+    output_column = _single_selected_source_column(sql)
+    if output_column is None:
+        return _STATIC_ACTION_NO_ANSWER
+    table_path = Path(str(item.task.source_file or ""))
+    if not table_path.is_file() or table_path.suffix.casefold() != ".csv":
+        return _STATIC_ACTION_NO_ANSWER
+    try:
+        frame = pd.read_csv(table_path, low_memory=False)
+    except Exception:  # noqa: BLE001 - optional deterministic verifier.
+        return _STATIC_ACTION_NO_ANSWER
+    if output_column not in frame.columns or frame.empty:
+        return _STATIC_ACTION_NO_ANSWER
+    anchor = _unique_anchor_location(frame, literals)
+    if anchor is None:
+        return _STATIC_ACTION_NO_ANSWER
+    row_position, anchor_literal = anchor
+    direction = _relative_frame_direction(
+        frame=frame,
+        question=item.task.question,
+        direction=direction,
+    )
+    inline_answer = _inline_relative_value(
+        frame.iloc[row_position][output_column],
+        anchor_literal=anchor_literal,
+        direction=direction,
+    )
+    if inline_answer is not _STATIC_ACTION_NO_ANSWER:
+        return inline_answer
+    target_position = row_position + direction
+    if target_position < 0 or target_position >= len(frame.index):
+        return _STATIC_ACTION_NO_ANSWER
+    value = frame.iloc[target_position][output_column]
+    if _is_missing_static_value(value):
+        return _STATIC_ACTION_NO_ANSWER
+    answer = str(value).strip()
+    if not answer or _normalized_relative_text(answer) == _normalized_relative_text(
+        anchor_literal
+    ):
+        return _STATIC_ACTION_NO_ANSWER
+    return answer
+
+
+def _relative_observation_needs_repair(
+    *,
+    observation: dict[str, Any],
+    literals: list[str],
+) -> bool:
+    obs = observation.get("obs")
+    if not isinstance(obs, list) or len(obs) != 1 or not isinstance(obs[0], dict):
+        return False
+    result = obs[0].get("res")
+    if not isinstance(result, dict):
+        return False
+    if result.get("n") == 0:
+        return True
+    rows = result.get("rows")
+    if isinstance(rows, list) and rows:
+        first = rows[0]
+        if isinstance(first, dict) and len(first) == 1:
+            first = next(iter(first.values()))
+        elif isinstance(first, (list, tuple)) and len(first) == 1:
+            first = first[0]
+        normalized = _normalized_relative_text(first)
+        if any(normalized == _normalized_relative_text(item) for item in literals):
+            return True
+    return False
+
+
+def _relative_row_direction(question: str) -> int | None:
+    if re.search(
+        r"\b(how many|number of|total|years?|days?|months?|older|younger)\b",
+        question,
+        flags=re.IGNORECASE,
+    ):
+        return None
+    if re.search(r"\bafter\s+whom?\b", question, flags=re.IGNORECASE):
+        return -1
+    if re.search(r"\bbefore\s+whom?\b", question, flags=re.IGNORECASE):
+        return 1
+    previous = bool(
+        re.search(
+            r"\b(previous|immediately\s+before|comes?\s+before|"
+            r"came\s+before|prior\s+to|preceding)\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+    )
+    following = bool(
+        re.search(
+            r"\b(next|immediately\s+after|comes?\s+after|"
+            r"came\s+after|following)\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+    )
+    if previous == following:
+        return None
+    return -1 if previous else 1
+
+
+def _relative_frame_direction(
+    *,
+    frame: pd.DataFrame,
+    question: str,
+    direction: int,
+) -> int:
+    if re.search(r"\b(listed|chart)\b", question, flags=re.IGNORECASE):
+        return direction
+    if not re.search(
+        r"\b(after|before|prior\s+to)\b",
+        question,
+        flags=re.IGNORECASE,
+    ):
+        return direction
+    for column in frame.columns:
+        name = str(column).casefold()
+        if not re.search(r"\b(date|from|year|season)\b", name):
+            continue
+        values = pd.to_datetime(frame[column], errors="coerce")
+        values = values.dropna()
+        if len(values.index) < 3:
+            continue
+        if values.is_monotonic_decreasing and not values.is_monotonic_increasing:
+            return -direction
+        if values.is_monotonic_increasing:
+            return direction
+    return direction
+
+
+def _single_selected_source_column(sql: str) -> str | None:
+    match = re.search(r"\bselect\b(.+?)\bfrom\b", sql, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return None
+    projection = match.group(1).strip()
+    if "," in projection or re.search(r"\b(count|sum|min|max|avg|case)\s*\(", projection, re.I):
+        return None
+    identifiers = [
+        item.replace('""', '"')
+        for item in re.findall(r'"((?:""|[^"])*)"', projection)
+    ]
+    return identifiers[0] if len(identifiers) == 1 else None
+
+
+def _sql_anchor_literals(sql: str, *, question: str) -> list[str]:
+    values = []
+    normalized_question = _normalized_relative_text(question)
+    for match in re.finditer(r"'((?:''|[^'])*)'", sql):
+        value = match.group(1).replace("''", "'").strip().strip("%")
+        normalized = _normalized_relative_text(value)
+        if (
+            len(normalized) >= 3
+            and re.search(r"[a-z]", normalized)
+            and normalized in normalized_question
+            and value not in values
+        ):
+            values.append(value)
+    return sorted(values, key=len, reverse=True)
+
+
+def _unique_anchor_location(
+    frame: pd.DataFrame,
+    literals: list[str],
+) -> tuple[int, str] | None:
+    matches: list[tuple[set[int], str]] = []
+    for literal in literals:
+        normalized_literal = _normalized_relative_text(literal)
+        positions: set[int] = set()
+        for position, (_, row) in enumerate(frame.iterrows()):
+            if any(
+                _cell_contains_anchor(value, normalized_literal)
+                for value in row.tolist()
+            ):
+                positions.add(position)
+        if positions:
+            matches.append((positions, literal))
+    if not matches:
+        return None
+    intersection = set.intersection(*(positions for positions, _ in matches))
+    if len(intersection) == 1:
+        position = next(iter(intersection))
+        literal = next(
+            literal for positions, literal in matches if position in positions
+        )
+        return position, literal
+    unique_matches = [
+        (next(iter(positions)), literal)
+        for positions, literal in matches
+        if len(positions) == 1
+    ]
+    unique_positions = {position for position, _ in unique_matches}
+    if len(unique_positions) != 1:
+        return None
+    return max(unique_matches, key=lambda item: len(item[1]))
+
+
+def _cell_contains_anchor(value: Any, normalized_anchor: str) -> bool:
+    if _is_missing_static_value(value):
+        return False
+    normalized_cell = _normalized_relative_text(value)
+    return (
+        normalized_cell == normalized_anchor
+        or (
+            len(normalized_anchor) >= 5
+            and normalized_anchor in normalized_cell
+        )
+    )
+
+
+def _inline_relative_value(
+    value: Any,
+    *,
+    anchor_literal: str,
+    direction: int,
+) -> Any:
+    if _is_missing_static_value(value):
+        return _STATIC_ACTION_NO_ANSWER
+    text = str(value).strip()
+    if not re.search(r"[,;\n]", text):
+        return _STATIC_ACTION_NO_ANSWER
+    parts = [part.strip() for part in re.split(r"[,;\n]+", text) if part.strip()]
+    anchor = _normalized_relative_text(anchor_literal)
+    matches = [
+        index
+        for index, part in enumerate(parts)
+        if _normalized_relative_text(part) == anchor
+    ]
+    if len(matches) != 1:
+        return _STATIC_ACTION_NO_ANSWER
+    target = matches[0] + direction
+    if target < 0 or target >= len(parts):
+        return _STATIC_ACTION_NO_ANSWER
+    return parts[target]
+
+
+def _normalized_relative_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
 
 
 def _static_action_group_scalar_answer(
@@ -1305,6 +1575,100 @@ def _public_action_group_observation(observation: dict[str, Any]) -> dict[str, A
         else:
             public[key] = value
     return public
+
+
+def _compact_action_group_observation(
+    observation: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep only evidence needed by later repair rounds."""
+
+    compact: dict[str, Any] = {
+        "ok": bool(observation.get("ok", True)),
+        "answer": json_ready(observation.get("answer")),
+        "obs": [],
+    }
+    raw_observations = observation.get("obs")
+    if not isinstance(raw_observations, list):
+        return compact
+    for item in raw_observations[:4]:
+        if not isinstance(item, dict):
+            continue
+        public: dict[str, Any] = {
+            key: json_ready(item.get(key))
+            for key in ("i", "op", "kind", "ok", "q")
+            if item.get(key) is not None
+        }
+        result = item.get("res")
+        if isinstance(result, dict):
+            public["res"] = {
+                key: json_ready(result.get(key))
+                for key in ("n", "columns", "cols", "rows")
+                if result.get(key) is not None
+            }
+            rows = public["res"].get("rows")
+            if isinstance(rows, list):
+                public["res"]["rows"] = rows[:5]
+        if item.get("err") is not None:
+            public["err"] = _compact_runtime_error(item.get("err"))
+        if isinstance(item.get("ev"), dict):
+            public["ev"] = _compact_runtime_repair_evidence(item["ev"])
+        compact["obs"].append(public)
+    return compact
+
+
+def _compact_runtime_error(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        error_type = value.get("type")
+        message = value.get("message", value.get("msg"))
+    else:
+        error_type = type(value).__name__ if value is not None else "UnknownError"
+        message = str(value) if value is not None else ""
+    return {
+        "type": str(error_type or "UnknownError")[:120],
+        "message": str(message or "")[:500],
+    }
+
+
+def _compact_runtime_repair_evidence(value: dict[str, Any]) -> dict[str, Any]:
+    output = {
+        key: json_ready(value.get(key))
+        for key in ("route", "reason", "fault", "dialect")
+        if value.get(key) is not None
+    }
+    output.update(_compact_verification_evidence(value))
+    if value.get("error") is not None:
+        output["error"] = _compact_runtime_error(value.get("error"))
+    column_values = value.get("column_values")
+    if isinstance(column_values, dict):
+        output["column_values"] = {
+            str(column): [
+                {
+                    "value": str(
+                        item.get("value") if isinstance(item, dict) else item
+                    )[:160],
+                    **(
+                        {"count": item.get("count")}
+                        if isinstance(item, dict) and item.get("count") is not None
+                        else {}
+                    ),
+                }
+                for item in items[:4]
+            ]
+            for column, items in list(column_values.items())[:4]
+            if isinstance(items, list)
+        }
+    local_attempt = value.get("local_attempt")
+    if isinstance(local_attempt, dict):
+        output["local_attempt"] = {
+            key: (
+                str(local_attempt.get(key))[:300]
+                if key == "last_error"
+                else json_ready(local_attempt.get(key))
+            )
+            for key in ("iterations", "accepted", "last_error")
+            if local_attempt.get(key) is not None
+        }
+    return output
 
 
 def _action_group_diagnostic(
@@ -1957,22 +2321,40 @@ def _execute_table_action_group(
 def _extract_filter_evidence_from_traces(
     execution_traces: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
-    """Extract compact column-value evidence from Edge Agent repair traces.
-
-    When a Filter node produces empty output, the Edge Agent's empty_filter_repair
-    loop collects ``value_counts`` for the WHERE-equality columns and stores them
-    in the per-step ``feedback.column_values``. This function surfaces that
-    evidence so the cloud supervisor can diagnose *why* the SQL returned 0 rows
-    (e.g. target value 'Golden Globe Awards' vs actual 'Golden Globe Awards, 1972').
-    """
+    """Extract a compact verification packet for an empty SQL result."""
     if not execution_traces:
         return None
+    packet: dict[str, Any] = {}
+    local_attempt: dict[str, Any] | None = None
     for trace in execution_traces:
         if not isinstance(trace, dict):
             continue
+        verdict = trace.get("verification_verdict")
+        if isinstance(verdict, dict) and verdict.get("route") != "accept":
+            route = verdict.get("route")
+            if packet.get("route") != "cloud_replan" or route == "cloud_replan":
+                packet["route"] = route
+                if isinstance(verdict.get("reason"), str):
+                    packet["reason"] = verdict.get("reason")
+                evidence = verdict.get("evidence")
+                if isinstance(evidence, dict):
+                    packet.update(_compact_verification_evidence(evidence))
+
         agent_loop = trace.get("agent_loop")
         if not isinstance(agent_loop, dict):
             continue
+        if packet.get("route") == "cloud_replan":
+            continue
+        steps = [
+            step
+            for step in agent_loop.get("steps", [])
+            if isinstance(step, dict)
+        ]
+        local_attempt = {
+            "iterations": agent_loop.get("iterations"),
+            "accepted": any(bool(step.get("accepted")) for step in steps),
+            "last_error": _last_agent_loop_error(steps),
+        }
         for step in agent_loop.get("steps", []):
             if not isinstance(step, dict):
                 continue
@@ -1987,7 +2369,170 @@ def _extract_filter_evidence_from_traces(
                     if isinstance(items, list):
                         compact[str(column)] = items[:8]
                 if compact:
-                    return {"column_values": compact}
+                    packet["column_values"] = compact
+                    break
+    if packet and local_attempt is not None:
+        packet["local_attempt"] = local_attempt
+    if packet:
+        packet["fault"] = _fault_from_verification_packet(packet)
+    return packet or None
+
+
+def _compact_verification_evidence(
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    node = evidence.get("node")
+    if isinstance(node, dict):
+        output["node"] = {
+            key: node.get(key)
+            for key in ("id", "op")
+            if node.get(key) is not None
+        }
+    for key in ("input_rows", "output_rows"):
+        if isinstance(evidence.get(key), int):
+            output[key] = evidence[key]
+    mismatch = evidence.get("mismatch")
+    if isinstance(mismatch, dict):
+        compact_mismatch: dict[str, Any] = {}
+        if isinstance(mismatch.get("sql"), str):
+            compact_mismatch["sql"] = mismatch["sql"][:500]
+        roots = []
+        root_values = mismatch.get("roots")
+        if not isinstance(root_values, list):
+            root_values = []
+        for root in root_values[:4]:
+            if not isinstance(root, dict):
+                continue
+            sql_literals = root.get("sql_lit")
+            actual_values = root.get("actual")
+            roots.append(
+                {
+                    "col": root.get("col"),
+                    "sql_lit": (
+                        [_short_evidence_value(item) for item in sql_literals[:8]]
+                        if isinstance(sql_literals, list)
+                        else []
+                    ),
+                    "actual": (
+                        [_short_evidence_value(item) for item in actual_values[:8]]
+                        if isinstance(actual_values, list)
+                        else []
+                    ),
+                    "mismatch": root.get("mismatch"),
+                }
+            )
+        if roots:
+            compact_mismatch["roots"] = roots
+        candidates = []
+        candidate_values = mismatch.get("candidates")
+        if not isinstance(candidate_values, list):
+            candidate_values = []
+        for candidate in candidate_values[:3]:
+            if not isinstance(candidate, dict):
+                continue
+            samples = candidate.get("sample")
+            matches = candidate.get("matches")
+            candidates.append(
+                {
+                    "col": candidate.get("col"),
+                    "literal": candidate.get("literal"),
+                    "matches": (
+                        [_short_evidence_value(item) for item in matches[:3]]
+                        if isinstance(matches, list)
+                        else []
+                    ),
+                    "sample": (
+                        [_short_evidence_value(item) for item in samples[:3]]
+                        if isinstance(samples, list)
+                        else []
+                    ),
+                }
+            )
+        if candidates:
+            validated_candidates = _validated_mismatch_candidates(
+                roots=roots,
+                candidates=candidates,
+            )
+            if validated_candidates:
+                compact_mismatch["candidates"] = validated_candidates
+        if compact_mismatch:
+            output["mismatch"] = compact_mismatch
+    return output
+
+
+def _short_evidence_value(value: Any, limit: int = 160) -> Any:
+    if not isinstance(value, str):
+        return json_ready(value)
+    text = value.strip()
+    return text if len(text) <= limit else text[:limit] + "...<truncated>"
+
+
+def _validated_mismatch_candidates(
+    *,
+    roots: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    literals = [
+        str(literal)
+        for root in roots
+        for literal in root.get("sql_lit", [])
+        if str(literal).strip()
+    ]
+    output = []
+    for candidate in candidates:
+        values = candidate.get("matches") or candidate.get("sample")
+        if not isinstance(values, list):
+            continue
+        if any(
+            _normalized_value_matches(literal, sample)
+            for literal in literals
+            for sample in values
+        ):
+            output.append(candidate)
+    return output
+
+
+def _normalized_value_matches(left: Any, right: Any) -> bool:
+    normalized_left = re.sub(r"[^a-z0-9]+", "", str(left).casefold())
+    normalized_right = re.sub(r"[^a-z0-9]+", "", str(right).casefold())
+    if not normalized_left or not normalized_right:
+        return False
+    return (
+        normalized_left == normalized_right
+        or normalized_left in normalized_right
+        or normalized_right in normalized_left
+    )
+
+
+def _fault_from_verification_packet(packet: dict[str, Any]) -> str:
+    reason = str(packet.get("reason") or "")
+    if reason == "predicate_wrong_column":
+        return "wrong_column"
+    if reason == "predicate_candidate_column":
+        mismatch = packet.get("mismatch")
+        if isinstance(mismatch, dict) and mismatch.get("candidates"):
+            return "wrong_column"
+        return "predicate_semantic_error"
+    if reason in {
+        "predicate_quoting",
+        "predicate_format",
+        "predicate_not_found",
+    }:
+        return "predicate_mismatch"
+    if reason == "predicate_system_bug":
+        return "local_execution_error"
+    return "predicate_semantic_error"
+
+
+def _last_agent_loop_error(steps: list[dict[str, Any]]) -> str | None:
+    for step in reversed(steps):
+        error = step.get("error")
+        if not isinstance(error, dict):
+            continue
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            return message[:300]
     return None
 
 
@@ -2040,19 +2585,43 @@ def _execute_sql_action_observation(
         observation[_ACTION_FULL_RESULT_KEY] = result.value
     else:
         observation["err"] = result.error
+        observation["ev"] = _sql_execution_error_evidence(
+            task=task,
+            sql=sql,
+            error=result.error,
+        )
     if result.logic_dag is not None:
         observation["logic_dag"] = result.logic_dag
     if result.execution_traces is not None:
         observation["execution_traces"] = result.execution_traces
-    # When the SQL succeeds but returns 0 rows, surface the column-value
-    # evidence collected by the Edge Agent's empty_filter_repair loop so the
-    # cloud supervisor can see *why* the WHERE clause matched nothing and
-    # decide whether to rewrite the SQL or answer directly.
+    # For an empty result, expose one bounded Edge verification packet instead
+    # of forwarding the full logic DAG, prompts, and execution trace.
     if _sql_result_is_empty(result):
         evidence = _extract_filter_evidence_from_traces(result.execution_traces)
         if evidence is not None:
             observation["ev"] = evidence
     return observation, result
+
+
+def _sql_execution_error_evidence(
+    *,
+    task: TaskItem,
+    sql: str,
+    error: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "route": "cloud_replan",
+        "reason": "sql_execution_error",
+        "fault": "sql_execution_error",
+        "dialect": "sqlite",
+        "sql": sql[:2000],
+        "error": _compact_runtime_error(error),
+        "requirements": [
+            "use SQLite-compatible functions",
+            f"preserve answer type {_answer_type_name(task)}",
+            "do not repeat the failed SQL",
+        ],
+    }
 
 
 def _execute_sql_action(
@@ -2672,12 +3241,40 @@ def _enqueue_action_group(
     finalized: set[str],
     max_retries: int,
 ) -> None:
+    if _actions_repeat_prior_sql(task, actions):
+        _finalize_failed(
+            task,
+            final_results=final_results,
+            finalized=finalized,
+            error={
+                "type": "DuplicateRepairSQL",
+                "message": "cloud repair repeated an earlier SQL statement",
+            },
+        )
+        return
+    if task.retry_count > 0 and not _latest_repair_evidence_changed(task):
+        _finalize_failed(
+            task,
+            final_results=final_results,
+            finalized=finalized,
+            error={
+                "type": "RepairEvidenceStalled",
+                "message": (
+                    "another cloud repair was rejected because no new "
+                    "failure evidence appeared"
+                ),
+            },
+        )
+        return
     if task.retry_count >= max_retries:
         _finalize_failed(
             task,
             final_results=final_results,
             finalized=finalized,
-            error={"type": "RetryLimitExceeded", "message": "retry limit exhausted"},
+            error={
+                "type": "RepairBudgetExhausted",
+                "message": "cloud repair budget exhausted",
+            },
         )
         return
     task.retry_count += 1
@@ -2699,9 +3296,11 @@ def _record_action_memory(
 ) -> None:
     if decision.done is not False:
         return
+    result = _compact_action_group_observation(observation)
     entry = {
         "act": [_action_to_dict(action) for action in actions],
-        "obs": _compact_action_memory_result(observation),
+        "result": result,
+        "sig": _repair_evidence_signature(result),
     }
     if decision.feedback:
         entry["fb"] = decision.feedback
@@ -2709,11 +3308,86 @@ def _record_action_memory(
     del task.memory[:-3]
 
 
-def _compact_action_memory_result(observation: dict[str, Any]) -> Any:
-    obs = observation.get("obs")
-    if not isinstance(obs, list):
-        return None
-    return json_ready(obs[:4])
+def _repair_evidence_signature(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    signature_items = []
+    for item in result.get("obs", []):
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("ev")
+        error = item.get("err")
+        response = item.get("res")
+        mismatch = evidence.get("mismatch") if isinstance(evidence, dict) else None
+        mismatch_signature = (
+            {
+                key: mismatch.get(key)
+                for key in ("roots", "candidates")
+                if mismatch.get(key) is not None
+            }
+            if isinstance(mismatch, dict)
+            else None
+        )
+        signature_items.append(
+            {
+                "ok": item.get("ok"),
+                "error": error,
+                "rows": response.get("n") if isinstance(response, dict) else None,
+                "columns": (
+                    response.get("cols", response.get("columns"))
+                    if isinstance(response, dict)
+                    else None
+                ),
+                "fault": evidence.get("fault") if isinstance(evidence, dict) else None,
+                "reason": evidence.get("reason") if isinstance(evidence, dict) else None,
+                "node": evidence.get("node") if isinstance(evidence, dict) else None,
+                "mismatch": mismatch_signature,
+            }
+        )
+    return json.dumps(
+        signature_items,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _latest_repair_evidence_changed(task: TaskItem) -> bool:
+    signatures = [
+        entry.get("sig")
+        for entry in task.memory
+        if isinstance(entry, dict) and isinstance(entry.get("sig"), str)
+    ]
+    return len(signatures) < 2 or signatures[-1] != signatures[-2]
+
+
+def _actions_repeat_prior_sql(
+    task: TaskItem,
+    actions: tuple[SupervisorAction, ...],
+) -> bool:
+    proposed = [
+        _normalize_sql_text(action.q)
+        for action in actions
+        if action.op == "sql" and action.q
+    ]
+    if not proposed or any(action.op != "sql" for action in actions):
+        return False
+    previous = {
+        normalized
+        for entry in task.memory
+        if isinstance(entry, dict)
+        for action in entry.get("act", [])
+        if isinstance(action, dict) and action.get("op") == "sql"
+        for normalized in [_normalize_sql_text(action.get("q"))]
+        if normalized
+    }
+    return all(sql in previous for sql in proposed)
+
+
+def _normalize_sql_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value).strip().rstrip(";").casefold()
 
 
 def _finish_table_execution_batch(
@@ -3267,6 +3941,10 @@ def _run_supervisor_synthesis(
                 logic_dag=logic_dag,
                 observation=observation,
                 current_command=_sql_map(batch),
+                force_final_answer=all(
+                    item.task.retry_count >= max_retries
+                    for item in batch
+                ),
             )
             profiler.increment("supervisor_synthesis_calls")
             _record_remote_token_usage(
@@ -3362,6 +4040,7 @@ def _run_supervisor_action_reports_batch(
                 item=item,
                 observation=observation,
                 supervisor=supervisor,
+                max_retries=max_retries,
             )
             for index, item, observation in runnable
         ]
@@ -3375,6 +4054,7 @@ def _run_supervisor_action_reports_batch(
                     item=item,
                     observation=observation,
                     supervisor=supervisor,
+                    max_retries=max_retries,
                 )
                 for index, item, observation in runnable
             ]
@@ -3458,6 +4138,7 @@ def _run_one_supervisor_action_report_for_batch(
     item: ActionGroupItem,
     observation: dict[str, Any],
     supervisor: SupervisorAgent,
+    max_retries: int,
 ) -> _ActionReportRunResult:
     local_profiler = PipelineProfiler()
     try:
@@ -3469,6 +4150,7 @@ def _run_one_supervisor_action_report_for_batch(
                 current_command={
                     "acts": [_action_to_dict(action) for action in item.actions]
                 },
+                force_final_answer=item.task.retry_count >= max_retries,
             )
             local_profiler.increment("supervisor_synthesis_calls")
             _record_remote_token_usage(
@@ -3675,12 +4357,28 @@ def _enqueue_sqls(
     finalized: set[str],
     max_retries: int,
 ) -> None:
+    current_sql = _normalize_sql_text(task.current_sql)
+    proposed_sql = [_normalize_sql_text(sql) for sql in sqls]
+    if current_sql and proposed_sql and all(sql == current_sql for sql in proposed_sql):
+        _finalize_failed(
+            task,
+            final_results=final_results,
+            finalized=finalized,
+            error={
+                "type": "DuplicateRepairSQL",
+                "message": "cloud repair repeated the current SQL statement",
+            },
+        )
+        return
     if task.retry_count >= max_retries:
         _finalize_failed(
             task,
             final_results=final_results,
             finalized=finalized,
-            error={"type": "RetryLimitExceeded", "message": "retry limit exhausted"},
+            error={
+                "type": "RepairBudgetExhausted",
+                "message": "cloud repair budget exhausted",
+            },
         )
         return
     task.retry_count += 1

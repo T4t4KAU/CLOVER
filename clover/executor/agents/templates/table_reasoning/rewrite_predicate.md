@@ -13,8 +13,7 @@ Rules:
 - If a root has mismatch "quoting", the actual values have extra quote chars
   that the SQL literal is missing. Wrap the literal to match.
 - If a root has mismatch "format", normalize case/spacing to match actual.
-- If candidates are present, a different column may contain the target value;
-  switch the predicate column only if the current column clearly cannot match.
+- Do not add/remove conditions or change columns/operators. Change literals only.
 
 Case:
 {{ CASE_JSON }}

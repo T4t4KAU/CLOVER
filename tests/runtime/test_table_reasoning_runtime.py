@@ -42,6 +42,17 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(actions[0].op, "analyze")
         self.assertEqual(actions[0].seed, 'SELECT "year" FROM "table_1"')
 
+    def test_second_repair_requires_changed_failure_signature(self) -> None:
+        stalled = SimpleNamespace(memory=[{"sig": "same"}, {"sig": "same"}])
+        changed = SimpleNamespace(memory=[{"sig": "first"}, {"sig": "second"}])
+
+        self.assertFalse(
+            table_pipeline._latest_repair_evidence_changed(stalled)  # noqa: SLF001
+        )
+        self.assertTrue(
+            table_pipeline._latest_repair_evidence_changed(changed)  # noqa: SLF001
+        )
+
     def test_query_with_explicit_local_sql_skips_remote_decompose(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
@@ -1165,6 +1176,313 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(results["case_2"].retry_count, 0)
         self.assertEqual(result.profile["counters"]["merged_plan_count"], 3)
 
+    def test_edge_relative_row_repairs_anchor_answer_deterministically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            table_path.write_text(
+                "name\nAlpha\nBeta\nGamma\n",
+                encoding="utf-8",
+            )
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "name" FROM "table_1" '
+                                'WHERE "name" = \'Beta\' LIMIT 1'
+                            )
+                        }
+                    )
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        root,
+                        table_path,
+                        "Who comes after Beta?",
+                        "string",
+                        profile="analyze",
+                    )
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=1,
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, "Gamma")
+        self.assertEqual(
+            result.case_results[0].metadata["final_answer_source"],
+            "edge_static_relative_row",
+        )
+        self.assertEqual(
+            result.profile["counters"]["action_group_edge_relative_row_hits"],
+            1,
+        )
+        self.assertEqual(len(client.chat.completions.requests), 1)
+
+    def test_edge_relative_row_respects_descending_dates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            table_path.write_text(
+                "Name,From\n"
+                "New Coach,1 July 2012\n"
+                "Christian Andersen,11 July 2009\n"
+                "Anders Theil,7 November 2005\n"
+                "Ebbe Skovdahl,11 October 2003\n",
+                encoding="utf-8",
+            )
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "Name" FROM "table_1" '
+                                'WHERE "Name" = \'Anders Theil\' LIMIT 1'
+                            )
+                        }
+                    )
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        root,
+                        table_path,
+                        "Who was the coach immediately after Anders Theil?",
+                        "string",
+                        profile="analyze",
+                    )
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=1,
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, "Christian Andersen")
+
+    def test_duplicate_cloud_repair_sql_is_rejected_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = _write_people_table(root)
+            sql = 'SELECT "country" FROM "table_1" WHERE "country" = \'Missing\''
+            client = _StatefulChatClient(
+                [
+                    json.dumps({"q": sql}),
+                    json.dumps({"acts": [{"op": "sql", "q": sql}]}),
+                ]
+            )
+            empty_table = {
+                "n": 0,
+                "cols": ["country"],
+                "rows": [],
+            }
+
+            with patch(
+                "clover.runtime.table_reasoning.pipeline.execute_execution_plan",
+                return_value=ExecutionResult(
+                    ok=True,
+                    answer={"answer_1__a1": empty_table},
+                    outputs={"answer_1__a1": empty_table},
+                    collector_outputs={"answer": {"answer_1__a1": empty_table}},
+                    traces=[],
+                    output_summaries={},
+                ),
+            ):
+                result = run_table_reasoning_system(
+                    case_specs=[
+                        _case_spec(
+                            "case_1",
+                            root,
+                            table_path,
+                            "Which country is missing?",
+                            "string",
+                            profile="analyze",
+                        )
+                    ],
+                    remote_config={
+                        "api_type": "chat_completions",
+                        "model": "fake-model",
+                    },
+                    remote_batch_size=1,
+                    max_retries=2,
+                    client=client,
+                )
+
+        self.assertFalse(result.case_results[0].ok)
+        self.assertEqual(
+            result.case_results[0].error["type"],
+            "DuplicateRepairSQL",
+        )
+        self.assertEqual(result.case_results[0].retry_count, 0)
+        self.assertEqual(len(client.chat.completions.requests), 2)
+
+    def test_second_cloud_repair_requires_new_compact_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = _write_people_table(root)
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "country" FROM "table_1" '
+                                'WHERE "country" = \'Missing\''
+                            )
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "acts": [
+                                {
+                                    "op": "sql",
+                                    "q": (
+                                        'SELECT "country" FROM "table_1" '
+                                        'WHERE "country" LIKE \'%Missing%\''
+                                    ),
+                                }
+                            ]
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "acts": [
+                                {
+                                    "op": "sql",
+                                    "q": (
+                                        'SELECT "country" FROM "table_1" '
+                                        'ORDER BY "finalWorth" DESC LIMIT 1'
+                                    ),
+                                }
+                            ]
+                        }
+                    ),
+                ]
+            )
+            empty_table = {"n": 0, "cols": ["country"], "rows": []}
+            answer_table = {
+                "n": 1,
+                "cols": ["country"],
+                "rows": [{"country": "United States"}],
+            }
+            first_trace = [
+                {
+                    "op": "Filter",
+                    "verification_verdict": {
+                        "route": "edge_repair",
+                        "reason": "predicate_not_found",
+                        "evidence": {
+                            "node": {"id": "N1", "op": "Filter"},
+                            "input_rows": 2,
+                            "output_rows": 0,
+                            "mismatch": {
+                                "sql": '"country" = \'Missing\'',
+                                "roots": [
+                                    {
+                                        "col": "country",
+                                        "sql_lit": ["Missing"],
+                                        "actual": ["France", "United States"],
+                                        "mismatch": "not_found",
+                                    }
+                                ],
+                            },
+                        },
+                    },
+                }
+            ]
+            second_trace = [
+                {
+                    "op": "Filter",
+                    "verification_verdict": {
+                        "route": "cloud_replan",
+                        "reason": "predicate_wrong_column",
+                        "evidence": {
+                            "node": {"id": "N1", "op": "Filter"},
+                            "input_rows": 2,
+                            "output_rows": 0,
+                            "mismatch": {
+                                "sql": '"country" LIKE \'%Missing%\'',
+                                "roots": [
+                                    {
+                                        "col": "country",
+                                        "sql_lit": ["Missing"],
+                                        "actual": ["France", "United States"],
+                                        "mismatch": "wrong_column",
+                                    }
+                                ],
+                            },
+                        },
+                    },
+                }
+            ]
+            executions = [
+                ExecutionResult(
+                    ok=True,
+                    answer={"answer_1__a1": empty_table},
+                    outputs={"answer_1__a1": empty_table},
+                    collector_outputs={"answer": {"answer_1__a1": empty_table}},
+                    traces=first_trace,
+                    output_summaries={},
+                ),
+                ExecutionResult(
+                    ok=True,
+                    answer={"answer_1__a1": empty_table},
+                    outputs={"answer_1__a1": empty_table},
+                    collector_outputs={"answer": {"answer_1__a1": empty_table}},
+                    traces=second_trace,
+                    output_summaries={},
+                ),
+                ExecutionResult(
+                    ok=True,
+                    answer={"answer_1__a1": answer_table},
+                    outputs={"answer_1__a1": answer_table},
+                    collector_outputs={"answer": {"answer_1__a1": answer_table}},
+                    traces=[],
+                    output_summaries={},
+                ),
+            ]
+
+            with patch(
+                "clover.runtime.table_reasoning.pipeline.execute_execution_plan",
+                side_effect=executions,
+            ):
+                result = run_table_reasoning_system(
+                    case_specs=[
+                        _case_spec(
+                            "case_1",
+                            root,
+                            table_path,
+                            "Which country has the highest finalWorth?",
+                            "string",
+                            profile="analyze",
+                        )
+                    ],
+                    remote_config={
+                        "api_type": "chat_completions",
+                        "model": "fake-model",
+                    },
+                    remote_batch_size=1,
+                    max_retries=2,
+                    client=client,
+                )
+
+        self.assertTrue(result.case_results[0].ok)
+        self.assertEqual(result.case_results[0].answer, "United States")
+        self.assertEqual(result.case_results[0].retry_count, 2)
+        self.assertEqual(len(client.chat.completions.requests), 3)
+        second_repair_prompt = client.chat.completions.requests[2]["messages"][0][
+            "content"
+        ]
+        self.assertIn('"prior"', second_repair_prompt)
+        self.assertNotIn('"logic_dag"', second_repair_prompt)
+        self.assertNotIn('"execution_traces"', second_repair_prompt)
+
 
 def _write_people_table(tmpdir: Path) -> Path:
     tmpdir.mkdir(parents=True, exist_ok=True)
@@ -1292,6 +1610,85 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         self.assertIn("column_values", result)
         self.assertIn("Film", result["column_values"])
         self.assertEqual(len(result["column_values"]["Film"]), 2)
+
+    def test_extract_returns_cloud_replan_verdict_without_agent_loop(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_filter_evidence_from_traces,
+        )
+        traces = [
+            {
+                "op": "Filter",
+                "verification_verdict": {
+                    "route": "cloud_replan",
+                    "reason": "predicate_wrong_column",
+                    "evidence": {
+                        "node": {"id": "N1", "op": "Filter"},
+                        "input_rows": 8,
+                        "output_rows": 0,
+                        "mismatch": {
+                            "sql": '"Date" = \'April 8\'',
+                            "roots": [
+                                {
+                                    "col": "Date",
+                                    "sql_lit": ["April 8"],
+                                    "actual": ["1", "2", "3"],
+                                    "mismatch": "wrong_column",
+                                }
+                            ],
+                            "candidates": [
+                                {"col": "Rnd", "sample": ["April 8", "April 22"]}
+                            ],
+                        },
+                    },
+                },
+            }
+        ]
+
+        result = _extract_filter_evidence_from_traces(traces)
+
+        self.assertEqual(result["route"], "cloud_replan")
+        self.assertEqual(result["reason"], "predicate_wrong_column")
+        self.assertEqual(result["node"], {"id": "N1", "op": "Filter"})
+        self.assertEqual(result["input_rows"], 8)
+        self.assertEqual(
+            result["mismatch"]["candidates"][0]["col"],
+            "Rnd",
+        )
+
+    def test_extract_records_failed_local_attempt(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_filter_evidence_from_traces,
+        )
+        traces = [
+            {
+                "op": "Filter",
+                "verification_verdict": {
+                    "route": "edge_repair",
+                    "reason": "predicate_format",
+                },
+                "agent_loop": {
+                    "iterations": 2,
+                    "steps": [
+                        {
+                            "accepted": False,
+                            "error": {"message": "still empty"},
+                        }
+                    ],
+                },
+            }
+        ]
+
+        result = _extract_filter_evidence_from_traces(traces)
+
+        self.assertEqual(result["route"], "edge_repair")
+        self.assertEqual(
+            result["local_attempt"],
+            {
+                "iterations": 2,
+                "accepted": False,
+                "last_error": "still empty",
+            },
+        )
 
     def test_extract_caps_to_top_8_values_per_column(self) -> None:
         from clover.runtime.table_reasoning.pipeline import (

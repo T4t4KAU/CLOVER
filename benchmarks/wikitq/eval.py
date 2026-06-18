@@ -161,7 +161,7 @@ def run_wikitq_eval(
             selected_cases=selected_cases,
             elapsed_seconds=time.perf_counter() - started,
             worker_count=max(1, int(max_workers or 1)),
-            max_retries=0 if validation_mode == "none" else max_retries,
+            max_retries=max_retries,
             validation_mode=validation_mode,
             remote_batch_size=remote_batch_size,
             remote_concurrency=remote_concurrency,
@@ -388,7 +388,7 @@ def _update_record_from_case_result(
             "retry_exhausted": (
                 not case_result.ok
                 and isinstance(case_result.error, dict)
-                and case_result.error.get("type") == "RetryLimitExceeded"
+                and case_result.error.get("type") == "RepairBudgetExhausted"
             ),
             "error": case_result.error,
             "rounds": [],

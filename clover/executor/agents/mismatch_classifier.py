@@ -5,7 +5,8 @@ against actual column values. Used to route repair strategy:
 
 - quoting / format  -> SLM rewrites SQL predicate (lightweight, plan A)
 - not_found         -> SLM writes Python (flexible, plan B)
-- wrong_column / system_bug -> skip SLM, escalate to Cloud (plan C)
+- wrong_column or candidate column -> escalate to Cloud (plan C)
+- system_bug        -> SLM writes Python against the local dataframe
 """
 
 from __future__ import annotations
@@ -138,17 +139,22 @@ def find_candidate_columns(
         col_values = frame[actual_col].dropna().astype(str)
         if col_values.empty:
             continue
-        matched = False
+        matched_literal: str | None = None
+        matched_values: list[str] = []
         for lit in all_literals:
             lit_clean = _strip_sql_wildcards(lit).lower()
             if not lit_clean or len(lit_clean) < 3:
                 continue
-            if col_values.str.contains(lit_clean, case=False, regex=False).any():
-                matched = True
+            mask = col_values.str.contains(lit_clean, case=False, regex=False)
+            if mask.any():
+                matched_literal = lit
+                matched_values = col_values[mask].drop_duplicates().head(3).tolist()
                 break
-        if matched:
+        if matched_literal is not None:
             candidates.append({
                 "col": col_str,
+                "literal": matched_literal,
+                "matches": matched_values,
                 "sample": _top_values(frame[actual_col], limit=3),
             })
         if len(candidates) >= 3:

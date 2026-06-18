@@ -8,7 +8,11 @@ from typing import Any
 
 import pandas as pd
 
-from clover.executor.agents.base import BaseNodeAgent, FastPathDecision
+from clover.executor.agents.base import (
+    BaseNodeAgent,
+    FastPathDecision,
+    FastPathReview,
+)
 from clover.executor.agents.loop import AgentLoopExecutionError, run_sandbox_agent_loop
 from clover.executor.agents.mismatch_classifier import analyze_predicate_mismatch
 from clover.executor.agents.template_tree import (
@@ -47,6 +51,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._mismatch_analysis: dict[str, Any] | None = None
+        self._dependency_frame_cache: list[pd.DataFrame] | None = None
 
     def _compute_mismatch_analysis(self) -> dict[str, Any] | None:
         """Compute mismatch analysis for the current Filter node.
@@ -79,21 +84,27 @@ class TableReasoningNodeAgent(BaseNodeAgent):
 
     def _primary_input_frame(self) -> pd.DataFrame | None:
         """Get the primary input DataFrame for the current node."""
+        frames = self._dependency_frames()
+        return frames[0] if frames else None
+
+    def _dependency_frames(self) -> list[pd.DataFrame]:
+        """Materialize dependency tables in node order."""
+        if self._dependency_frame_cache is not None:
+            return self._dependency_frame_cache
         try:
-            frames = _materialized_frames(
+            self._dependency_frame_cache = _materialized_frames(
                 self.context.materialize_dependencies(target="pandas").values()
             )
-            if frames:
-                return frames[0]
         except Exception:
-            pass
-        return None
+            self._dependency_frame_cache = []
+        return self._dependency_frame_cache
 
     def _dominant_mismatch(self) -> str | None:
         """Return the most severe mismatch type across all roots.
 
         Priority: wrong_column > system_bug > not_found > format > quoting.
-        wrong_column and system_bug trigger Cloud escalation (plan C).
+        wrong_column triggers Cloud escalation; the remaining classes are
+        eligible for local repair.
         """
         analysis = self._compute_mismatch_analysis()
         if not analysis or not analysis.get("roots"):
@@ -227,17 +238,77 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         decision: FastPathDecision,
         output: Any,
     ) -> bool:
+        del decision
         if _agent_loop_disabled(self.context.slm_config):
             return False
-        return (
+        return self._is_empty_output_review_candidate(output)
+
+    def _is_empty_output_review_candidate(self, output: Any) -> bool:
+        if not (
             _supports_empty_filter_repair(self.context.task_type)
             and self.node.get("op") in _EMPTY_OUTPUT_REPAIRABLE_OPS
             and _is_empty_table_output(output)
+        ):
+            return False
+        dependency_frames = self._dependency_frames()
+        # Only repair the first node that turns non-empty inputs into an empty
+        # result. A downstream node cannot recover rows already removed.
+        return not dependency_frames or all(
+            not frame.empty for frame in dependency_frames
         )
-        # NOTE: Plan C (skip agent loop for wrong_column / system_bug and
-        # escalate to Cloud) is disabled until the Cloud evidence-upload
-        # path is wired in. Skipping the agent loop without a Cloud fallback
-        # causes empty outputs that the agent loop would otherwise repair.
+
+    def review_fast_path_output(
+        self,
+        decision: FastPathDecision,
+        output: Any,
+    ) -> FastPathReview:
+        del decision
+        if not self._is_empty_output_review_candidate(output):
+            return FastPathReview()
+        edge_disabled = _agent_loop_disabled(self.context.slm_config)
+        if self.node.get("op") != "Filter":
+            if edge_disabled:
+                return FastPathReview(
+                    route="cloud_replan",
+                    reason="edge_repair_disabled",
+                    evidence=_empty_output_evidence(self, output),
+                )
+            return FastPathReview(
+                route="edge_repair",
+                trigger="fast_path_empty_output",
+                reason="empty_local_operation",
+                evidence=_empty_output_evidence(self, output),
+            )
+
+        mismatch_analysis = self._compute_mismatch_analysis() or {}
+        dominant = self._dominant_mismatch()
+        evidence = _empty_output_evidence(
+            self,
+            output,
+            mismatch_analysis=mismatch_analysis,
+        )
+        if dominant == "wrong_column" or mismatch_analysis.get("candidates"):
+            return FastPathReview(
+                route="cloud_replan",
+                reason=(
+                    "predicate_candidate_column"
+                    if mismatch_analysis.get("candidates")
+                    else "predicate_wrong_column"
+                ),
+                evidence=evidence,
+            )
+        if edge_disabled:
+            return FastPathReview(
+                route="cloud_replan",
+                reason="edge_repair_disabled",
+                evidence=evidence,
+            )
+        return FastPathReview(
+            route="edge_repair",
+            trigger="fast_path_empty_output",
+            reason=f"predicate_{dominant or 'unclassified'}",
+            evidence=evidence,
+        )
 
     def should_keep_fast_path_output_on_agent_loop_failure(
         self,
@@ -279,13 +350,25 @@ class TableReasoningNodeAgent(BaseNodeAgent):
             and self.node.get("op") == "Filter"
             and bool(mismatch_analysis)
             and self._dominant_mismatch() in {"quoting", "format"}
+            and _predicate_supports_literal_rewrite(
+                self.node.get("params", {}).get("predicate")
+            )
         )
-        if use_rewrite_predicate:
-            prompt_kind = "table_reasoning_rewrite_predicate"
-        elif use_empty_filter_repair:
-            prompt_kind = "table_reasoning_empty_filter_repair"
-        else:
-            prompt_kind = "table_reasoning_agent_loop"
+        def use_rewrite_for_step(steps: list[dict[str, Any]]) -> bool:
+            # Use the compact predicate patch once, then fall back to Python
+            # repair if the deterministic re-execution rejects it.
+            return use_rewrite_predicate and not steps
+
+        def prompt_kind_for_step(
+            iteration: int,
+            steps: list[dict[str, Any]],
+        ) -> str:
+            del iteration
+            if use_rewrite_for_step(steps):
+                return "table_reasoning_rewrite_predicate"
+            if use_empty_filter_repair:
+                return "table_reasoning_empty_filter_repair"
+            return "table_reasoning_agent_loop"
         try:
             result = run_sandbox_agent_loop(
                 context=self.context,
@@ -303,7 +386,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
                         node=self.node,
                         mismatch_analysis=mismatch_analysis,
                     )
-                    if use_rewrite_predicate
+                    if use_rewrite_for_step(steps)
                     else (
                         render_table_empty_filter_repair_prompt(
                             view=view,
@@ -320,7 +403,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
                     )
                 ),
                 parse_action=_extract_action_json,
-                prompt_kind=prompt_kind,
+                prompt_kind=prompt_kind_for_step,
             )
         except AgentLoopExecutionError as exc:
             self.agent_loop_trace = exc.trace
@@ -523,3 +606,85 @@ def _is_empty_table_output(output: Any) -> bool:
         return output.empty
     frame = getattr(output, "frame", None)
     return isinstance(frame, pd.DataFrame) and frame.empty
+
+
+def _empty_output_evidence(
+    agent: TableReasoningNodeAgent,
+    output: Any,
+    *,
+    mismatch_analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    input_frame = agent._primary_input_frame()
+    evidence: dict[str, Any] = {
+        "node": {
+            "id": agent.node.get("id"),
+            "op": agent.node.get("op"),
+        },
+        "input_rows": len(input_frame.index) if input_frame is not None else None,
+        "output_rows": _table_output_row_count(output),
+    }
+    if mismatch_analysis:
+        evidence["mismatch"] = mismatch_analysis
+    return {
+        key: value
+        for key, value in evidence.items()
+        if value is not None
+    }
+
+
+def _table_output_row_count(output: Any) -> int | None:
+    if isinstance(output, PandasTable):
+        return len(output.frame.index)
+    if isinstance(output, pd.DataFrame):
+        return len(output.index)
+    frame = getattr(output, "frame", None)
+    return len(frame.index) if isinstance(frame, pd.DataFrame) else None
+
+
+def _predicate_supports_literal_rewrite(expr: Any) -> bool:
+    """Return whether a predicate is safe for a literal-only patch."""
+
+    if not isinstance(expr, dict):
+        return False
+    expr_type = expr.get("type")
+    if expr_type == "logical_op":
+        operands = expr.get("operands")
+        return (
+            expr.get("op") in {"AND", "OR"}
+            and isinstance(operands, list)
+            and bool(operands)
+            and all(_predicate_supports_literal_rewrite(item) for item in operands)
+        )
+    if expr_type == "binary_op":
+        if expr.get("op") != "=":
+            return False
+        left = expr.get("left")
+        right = expr.get("right")
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and {left.get("type"), right.get("type")} == {"column", "literal"}
+        )
+    if expr_type == "like":
+        value = expr.get("expr")
+        pattern = expr.get("pattern")
+        return (
+            isinstance(value, dict)
+            and value.get("type") == "column"
+            and isinstance(pattern, dict)
+            and pattern.get("type") == "literal"
+        )
+    if expr_type == "in":
+        value = expr.get("expr")
+        values = expr.get("values")
+        return (
+            isinstance(value, dict)
+            and value.get("type") == "column"
+            and isinstance(values, list)
+            and bool(values)
+            and all(
+                isinstance(item, dict) and item.get("type") == "literal"
+                for item in values
+            )
+        )
+    return False

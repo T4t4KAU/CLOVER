@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,6 +36,9 @@ def parse_python_function_action(text: str) -> dict[str, Any]:
     code = payload.get("s")
     if not isinstance(code, str) or not code.strip():
         raise PythonFunctionParseError("Python function action must include string field s")
+    # JSON treats \b and \f as control characters, while small code models
+    # commonly intend them as regex escapes inside raw Python strings.
+    code = code.replace("\b", r"\b").replace("\f", r"\f")
     return {
         "action": "solve",
         "code": code,
@@ -91,10 +95,15 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     candidates.append(text)
     errors: list[str] = []
     for candidate in candidates:
-        try:
-            payload = json.loads(candidate.strip())
-        except json.JSONDecodeError as exc:
-            errors.append(str(exc))
+        payload = None
+        stripped = candidate.strip()
+        for json_candidate in (stripped, _fix_invalid_json_escapes(stripped)):
+            try:
+                payload = json.loads(json_candidate)
+                break
+            except json.JSONDecodeError as exc:
+                errors.append(str(exc))
+        if payload is None:
             continue
         if not isinstance(payload, dict):
             errors.append("JSON payload must be an object")
@@ -112,3 +121,12 @@ def _extract_fenced_json_blocks(text: str) -> list[str]:
     if len(lines) < 3 or not lines[-1].startswith("```"):
         return []
     return ["\n".join(lines[1:-1]).strip()]
+
+
+_INVALID_JSON_ESCAPE_RE = re.compile(r'\\([^"\\/bfnrtu])')
+
+
+def _fix_invalid_json_escapes(text: str) -> str:
+    """Preserve regex backslashes emitted inside JSON string values."""
+
+    return _INVALID_JSON_ESCAPE_RE.sub(lambda match: "\\\\" + match.group(1), text)

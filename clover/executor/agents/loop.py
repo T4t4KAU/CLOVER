@@ -22,6 +22,7 @@ from clover.supervisor.client import extract_token_usage
 
 PromptRenderer = Callable[[NodeView, int, list[dict[str, Any]]], str]
 ActionParser = Callable[[str], dict[str, Any]]
+PromptKindResolver = str | Callable[[int, list[dict[str, Any]]], str]
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ def run_sandbox_agent_loop(
     max_iterations: int,
     render_prompt: PromptRenderer,
     parse_action: ActionParser,
-    prompt_kind: str,
+    prompt_kind: PromptKindResolver,
 ) -> AgentLoopRunResult:
     """Run a short local Agent Loop over a task-specific sandbox."""
 
@@ -85,11 +86,16 @@ def run_sandbox_agent_loop(
         for iteration in range(iterations):
             view = sandbox.view(observations)
             prompt = render_prompt(view, iteration + 1, prompt_steps)
+            current_prompt_kind = (
+                prompt_kind(iteration + 1, prompt_steps)
+                if callable(prompt_kind)
+                else prompt_kind
+            )
             sequence_result = _generate_local_slm_sequence(
                 context=context,
                 node=node,
                 prompt=prompt,
-                prompt_kind=prompt_kind,
+                prompt_kind=current_prompt_kind,
                 iteration=iteration + 1,
                 slm_config=slm_config,
             )
@@ -114,7 +120,7 @@ def run_sandbox_agent_loop(
                         action=None,
                         observation=observation,
                         response_id=result.response_id,
-                        prompt_kind=prompt_kind,
+                        prompt_kind=current_prompt_kind,
                         token_usage=token_usage,
                         sequence_trace=sequence_result.trace_metadata(),
                         prompt_text=prompt,
@@ -150,7 +156,7 @@ def run_sandbox_agent_loop(
                     action=action,
                     observation=action_result.observation,
                     response_id=result.response_id,
-                    prompt_kind=prompt_kind,
+                    prompt_kind=current_prompt_kind,
                     accepted=action_result.accepted,
                     terminal=action_result.terminal,
                     error=action_result.error,

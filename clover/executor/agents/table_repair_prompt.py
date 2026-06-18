@@ -220,21 +220,48 @@ def _repair_state_hint(observation: dict[str, Any]) -> list[str]:
             "Return one JSON object with key s.",
             "Avoid regex or backslash-heavy strings in JSON.",
         ]
+    if observation_type == "invalid_predicate_patch":
+        return [
+            (
+                "The lightweight predicate patch was rejected because it "
+                "changed query structure."
+            ),
+            (
+                "Write a solve function that implements the intended filter "
+                "without broadening unrelated conditions."
+            ),
+        ]
     if observation_type == "invalid_solve_function":
         return [
             "Keep exactly one top-level def solve function.",
             "Use the exact signature shown in sig.",
         ]
     if observation_type == "python_error":
-        return [
+        hints = [
             "Fix the shown runtime error with the smallest code change.",
             "Use only visible arguments, columns, and libraries.",
         ]
+        if ".str accessor" in message_lower or "attributeerror" in message_lower:
+            hints.append(
+                "Before every .str operation, convert the Series with .astype('string')."
+            )
+        return hints
     if not observation or "empty" in message_lower:
         return [
             "Do not repeat exact text equality.",
-            "Normalize both cell text and target text with .str.casefold() and .str.replace(r'[^a-z0-9]', '', regex=True) before comparing.",
-            "Use str.contains(pattern, case=False, regex=False) for substring match. Do NOT pass casefold= as a keyword argument.",
+            (
+                "Convert the predicate Series with .astype('string') before "
+                "every .str operation."
+            ),
+            (
+                "Normalize both cell text and target text with "
+                ".astype('string').str.casefold().str.replace("
+                "r'[^a-z0-9]', '', regex=True) before comparing."
+            ),
+            (
+                "Use str.contains(pattern, case=False, regex=False) for "
+                "substring match. Do NOT pass casefold= as a keyword argument."
+            ),
             "Return matching rows from the original DataFrame.",
         ]
     return ["Use the check field to make the smallest repair."]

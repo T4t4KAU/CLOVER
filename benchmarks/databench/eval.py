@@ -166,7 +166,7 @@ def run_databench_eval(
             selected_cases=selected_cases,
             elapsed_seconds=time.perf_counter() - started,
             worker_count=worker_count,
-            max_retries=0 if validation_mode == "none" else max_retries,
+            max_retries=max_retries,
             validation_mode=validation_mode,
             workflow="table_reasoning.query",
             remote_batch_size=remote_batch_size,
@@ -914,7 +914,7 @@ def _update_record_from_table_case_result(
             "retry_exhausted": (
                 not case_result.ok
                 and isinstance(case_result.error, dict)
-                and case_result.error.get("type") == "RetryLimitExceeded"
+                and case_result.error.get("type") == "RepairBudgetExhausted"
             ),
             "error": case_result.error,
             "rounds": [],
