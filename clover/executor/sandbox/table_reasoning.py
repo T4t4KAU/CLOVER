@@ -29,6 +29,10 @@ from clover.executor.python_function import (
 )
 from clover.executor.result import error_payload, json_ready, summarize_output
 from clover.executor.sandbox.core import SandboxActionResult
+from clover.optimizer.table_reasoning.sql_parser import (
+    SqlParseError,
+    parse_predicate_fragment,
+)
 from clover.tools.table_reasoning.pandas_backend import (
     PandasExecutionError,
     PandasTable,
@@ -286,6 +290,8 @@ class TableReasoningSandboxPolicy:
             result = _solve_action(state, action)
         elif action_name == "run_python":
             result = _run_python_action(state, action)
+        elif action_name == "rewrite_predicate":
+            result = _rewrite_predicate_action(state, action)
         elif action_name == "schema":
             result = _schema_action(state, action)
         elif action_name == "sample":
@@ -838,6 +844,138 @@ def _solve_action(
             ),
         },
     )
+
+
+def _rewrite_predicate_action(
+    state: TableReasoningSandboxState,
+    action: dict[str, Any],
+) -> SandboxActionResult:
+    """Parse an SLM-supplied SQL predicate and re-run the Filter with it.
+
+    This is the lightweight repair path (plan A): the SLM outputs a SQL
+    predicate fragment instead of a full Python function, and the sandbox
+    parses it and re-executes the Filter via the pandas backend.
+    """
+    predicate_sql = action.get("predicate")
+    if not isinstance(predicate_sql, str) or not predicate_sql.strip():
+        return _action_error("rewrite_predicate requires a 'predicate' SQL string")
+
+    try:
+        new_predicate = parse_predicate_fragment(predicate_sql)
+    except SqlParseError as exc:
+        return SandboxActionResult(
+            ok=False,
+            observation={
+                "type": "invalid_predicate_sql",
+                "ok": False,
+                "error": {"message": str(exc)},
+            },
+        )
+
+    node = state.node
+    node_params = copy.deepcopy(node.get("params", {}))
+    node_params["predicate"] = new_predicate
+    upstream_outputs: dict[str, Any] = {}
+    for name, frame in state.python_task.inputs.items():
+        upstream_outputs[name] = _tool_runtime_value(frame)
+
+    call = {
+        "task_type": state.task.get("task_type"),
+        "tool": state.task.get("tool"),
+        "op": "Filter",
+        "node_id": node.get("id"),
+        "input": list(node.get("input", [])),
+        "dependency": list(node.get("dependency", [])),
+        "resources": {},
+        "upstream_outputs": upstream_outputs,
+        "params": node_params,
+        "external_params": copy.deepcopy(state.task.get("external_params", {})),
+        "output": node.get("output"),
+    }
+
+    executor = PandasTableReasoningExecutor(
+        resources={},
+        external_params=call.get("external_params", {}),
+    )
+    try:
+        result = executor.execute_call(call)
+    except PandasExecutionError as exc:
+        return SandboxActionResult(
+            ok=False,
+            observation={
+                "type": "python_error",
+                "ok": False,
+                "error": _compact_error(exc),
+                "traceback_tail": _traceback_tail(exc),
+            },
+        )
+
+    candidate, validation_error = _normalize_candidate_output(result, state.task)
+    if validation_error is None and not _candidate_is_empty(candidate):
+        return SandboxActionResult(
+            ok=True,
+            output=candidate,
+            accepted=True,
+            terminal=True,
+        )
+
+    return SandboxActionResult(
+        ok=False,
+        observation={
+            "type": "empty_output",
+            "ok": False,
+            "error": {"message": "Rewritten predicate still returned 0 rows."},
+            "feedback": _rewrite_predicate_feedback(state, new_predicate),
+        },
+    )
+
+
+def _candidate_is_empty(candidate: Any) -> bool:
+    if isinstance(candidate, PandasTable):
+        return candidate.frame.empty
+    if isinstance(candidate, pd.DataFrame):
+        return candidate.empty
+    if isinstance(candidate, dict):
+        # Serialized table handle: {"type": "table", "rows": N, ...}
+        if candidate.get("type") == "table":
+            return int(candidate.get("rows", 0)) == 0
+    return False
+
+
+def _rewrite_predicate_feedback(
+    state: TableReasoningSandboxState,
+    new_predicate: dict[str, Any],
+) -> dict[str, Any]:
+    """Build column-value feedback for a failed rewrite_predicate attempt."""
+    from clover.executor.node_views.table import _expr_sql
+
+    feedback: dict[str, Any] = {
+        "rewritten_sql": _expr_sql(new_predicate),
+    }
+    column_values: dict[str, list[Any]] = {}
+    for frame in state.python_task.inputs.values():
+        if not isinstance(frame, pd.DataFrame):
+            continue
+        for column in frame.columns:
+            col_str = str(column)
+            if col_str not in column_values:
+                values = _top_column_values(frame[column], limit=8)
+                if values:
+                    column_values[col_str] = values
+    if column_values:
+        feedback["column_values"] = column_values
+    return feedback
+
+
+def _top_column_values(series: pd.Series, *, limit: int = 8) -> list[Any]:
+    cleaned = series.dropna()
+    if cleaned.empty:
+        return []
+    value_counts = cleaned.astype(str).value_counts().head(limit)
+    return [
+        {"value": str(idx), "count": int(count)}
+        for idx, count in value_counts.items()
+    ]
 
 
 def _bounded_stdout(state: TableReasoningSandboxState, stdout: str) -> str:

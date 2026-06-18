@@ -18,5 +18,6 @@ Use sql for exact data. Use inspect for open evidence. Use analyze only when SQL
 `ty` is answer type. If `ty` is number, `a` must be one number. If `ty` is string, `a` must be one concise string.
 Return final answers only: no explanations, full sentences, or extra values.
 Use `ctx` only when `ev` is missing or failed.
+When an action's `ev` contains `column_values`, those are the actual top values in the WHERE-equality columns (collected locally because the SQL returned 0 rows). Compare them against the SQL literals to spot value-format mismatches (case, spacing, suffixes), then either answer directly or rewrite the SQL with a relaxed match (LIKE, casefold, substring).
 
 Supervisor JSON:

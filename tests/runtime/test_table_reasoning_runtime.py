@@ -1225,6 +1225,182 @@ class _StatefulChatClient:
         )
 
 
+class FilterEvidenceExtractionTest(unittest.TestCase):
+    """Unit tests for _extract_filter_evidence_from_traces and _sql_result_is_empty."""
+
+    def test_extract_returns_none_for_empty_traces(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_filter_evidence_from_traces,
+        )
+        self.assertIsNone(_extract_filter_evidence_from_traces(None))
+        self.assertIsNone(_extract_filter_evidence_from_traces([]))
+
+    def test_extract_returns_none_when_no_agent_loop(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_filter_evidence_from_traces,
+        )
+        traces = [{"op": "Scan", "output": "T0"}]
+        self.assertIsNone(_extract_filter_evidence_from_traces(traces))
+
+    def test_extract_returns_none_when_no_feedback(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_filter_evidence_from_traces,
+        )
+        traces = [
+            {
+                "op": "Filter",
+                "agent_loop": {
+                    "trigger": "fast_path_empty_output",
+                    "iterations": 2,
+                    "steps": [
+                        {"iteration": 1, "observation_type": "invalid_action_json"},
+                    ],
+                },
+            }
+        ]
+        self.assertIsNone(_extract_filter_evidence_from_traces(traces))
+
+    def test_extract_returns_column_values_from_feedback(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_filter_evidence_from_traces,
+        )
+        traces = [
+            {
+                "op": "Filter",
+                "agent_loop": {
+                    "trigger": "fast_path_empty_output",
+                    "iterations": 2,
+                    "steps": [
+                        {
+                            "iteration": 1,
+                            "observation_type": "python_error",
+                            "feedback": {
+                                "column_values": {
+                                    "Film": [
+                                        {"value": "Kodachrome (35mm)", "count": 3},
+                                        {"value": "Kodachrome Professional (sheets)", "count": 1},
+                                    ]
+                                }
+                            },
+                        },
+                    ],
+                },
+            }
+        ]
+        result = _extract_filter_evidence_from_traces(traces)
+        self.assertIsNotNone(result)
+        self.assertIn("column_values", result)
+        self.assertIn("Film", result["column_values"])
+        self.assertEqual(len(result["column_values"]["Film"]), 2)
+
+    def test_extract_caps_to_top_8_values_per_column(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_filter_evidence_from_traces,
+        )
+        many_values = [
+            {"value": f"v{i}", "count": 10 - i} for i in range(15)
+        ]
+        traces = [
+            {
+                "agent_loop": {
+                    "trigger": "fast_path_empty_output",
+                    "iterations": 1,
+                    "steps": [
+                        {
+                            "feedback": {"column_values": {"col": many_values}},
+                        },
+                    ],
+                },
+            }
+        ]
+        result = _extract_filter_evidence_from_traces(traces)
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result["column_values"]["col"]), 8)
+
+    def test_sql_result_is_empty_false_for_non_empty_frame(self) -> None:
+        import pandas as pd
+        from clover.runtime.table_reasoning.pipeline import (
+            _SqlActionExecution,
+            _sql_result_is_empty,
+        )
+        result = _SqlActionExecution(
+            ok=True,
+            value={"rows": [{"a": 1}], "n": 1},
+            frame=pd.DataFrame({"a": [1]}),
+        )
+        self.assertFalse(_sql_result_is_empty(result))
+
+    def test_sql_result_is_empty_true_for_empty_frame(self) -> None:
+        import pandas as pd
+        from clover.runtime.table_reasoning.pipeline import (
+            _SqlActionExecution,
+            _sql_result_is_empty,
+        )
+        result = _SqlActionExecution(
+            ok=True,
+            value={"rows": [], "n": 0},
+            frame=pd.DataFrame({"a": []}),
+        )
+        self.assertTrue(_sql_result_is_empty(result))
+
+    def test_sql_result_is_empty_false_for_failed_execution(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _SqlActionExecution,
+            _sql_result_is_empty,
+        )
+        result = _SqlActionExecution(
+            ok=False,
+            error={"type": "ExecutionFailed", "message": "err"},
+        )
+        self.assertFalse(_sql_result_is_empty(result))
+
+
+class TraceStepFeedbackTest(unittest.TestCase):
+    """Unit tests for _trace_step preserving observation.feedback."""
+
+    def test_trace_step_preserves_feedback_with_column_values(self) -> None:
+        from clover.executor.agents.loop import _trace_step
+        observation = {
+            "type": "python_error",
+            "ok": False,
+            "error": {"message": "empty"},
+            "feedback": {
+                "column_values": {
+                    "Award": [
+                        {"value": "Golden Globe Awards, 1972", "count": 1},
+                    ]
+                },
+                "hint": "Empty output means the predicate matched nothing.",
+            },
+        }
+        step = _trace_step(
+            iteration=0,
+            action=None,
+            observation=observation,
+            response_id="resp_1",
+            prompt_kind="table_reasoning_empty_filter_repair",
+        )
+        self.assertIn("feedback", step)
+        self.assertIn("column_values", step["feedback"])
+        self.assertIn("Award", step["feedback"]["column_values"])
+
+    def test_trace_step_omits_feedback_when_absent(self) -> None:
+        from clover.executor.agents.loop import _trace_step
+        observation = {
+            "type": "invalid_action_json",
+            "ok": False,
+            "error": {"message": "bad json"},
+        }
+        step = _trace_step(
+            iteration=0,
+            action=None,
+            observation=observation,
+            response_id="resp_1",
+            prompt_kind="table_reasoning_empty_filter_repair",
+        )
+        self.assertNotIn("feedback", step)
+
+
 class _StatefulChatCompletions:
     def __init__(
         self,

@@ -10,8 +10,10 @@ import pandas as pd
 
 from clover.executor.agents.base import BaseNodeAgent, FastPathDecision
 from clover.executor.agents.loop import AgentLoopExecutionError, run_sandbox_agent_loop
+from clover.executor.agents.mismatch_classifier import analyze_predicate_mismatch
 from clover.executor.agents.template_tree import (
     render_agent_loop_prompt,
+    render_rewrite_predicate_prompt,
     render_table_empty_filter_repair_prompt,
 )
 from clover.executor.python_function import (
@@ -37,10 +39,80 @@ class TableReasoningNodeAgent(BaseNodeAgent):
     backend_name = "pandas"
     supported_task_types = frozenset(
         {
-            TABLE_REASONING_QUERY_TASK_TYPE,
             TABLE_REASONING_ANALYZE_TASK_TYPE,
+            TABLE_REASONING_QUERY_TASK_TYPE,
         }
     )
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._mismatch_analysis: dict[str, Any] | None = None
+
+    def _compute_mismatch_analysis(self) -> dict[str, Any] | None:
+        """Compute mismatch analysis for the current Filter node.
+
+        Returns None if the node is not a Filter or the input frame is
+        unavailable. Caches the result in ``_mismatch_analysis``.
+        """
+        if self._mismatch_analysis is not None:
+            return self._mismatch_analysis
+        if self.node.get("op") != "Filter":
+            self._mismatch_analysis = {}
+            return self._mismatch_analysis
+        params = self.node.get("params")
+        if not isinstance(params, dict):
+            self._mismatch_analysis = {}
+            return self._mismatch_analysis
+        predicate = params.get("predicate")
+        if not isinstance(predicate, dict):
+            self._mismatch_analysis = {}
+            return self._mismatch_analysis
+        frame = self._primary_input_frame()
+        if frame is None:
+            self._mismatch_analysis = {}
+            return self._mismatch_analysis
+        try:
+            self._mismatch_analysis = analyze_predicate_mismatch(predicate, frame)
+        except Exception:
+            self._mismatch_analysis = {}
+        return self._mismatch_analysis
+
+    def _primary_input_frame(self) -> pd.DataFrame | None:
+        """Get the primary input DataFrame for the current node."""
+        try:
+            frames = _materialized_frames(
+                self.context.materialize_dependencies(target="pandas").values()
+            )
+            if frames:
+                return frames[0]
+        except Exception:
+            pass
+        return None
+
+    def _dominant_mismatch(self) -> str | None:
+        """Return the most severe mismatch type across all roots.
+
+        Priority: wrong_column > system_bug > not_found > format > quoting.
+        wrong_column and system_bug trigger Cloud escalation (plan C).
+        """
+        analysis = self._compute_mismatch_analysis()
+        if not analysis or not analysis.get("roots"):
+            return None
+        priority = {
+            "wrong_column": 5,
+            "system_bug": 4,
+            "not_found": 3,
+            "format": 2,
+            "quoting": 1,
+        }
+        mismatches = [
+            root.get("mismatch", "not_found")
+            for root in analysis["roots"]
+            if isinstance(root, dict)
+        ]
+        if not mismatches:
+            return None
+        return max(mismatches, key=lambda m: priority.get(m, 0))
 
     def try_fast_path(self) -> FastPathDecision:
         node = self.node
@@ -162,6 +234,10 @@ class TableReasoningNodeAgent(BaseNodeAgent):
             and self.node.get("op") in _EMPTY_OUTPUT_REPAIRABLE_OPS
             and _is_empty_table_output(output)
         )
+        # NOTE: Plan C (skip agent loop for wrong_column / system_bug and
+        # escalate to Cloud) is disabled until the Cloud evidence-upload
+        # path is wired in. Skipping the agent loop without a Cloud fallback
+        # causes empty outputs that the agent loop would otherwise repair.
 
     def should_keep_fast_path_output_on_agent_loop_failure(
         self,
@@ -195,11 +271,21 @@ class TableReasoningNodeAgent(BaseNodeAgent):
             node=self.node,
             trigger=trigger,
         )
-        prompt_kind = (
-            "table_reasoning_empty_filter_repair"
-            if use_empty_filter_repair
-            else "table_reasoning_agent_loop"
+        # Plan A: quoting/format mismatch -> lightweight SQL predicate rewrite.
+        # Plan B: not_found mismatch -> full Python solve (empty_filter_repair).
+        mismatch_analysis = self._compute_mismatch_analysis() or {}
+        use_rewrite_predicate = (
+            use_empty_filter_repair
+            and self.node.get("op") == "Filter"
+            and bool(mismatch_analysis)
+            and self._dominant_mismatch() in {"quoting", "format"}
         )
+        if use_rewrite_predicate:
+            prompt_kind = "table_reasoning_rewrite_predicate"
+        elif use_empty_filter_repair:
+            prompt_kind = "table_reasoning_empty_filter_repair"
+        else:
+            prompt_kind = "table_reasoning_agent_loop"
         try:
             result = run_sandbox_agent_loop(
                 context=self.context,
@@ -210,17 +296,27 @@ class TableReasoningNodeAgent(BaseNodeAgent):
                 error=error,
                 max_iterations=self.context.agent_loop_max_iterations,
                 render_prompt=lambda view, iteration, steps: (
-                    render_table_empty_filter_repair_prompt(
+                    render_rewrite_predicate_prompt(
                         view=view,
                         iteration=iteration,
                         steps=steps,
                         node=self.node,
+                        mismatch_analysis=mismatch_analysis,
                     )
-                    if use_empty_filter_repair
-                    else render_agent_loop_prompt(
-                        task_type=self.context.task_type,
-                        view=view,
-                        iteration=iteration,
+                    if use_rewrite_predicate
+                    else (
+                        render_table_empty_filter_repair_prompt(
+                            view=view,
+                            iteration=iteration,
+                            steps=steps,
+                            node=self.node,
+                        )
+                        if use_empty_filter_repair
+                        else render_agent_loop_prompt(
+                            task_type=self.context.task_type,
+                            view=view,
+                            iteration=iteration,
+                        )
                     )
                 ),
                 parse_action=_extract_action_json,

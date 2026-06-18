@@ -11,7 +11,10 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 from clover.executor.node_views import NodeView
-from clover.executor.agents.table_repair_prompt import empty_filter_repair_case_json
+from clover.executor.agents.table_repair_prompt import (
+    empty_filter_repair_case_json,
+    rewrite_predicate_case_json,
+)
 from clover.executor.result import json_ready
 from clover.executor.slm_scheduler import TemplateLeafSpec, ThreadedPrefixTemplateTree
 from clover.executor.token_count import configured_tokenizer_name, count_tokens
@@ -99,6 +102,30 @@ TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY = (
     "mode:empty_filter_repair",
     "op:filter",
 )
+TABLE_NUMBER_REWRITE_PREDICATE_LEAF_KEY = (
+    "agent:data",
+    "family:table_reasoning",
+    "interface:solve_python",
+    "tool:pandas_env",
+    "contract:number",
+    "mode:rewrite_predicate",
+)
+TABLE_STRING_REWRITE_PREDICATE_LEAF_KEY = (
+    "agent:data",
+    "family:table_reasoning",
+    "interface:solve_python",
+    "tool:pandas_env",
+    "contract:string",
+    "mode:rewrite_predicate",
+)
+TABLE_BOOLEAN_REWRITE_PREDICATE_LEAF_KEY = (
+    "agent:data",
+    "family:table_reasoning",
+    "interface:solve_python",
+    "tool:pandas_env",
+    "contract:boolean",
+    "mode:rewrite_predicate",
+)
 TABLE_EVIDENCE_LEAF_KEY = (
     "agent:data",
     "family:table_reasoning",
@@ -180,6 +207,18 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                                     children=_EMPTY_OUTPUT_REPAIR_OP_CHILDREN,
                                                     leaf_description="",
                                                 ),
+                                                TemplateNode(
+                                                    name="mode:rewrite_predicate",
+                                                    template=(
+                                                        "table_reasoning/"
+                                                        "rewrite_predicate.md"
+                                                    ),
+                                                    leaf_description=(
+                                                        "Lightweight SQL predicate "
+                                                        "rewrite for quoting/format "
+                                                        "mismatches."
+                                                    ),
+                                                ),
                                             ),
                                         ),
                                         TemplateNode(
@@ -204,6 +243,18 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                                     children=_EMPTY_OUTPUT_REPAIR_OP_CHILDREN,
                                                     leaf_description="",
                                                 ),
+                                                TemplateNode(
+                                                    name="mode:rewrite_predicate",
+                                                    template=(
+                                                        "table_reasoning/"
+                                                        "rewrite_predicate.md"
+                                                    ),
+                                                    leaf_description=(
+                                                        "Lightweight SQL predicate "
+                                                        "rewrite for quoting/format "
+                                                        "mismatches."
+                                                    ),
+                                                ),
                                             ),
                                         ),
                                         TemplateNode(
@@ -227,6 +278,18 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                                     ),
                                                     children=_EMPTY_OUTPUT_REPAIR_OP_CHILDREN,
                                                     leaf_description="",
+                                                ),
+                                                TemplateNode(
+                                                    name="mode:rewrite_predicate",
+                                                    template=(
+                                                        "table_reasoning/"
+                                                        "rewrite_predicate.md"
+                                                    ),
+                                                    leaf_description=(
+                                                        "Lightweight SQL predicate "
+                                                        "rewrite for quoting/format "
+                                                        "mismatches."
+                                                    ),
                                                 ),
                                             ),
                                         ),
@@ -339,6 +402,34 @@ def render_table_empty_filter_repair_prompt(
     )
 
 
+def render_rewrite_predicate_prompt(
+    *,
+    view: NodeView,
+    iteration: int,
+    steps: list[dict[str, Any]] | None = None,
+    node: dict[str, Any] | None = None,
+    mismatch_analysis: dict[str, Any] | None = None,
+) -> str:
+    """Render the lightweight SQL predicate rewrite prompt.
+
+    Used for quoting/format mismatches (plan A): the SLM outputs a SQL WHERE
+    fragment instead of a full Python function.
+    """
+
+    del iteration
+    leaf_key = _table_reasoning_rewrite_predicate_leaf_key_for_node(node or {})
+    return _render_templates(
+        template_paths_for_leaf_key(leaf_key),
+        context={
+            "CASE_JSON": rewrite_predicate_case_json(
+                view=view,
+                steps=steps or [],
+                mismatch_analysis=mismatch_analysis or {},
+            ),
+        },
+    )
+
+
 def render_document_worker_prompt(
     *,
     chunk_text: str,
@@ -402,6 +493,8 @@ def template_leaf_key_for_local_slm_prompt(
         return _table_reasoning_leaf_key_for_node(node or {})
     if prompt_kind == "table_reasoning_empty_filter_repair":
         return _table_reasoning_empty_filter_repair_leaf_key_for_node(node or {})
+    if prompt_kind == "table_reasoning_rewrite_predicate":
+        return _table_reasoning_rewrite_predicate_leaf_key_for_node(node or {})
     raise ValueError(f"Unsupported local SLM prompt kind: {prompt_kind!r}")
 
 
@@ -494,6 +587,17 @@ def _table_reasoning_empty_filter_repair_leaf_key_for_node(
     if op_suffix == _DEFAULT_REPAIR_OP_SUFFIX:
         return base
     return base[:-1] + (op_suffix,)
+
+
+def _table_reasoning_rewrite_predicate_leaf_key_for_node(
+    node: dict[str, Any],
+) -> tuple[str, ...]:
+    initial_leaf = _table_reasoning_leaf_key_for_node(node)
+    if initial_leaf == TABLE_BOOLEAN_LEAF_KEY:
+        return TABLE_BOOLEAN_REWRITE_PREDICATE_LEAF_KEY
+    if initial_leaf == TABLE_STRING_LEAF_KEY:
+        return TABLE_STRING_REWRITE_PREDICATE_LEAF_KEY
+    return TABLE_NUMBER_REWRITE_PREDICATE_LEAF_KEY
 
 
 def _template_paths_for_nodes(nodes: tuple[TemplateNode, ...]) -> tuple[str, ...]:

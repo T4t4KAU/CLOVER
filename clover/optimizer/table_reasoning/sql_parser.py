@@ -79,6 +79,28 @@ def parse_sql_response(remote_response: str, remote_dsl: dict[str, Any]) -> Pars
     return ParsedSql(sql=sql, source_ids=tuple(source_ids))
 
 
+def parse_predicate_fragment(sql_fragment: str) -> dict[str, Any]:
+    """Parse a SQL predicate fragment (e.g. ``WHERE "col" = 'val'``) into AST.
+
+    Used by the Edge Agent ``rewrite_predicate`` action to convert an SLM's SQL
+    predicate rewrite into the predicate AST understood by the pandas backend.
+    """
+    text = sql_fragment.strip()
+    # Strip a leading WHERE keyword if present.
+    if text.upper().startswith("WHERE "):
+        text = text[6:].strip()
+    # Wrap in a SELECT so sqlglot parses it as a WHERE clause.
+    wrapped = f"SELECT * FROM __t__ WHERE {text}"
+    expression = _parse_sql_ast(wrapped)
+    select = expression
+    if not isinstance(select, exp.Select):
+        raise SqlParseError("Predicate fragment did not parse to a SELECT")
+    where = select.args.get("where")
+    if where is None:
+        raise SqlParseError("Predicate fragment has no WHERE clause")
+    return _expr_ast(where.this)
+
+
 def parse_remote_sql_to_logic_dag(
     remote_response: str,
     remote_dsl: dict[str, Any],

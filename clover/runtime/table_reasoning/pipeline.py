@@ -1954,6 +1954,53 @@ def _execute_table_action_group(
     return {"ok": True, "answer": None, "obs": observations}
 
 
+def _extract_filter_evidence_from_traces(
+    execution_traces: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Extract compact column-value evidence from Edge Agent repair traces.
+
+    When a Filter node produces empty output, the Edge Agent's empty_filter_repair
+    loop collects ``value_counts`` for the WHERE-equality columns and stores them
+    in the per-step ``feedback.column_values``. This function surfaces that
+    evidence so the cloud supervisor can diagnose *why* the SQL returned 0 rows
+    (e.g. target value 'Golden Globe Awards' vs actual 'Golden Globe Awards, 1972').
+    """
+    if not execution_traces:
+        return None
+    for trace in execution_traces:
+        if not isinstance(trace, dict):
+            continue
+        agent_loop = trace.get("agent_loop")
+        if not isinstance(agent_loop, dict):
+            continue
+        for step in agent_loop.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            feedback = step.get("feedback")
+            if not isinstance(feedback, dict):
+                continue
+            column_values = feedback.get("column_values")
+            if isinstance(column_values, dict) and column_values:
+                # Compact: keep top-8 values per column to bound payload size.
+                compact: dict[str, list[dict[str, Any]]] = {}
+                for column, items in column_values.items():
+                    if isinstance(items, list):
+                        compact[str(column)] = items[:8]
+                if compact:
+                    return {"column_values": compact}
+    return None
+
+
+def _sql_result_is_empty(result: _SqlActionExecution) -> bool:
+    """Return True when a SQL action succeeded but produced zero rows."""
+    if not result.ok or result.frame is None:
+        return False
+    try:
+        return len(result.frame.index) == 0
+    except Exception:  # noqa: BLE001 - defensive guard for non-frame values.
+        return False
+
+
 def _execute_sql_action_observation(
     *,
     task: TaskItem,
@@ -1997,6 +2044,14 @@ def _execute_sql_action_observation(
         observation["logic_dag"] = result.logic_dag
     if result.execution_traces is not None:
         observation["execution_traces"] = result.execution_traces
+    # When the SQL succeeds but returns 0 rows, surface the column-value
+    # evidence collected by the Edge Agent's empty_filter_repair loop so the
+    # cloud supervisor can see *why* the WHERE clause matched nothing and
+    # decide whether to rewrite the SQL or answer directly.
+    if _sql_result_is_empty(result):
+        evidence = _extract_filter_evidence_from_traces(result.execution_traces)
+        if evidence is not None:
+            observation["ev"] = evidence
     return observation, result
 
 

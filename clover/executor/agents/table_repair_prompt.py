@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pandas as pd
+
+from clover.executor.agents.mismatch_classifier import analyze_predicate_mismatch
 from clover.executor.node_views import NodeView
 from clover.executor.result import json_ready
 
@@ -18,6 +21,26 @@ def empty_filter_repair_case_json(
 
     return json.dumps(
         json_ready(_repair_state_payload(view=view, steps=steps)),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def rewrite_predicate_case_json(
+    *,
+    view: NodeView,
+    steps: list[dict[str, Any]],
+    mismatch_analysis: dict[str, Any],
+) -> str:
+    """Return the payload for the lightweight SQL predicate rewrite prompt."""
+
+    del view  # mismatch_analysis already carries the needed context
+    payload = _rewrite_predicate_payload(
+        steps=steps,
+        mismatch_analysis=mismatch_analysis,
+    )
+    return json.dumps(
+        json_ready(payload),
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -46,11 +69,85 @@ def _repair_state_payload(
     columns = _visible_columns(world=world, observation=observation)
     if columns:
         payload["cols"] = columns
+    mismatch_analysis = _build_mismatch_analysis(view, world)
+    if mismatch_analysis is not None:
+        payload["sql"] = mismatch_analysis["sql"]
+        payload["roots"] = mismatch_analysis["roots"]
+        if mismatch_analysis.get("candidates"):
+            payload["candidates"] = mismatch_analysis["candidates"]
     return {
         key: value
         for key, value in payload.items()
         if value not in (None, "", [], {})
     }
+
+
+def _rewrite_predicate_payload(
+    *,
+    steps: list[dict[str, Any]],
+    mismatch_analysis: dict[str, Any],
+) -> dict[str, Any]:
+    observation = _last_observation(steps)
+    payload: dict[str, Any] = {
+        "sql": mismatch_analysis.get("sql", ""),
+        "roots": mismatch_analysis.get("roots", []),
+        "task": "rewrite_predicate",
+        "check": _visible_check_message(observation),
+    }
+    if mismatch_analysis.get("candidates"):
+        payload["candidates"] = mismatch_analysis["candidates"]
+    return {
+        key: value
+        for key, value in payload.items()
+        if value not in (None, "", [], {})
+    }
+
+
+def _build_mismatch_analysis(
+    view: NodeView,
+    world: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build mismatch analysis from the node's predicate and input frame.
+
+    Returns None when the node is not a Filter or the input frame is unavailable.
+    """
+    metadata = getattr(view, "metadata", None)
+    if not isinstance(metadata, dict) or metadata.get("op") != "Filter":
+        return None
+    node_params = _node_params_from_world(world)
+    predicate = node_params.get("predicate")
+    if not isinstance(predicate, dict):
+        return None
+    frame = _primary_frame_from_world(world)
+    if frame is None:
+        return None
+    try:
+        return analyze_predicate_mismatch(predicate, frame)
+    except Exception:
+        return None
+
+
+def _node_params_from_world(world: dict[str, Any]) -> dict[str, Any]:
+    inputs = world.get("inputs")
+    if not isinstance(inputs, dict):
+        return {}
+    for summary in inputs.values():
+        if isinstance(summary, dict) and isinstance(summary.get("params"), dict):
+            return summary["params"]
+    return {}
+
+
+def _primary_frame_from_world(world: dict[str, Any]) -> pd.DataFrame | None:
+    inputs = world.get("inputs")
+    if not isinstance(inputs, dict):
+        return None
+    for value in inputs.values():
+        frame = getattr(value, "frame", None)
+        if isinstance(frame, pd.DataFrame):
+            return frame
+        if isinstance(value, pd.DataFrame):
+            return value
+    return None
 
 
 def _last_observation(steps: list[dict[str, Any]]) -> dict[str, Any]:

@@ -341,6 +341,12 @@ def _trace_step(
         ),
         "error": error or ((observation or {}).get("error") if observation else None),
     }
+    # Preserve compact evidence (e.g. column_values) so the cloud supervisor
+    # can diagnose empty-filter failures even when the Edge Agent repair fails.
+    if isinstance(observation, dict):
+        feedback = observation.get("feedback")
+        if isinstance(feedback, dict) and feedback:
+            step["feedback"] = json_ready(feedback)
     if token_usage is not None:
         step["token_usage"] = dict(token_usage)
     if sequence_trace is not None:
