@@ -727,6 +727,16 @@ class _ExpressionEvaluator:
             return series.str.strip()
         if function in {"LENGTH", "LEN"}:
             return _series_for_frame(args[0], self.frame).astype("string").str.len()
+        if function in {"STR_POSITION", "STRPOS", "INSTR", "LOCATE", "POSITION"}:
+            # SQL STR_POSITION(needle, haystack) returns 1-based index of the first
+            # occurrence of needle in haystack, or 0 if not found. Either argument
+            # may be a column (Series) or a literal; broadcast as needed.
+            needle = args[0]
+            haystack = args[1] if len(args) > 1 else args[0]
+            haystack_series = _series_for_frame(haystack, self.frame).astype("string")
+            needle_scalar = _to_python_scalar(needle)
+            found = haystack_series.str.find(str(needle_scalar))
+            return found + 1
         if function in {"ABS", "ROUND", "CEIL", "CEILING", "FLOOR"}:
             value = args[0]
             if function == "ABS":
