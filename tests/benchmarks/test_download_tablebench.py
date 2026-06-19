@@ -136,6 +136,8 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
         rows = [
             {
                 "id": "case-a",
+                "qtype": "FactChecking",
+                "qsubtype": "MatchBased",
                 "question": "Which nation has a total of 13 medals?",
                 "answer": "Borduria",
                 "table": {"columns": ["Nation"], "data": [["Borduria"]]},
@@ -208,6 +210,14 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
                 "answer": "1",
                 "table": {"columns": ["x"], "data": [["a"]]},
             },
+            {
+                "id": "analysis",
+                "qtype": "DataAnalysis",
+                "qsubtype": "CorrelationAnalysis",
+                "question": "Describe the correlation.",
+                "answer": "positive",
+                "table": {"columns": ["x"], "data": [["a"]]},
+            },
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -221,14 +231,19 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
                 ).splitlines()
             ]
 
-        self.assertEqual(summary["source_case_count"], 2)
+        self.assertEqual(summary["source_case_count"], 3)
+        self.assertEqual(summary["excluded_qtype_count"], 2)
+        self.assertEqual(
+            summary["retained_qtypes"],
+            ["FactChecking", "NumericalReasoning"],
+        )
         self.assertEqual(summary["visualization_case_count"], 1)
         self.assertTrue(summary["visualization_excluded"])
         self.assertEqual(summary["case_count"], 1)
         self.assertEqual(cases[0]["case_id"], "number")
         self.assertNotEqual(cases[0]["qtype"], "Visualization")
 
-    def test_can_include_visualization_cases_explicitly(self) -> None:
+    def test_cannot_include_visualization_cases_explicitly(self) -> None:
         rows = [
             {
                 "id": "chart",
@@ -242,14 +257,32 @@ class TablebenchDownloadConversionTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            summary = convert_tablebench_rows(
-                rows=rows,
-                output_root=root,
-                include_visualization=True,
-            )
+            with self.assertRaisesRegex(ValueError, "only supports"):
+                convert_tablebench_rows(
+                    rows=rows,
+                    output_root=root,
+                    include_visualization=True,
+                )
 
-        self.assertFalse(summary["visualization_excluded"])
-        self.assertEqual(summary["case_count"], 1)
+    def test_rejects_unsupported_qtype_filter(self) -> None:
+        rows = [
+            {
+                "id": "analysis",
+                "qtype": "DataAnalysis",
+                "qsubtype": "CorrelationAnalysis",
+                "question": "Describe the correlation.",
+                "answer": "positive",
+                "table": {"columns": ["x"], "data": [["a"]]},
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "Unsupported TableBench qtypes"):
+                convert_tablebench_rows(
+                    rows=rows,
+                    output_root=Path(tmpdir),
+                    qtypes=["DataAnalysis"],
+                )
 
     def test_refuses_to_overwrite_existing_dataset_by_default(self) -> None:
         rows = [

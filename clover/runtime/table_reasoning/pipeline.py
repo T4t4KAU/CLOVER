@@ -14,16 +14,16 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from clover.config import (
+    ENABLE_CLOUD_RECOVERY,
+    ENABLE_EDGE_AGENT,
+    ENABLE_STATIC_FINALIZATION,
+    runtime_feature_enabled,
+)
 from clover.executor import (
     ExecutionPlanBuilder,
     ExecutionResult,
     execute_execution_plan,
-)
-from clover.executor.slm_dispatcher import (
-    DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
-    DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
-    DEFAULT_MAX_PENDING_SLM_SEQUENCES,
-    LocalSlmSequenceDispatcher,
 )
 from clover.executor.edge_review import (
     EDGE_REVIEW_SAFE,
@@ -31,6 +31,19 @@ from clover.executor.edge_review import (
     run_edge_local_review,
 )
 from clover.executor.result import json_ready
+from clover.executor.slm_dispatcher import (
+    DEFAULT_MAX_PARALLEL_SLM_NODE_JOBS,
+    DEFAULT_MAX_PARALLEL_SLM_SEQUENCES,
+    DEFAULT_MAX_PENDING_SLM_SEQUENCES,
+    LocalSlmSequenceDispatcher,
+)
+from clover.optimizer import (
+    SqlParseError,
+    extract_sql_statement,
+    optimize_logic_dag_to_physical_plan,
+    parse_remote_sql_to_logic_dag,
+    parse_sql_list_response,
+)
 from clover.optimizer.ir import TABLE_REASONING_QUERY_TASK_TYPE
 from clover.reasoning_profiles import (
     HINTS_KEY,
@@ -38,19 +51,10 @@ from clover.reasoning_profiles import (
     TABLE_REASONING_ANALYZE_PROFILE,
     table_reasoning_profile_from_dsl,
 )
-from clover.optimizer import (
-    SqlParseError,
-    extract_sql_statement,
-    parse_remote_sql_to_logic_dag,
-    parse_sql_list_response,
-)
-from clover.optimizer import optimize_logic_dag_to_physical_plan
-from clover.supervisor import extract_token_usage
 from clover.resource import (
     build_table_task_dsl_with_builder_agent,
     prepare_physical_plan_resources,
 )
-from clover.supervisor import SupervisorAction, SupervisorAgent, SupervisorDecision
 from clover.runtime.items import RuntimeCommandItem, RuntimeWorkItem
 from clover.runtime.pipeline import (
     CaseResult,
@@ -62,16 +66,21 @@ from clover.runtime.task import (
     TASK_EXECUTING,
     TASK_FAILED,
     TASK_PENDING_REMOTE,
-    TASK_SUPERVISOR_REVIEW,
     TASK_RETRYING,
     TASK_SQL_READY,
     TASK_SUCCESS,
+    TASK_SUPERVISOR_REVIEW,
     RuntimeCaseSpec,
     TableTaskItem,
     build_runtime_task_items,
     normalize_runtime_case_spec,
 )
-
+from clover.supervisor import (
+    SupervisorAction,
+    SupervisorAgent,
+    SupervisorDecision,
+    extract_token_usage,
+)
 
 VALIDATION_NONE = "none"
 VALIDATION_REMOTE_SUPERVISOR = "remote_supervisor"
@@ -757,7 +766,9 @@ def _load_json_object(remote_output: str) -> dict[str, Any]:
 def _load_first_json_object(text: str, original_error: json.JSONDecodeError) -> Any:
     start = text.find("{")
     if start < 0:
-        raise SqlParseError(f"Unable to parse table command JSON: {original_error}") from original_error
+        raise SqlParseError(
+            f"Unable to parse table command JSON: {original_error}"
+        ) from original_error
     decoder = json.JSONDecoder()
     try:
         obj, end = decoder.raw_decode(text, idx=start)
@@ -1076,16 +1087,21 @@ def _run_action_groups_batch(
                 },
             )
             continue
-        if _try_finalize_static_action_group_answer(
-            item=result.item,
-            observation=observation,
-            final_results=final_results,
-            finalized=finalized,
-            profiler=profiler,
-        ):
-            continue
+        static_finalization_enabled = runtime_feature_enabled(
+            local_slm_config,
+            ENABLE_STATIC_FINALIZATION,
+        )
+        if static_finalization_enabled:
+            if _try_finalize_static_action_group_answer(
+                item=result.item,
+                observation=observation,
+                final_results=final_results,
+                finalized=finalized,
+                profiler=profiler,
+            ):
+                continue
         public_observation = _public_action_group_observation(observation)
-        if _try_finalize_edge_local_review(
+        if static_finalization_enabled and _try_finalize_edge_local_review(
             task=result.item.task,
             evidence=public_observation,
             scope="action_group_answer",
@@ -1098,16 +1114,24 @@ def _run_action_groups_batch(
             continue
         report_items.append((result.item, public_observation))
     if report_items:
-        _run_supervisor_action_reports_batch(
-            report_items=report_items,
-            action_items=followup_action_items,
-            final_results=final_results,
-            finalized=finalized,
-            supervisor=supervisor,
-            max_retries=max_retries,
-            remote_concurrency=remote_concurrency,
-            profiler=profiler,
-        )
+        if runtime_feature_enabled(local_slm_config, ENABLE_CLOUD_RECOVERY):
+            _run_supervisor_action_reports_batch(
+                report_items=report_items,
+                action_items=followup_action_items,
+                final_results=final_results,
+                finalized=finalized,
+                supervisor=supervisor,
+                max_retries=max_retries,
+                remote_concurrency=remote_concurrency,
+                profiler=profiler,
+            )
+        else:
+            _finalize_action_reports_without_cloud(
+                report_items=report_items,
+                final_results=final_results,
+                finalized=finalized,
+                profiler=profiler,
+            )
     return True
 
 
@@ -3217,11 +3241,19 @@ def _finish_table_execution_batch(
             final_results=final_results,
             finalized=finalized,
             profiler=profiler,
-            fail_unfinalized=not _needs_supervisor_review(batch, validation_mode),
+            fail_unfinalized=not _needs_supervisor_review(
+                batch,
+                validation_mode,
+                local_slm_config,
+            ),
             local_slm_config=local_slm_config,
             local_slm_dispatcher=local_slm_dispatcher,
         )
-        if remaining and _needs_supervisor_review(remaining, validation_mode):
+        if remaining and _needs_supervisor_review(
+            remaining,
+            validation_mode,
+            local_slm_config,
+        ):
             _run_supervisor_synthesis(
                 batch=remaining,
                 execution_result=execution_result,
@@ -3270,11 +3302,19 @@ def _finish_table_execution_batch(
             final_results=final_results,
             finalized=finalized,
             profiler=profiler,
-            fail_unfinalized=not _needs_supervisor_review(unaffected, validation_mode),
+            fail_unfinalized=not _needs_supervisor_review(
+                unaffected,
+                validation_mode,
+                local_slm_config,
+            ),
             local_slm_config=local_slm_config,
             local_slm_dispatcher=local_slm_dispatcher,
         )
-        if remaining and _needs_supervisor_review(remaining, validation_mode):
+        if remaining and _needs_supervisor_review(
+            remaining,
+            validation_mode,
+            local_slm_config,
+        ):
             _run_supervisor_synthesis(
                 batch=remaining,
                 execution_result=subset_result,
@@ -3289,7 +3329,11 @@ def _finish_table_execution_batch(
 
     failed_items = [item for item in batch if item.task.answer_key in affected]
     if failed_items:
-        if _needs_supervisor_review(failed_items, validation_mode):
+        if _needs_supervisor_review(
+            failed_items,
+            validation_mode,
+            local_slm_config,
+        ):
             for item in failed_items:
                 _run_supervisor_synthesis(
                     batch=[item],
@@ -3327,6 +3371,10 @@ def _run_static_synthesis_review(
     for item in batch:
         item.task.status = TASK_SUPERVISOR_REVIEW
     remaining: list[LogicDagItem] = []
+    static_finalization_enabled = runtime_feature_enabled(
+        local_slm_config,
+        ENABLE_STATIC_FINALIZATION,
+    )
     with profiler.measure("static_synthesis", items=len(batch)):
         profiler.increment("static_synthesis_calls")
         answer_map = _execution_answer_map(execution_result, batch)
@@ -3364,10 +3412,14 @@ def _run_static_synthesis_review(
                     remaining.append(item)
                 continue
             raw_answer = answer_map[key]
-            static_answer = _static_final_answer_from_value(
-                raw_answer,
-                task=item.task,
-                source="format_answer",
+            static_answer = (
+                _static_final_answer_from_value(
+                    raw_answer,
+                    task=item.task,
+                    source="format_answer",
+                )
+                if static_finalization_enabled
+                else None
             )
             if static_answer is not None:
                 profiler.increment("static_final_answer_hits")
@@ -3398,7 +3450,11 @@ def _run_static_synthesis_review(
                     finalized=finalized,
                 )
                 continue
-            reason = _static_final_answer_reject_reason(raw_answer, item.task)
+            reason = (
+                _static_final_answer_reject_reason(raw_answer, item.task)
+                if static_finalization_enabled
+                else "static_finalization_disabled"
+            )
             _record_table_diagnostic(
                 item.task,
                 _table_execution_diagnostic(
@@ -3413,7 +3469,7 @@ def _run_static_synthesis_review(
                     },
                     ),
                 )
-            if _try_finalize_edge_local_review(
+            if static_finalization_enabled and _try_finalize_edge_local_review(
                 task=item.task,
                 evidence=raw_answer,
                 scope="format_answer",
@@ -3450,6 +3506,8 @@ def _try_finalize_edge_local_review(
     finalized: set[str],
     profiler: PipelineProfiler,
 ) -> bool:
+    if not runtime_feature_enabled(local_slm_config, ENABLE_EDGE_AGENT):
+        return False
     try:
         with profiler.measure("edge_local_review", items=1):
             result = run_edge_local_review(
@@ -3788,9 +3846,52 @@ def _supervisor_synthesis_diagnostic(
 def _needs_supervisor_review(
     batch: list[LogicDagItem],
     validation_mode: str,
+    local_slm_config: dict[str, Any] | None = None,
 ) -> bool:
     del batch
-    return validation_mode == VALIDATION_REMOTE_SUPERVISOR
+    return (
+        validation_mode == VALIDATION_REMOTE_SUPERVISOR
+        and runtime_feature_enabled(
+            local_slm_config,
+            ENABLE_CLOUD_RECOVERY,
+        )
+    )
+
+
+def _finalize_action_reports_without_cloud(
+    *,
+    report_items: list[tuple[ActionGroupItem, dict[str, Any]]],
+    final_results: list[CaseResult],
+    finalized: set[str],
+    profiler: PipelineProfiler,
+) -> None:
+    profiler.increment("cloud_recovery_disabled_failures", len(report_items))
+    for item, observation in report_items:
+        _record_table_diagnostic(
+            item.task,
+            _action_group_diagnostic(
+                item=item,
+                observation=observation,
+                finalization={
+                    "source": "one_shot",
+                    "bypass_synthesis": True,
+                    "confidence": "invalid",
+                    "reason": "cloud_recovery_disabled",
+                },
+            ),
+        )
+        _finalize_failed(
+            item.task,
+            final_results=final_results,
+            finalized=finalized,
+            error={
+                "type": "CloudRecoveryDisabled",
+                "message": (
+                    "Initial cloud planning completed, but this ablation "
+                    "disables subsequent Cloud synthesis and replanning."
+                ),
+            },
+        )
 
 
 def _run_static_synthesis_failure(

@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from clover.config import ENABLE_EDGE_AGENT, runtime_feature_enabled
 from clover.executor.agents.template_tree import (
     TABLE_LOCAL_REVIEW_LEAF_KEY,
     render_table_local_review_prompt,
@@ -20,7 +21,6 @@ from clover.executor.slm_dispatcher import (
 )
 from clover.supervisor.client import extract_token_usage
 from clover.supervisor.decision import extract_supervisor_json
-
 
 EDGE_REVIEW_OFF = "off"
 EDGE_REVIEW_SHADOW = "shadow"
@@ -136,6 +136,8 @@ def run_edge_local_review(
 ) -> EdgeReviewResult | None:
     """Review small, clean evidence and return a statically validated answer."""
 
+    if not runtime_feature_enabled(slm_config, ENABLE_EDGE_AGENT):
+        return None
     mode = edge_review_mode(slm_config)
     if mode == EDGE_REVIEW_OFF or dispatcher is None:
         return None

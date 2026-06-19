@@ -12,7 +12,17 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+import pandas as pd
+
 from benchmarks.costing import estimate_openai_text_cost, normalize_remote_token_usage
+from benchmarks.tablebench.adapter import (
+    TABLEBENCH_DSL_MODE_BUILDER_AGENT,
+    iter_tablebench_dataset_dirs,
+    read_cases,
+    write_json,
+)
+from benchmarks.tablebench.download import TABLEBENCH_REASONING_QTYPES
+from benchmarks.tablebench.metrics import score_tablebench_answer, tablebench_metric_name
 from benchmarks.utils import (
     display_path,
     format_error,
@@ -21,22 +31,13 @@ from benchmarks.utils import (
     safe_divide,
     write_jsonl,
 )
-from benchmarks.tablebench.adapter import (
-    TABLEBENCH_DSL_MODE_BUILDER_AGENT,
-    iter_tablebench_dataset_dirs,
-    read_cases,
-    write_json,
-)
-from benchmarks.tablebench.metrics import score_tablebench_answer, tablebench_metric_name
 from benchmarks.warnings import suppress_benchmark_warnings
+from clover.config import runtime_feature_flags
 from clover.runtime import (
     CaseResult,
     TableReasoningCaseSpec,
     run_table_reasoning_system,
 )
-
-import pandas as pd
-
 
 TOKEN_KEYS = (
     "input_tokens",
@@ -1064,8 +1065,12 @@ def select_tablebench_cases(
     if max_cases == 0:
         return []
     cases = list_tablebench_cases(tablebench_root)
-    if not include_visualization:
-        cases = [case for case in cases if case.get("qtype") != "Visualization"]
+    del include_visualization
+    cases = [
+        case
+        for case in cases
+        if str(case.get("qtype") or "") in TABLEBENCH_REASONING_QTYPES
+    ]
     if dataset_id is not None:
         cases = [case for case in cases if case["dataset_id"] == dataset_id]
     if case_ids:
@@ -1132,6 +1137,8 @@ def _config_summary(config: dict[str, Any] | None) -> dict[str, Any] | None:
         "model": config.get("model"),
         "agent_loop_max_iterations": config.get("agent_loop_max_iterations"),
         "disable_agent_loop": config.get("disable_agent_loop"),
+        "ablation_variant": config.get("ablation_variant", "full"),
+        "runtime_features": runtime_feature_flags(config),
         "slm_scheduler": config.get("slm_scheduler", "tptt"),
     }
 

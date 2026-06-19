@@ -92,6 +92,12 @@ LOCAL_MAX_TOKENS="${CLOVER_LOCAL_MAX_TOKENS:-512}"
 LOCAL_TIMEOUT_SECONDS="${CLOVER_LOCAL_TIMEOUT_SECONDS:-600}"
 AGENT_LOOP_MAX_ITERATIONS="${CLOVER_AGENT_LOOP_MAX_ITERATIONS:-8}"
 EDGE_REVIEW_MODE="${CLOVER_EDGE_REVIEW_MODE:-safe}"  # off | shadow | safe
+ABLATION_VARIANT="${CLOVER_ABLATION_VARIANT:-full}"
+ENABLE_EDGE_AGENT="${CLOVER_ENABLE_EDGE_AGENT:-true}"
+ENABLE_CONTRACT_GATE="${CLOVER_ENABLE_CONTRACT_GATE:-true}"
+ENABLE_NODE_REVIEW="${CLOVER_ENABLE_NODE_REVIEW:-true}"
+ENABLE_CLOUD_RECOVERY="${CLOVER_ENABLE_CLOUD_RECOVERY:-true}"
+ENABLE_STATIC_FINALIZATION="${CLOVER_ENABLE_STATIC_FINALIZATION:-true}"
 
 DTYPE="${CLOVER_VLLM_DTYPE:-auto}"
 MAX_MODEL_LEN="${CLOVER_VLLM_MAX_MODEL_LEN:-}"
@@ -99,6 +105,8 @@ GPU_MEMORY_UTILIZATION="${CLOVER_VLLM_GPU_MEMORY_UTILIZATION:-0.88}"
 ENABLE_PREFIX_CACHING="${CLOVER_VLLM_ENABLE_PREFIX_CACHING:-true}"
 VLLM_SERVER_ARGS="${CLOVER_VLLM_SERVER_ARGS:-}"
 SERVER_READY_TIMEOUT="${CLOVER_VLLM_READY_TIMEOUT:-600}"
+PERSIST_SERVER="${CLOVER_VLLM_PERSIST_SERVER:-false}"
+SERVER_PID_FILE="${CLOVER_VLLM_PID_FILE:-}"
 
 REMOTE_BATCH_SIZE="${CLOVER_REMOTE_BATCH_SIZE:-16}"
 REMOTE_CONCURRENCY="${CLOVER_REMOTE_CONCURRENCY:-8}"
@@ -113,6 +121,24 @@ if [[ ! "${EDGE_REVIEW_MODE}" =~ ^(off|shadow|safe)$ ]]; then
   echo "Invalid CLOVER_EDGE_REVIEW_MODE: ${EDGE_REVIEW_MODE}" >&2
   exit 1
 fi
+
+normalize_bool() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|y|on) printf '%s' true ;;
+    0|false|no|n|off) printf '%s' false ;;
+    *)
+      echo "Invalid boolean value: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+ENABLE_EDGE_AGENT="$(normalize_bool "${ENABLE_EDGE_AGENT}")"
+ENABLE_CONTRACT_GATE="$(normalize_bool "${ENABLE_CONTRACT_GATE}")"
+ENABLE_NODE_REVIEW="$(normalize_bool "${ENABLE_NODE_REVIEW}")"
+ENABLE_CLOUD_RECOVERY="$(normalize_bool "${ENABLE_CLOUD_RECOVERY}")"
+ENABLE_STATIC_FINALIZATION="$(normalize_bool "${ENABLE_STATIC_FINALIZATION}")"
+PERSIST_SERVER="$(normalize_bool "${PERSIST_SERVER}")"
 
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   echo "The current shell has no executable 'python' command." >&2
@@ -212,7 +238,8 @@ SERVER_PID=""
 STARTED_SERVER=0
 
 cleanup() {
-  if [[ "${STARTED_SERVER}" == "1" && -n "${SERVER_PID}" ]]; then
+  if [[ "${STARTED_SERVER}" == "1" && -n "${SERVER_PID}" \
+      && "${PERSIST_SERVER}" != "true" ]]; then
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
@@ -261,6 +288,10 @@ else
   "${VLLM_CMD[@]}" >"${SERVER_LOG}" 2>&1 &
   SERVER_PID="$!"
   STARTED_SERVER=1
+  if [[ -n "${SERVER_PID_FILE}" ]]; then
+    mkdir -p "$(dirname "${SERVER_PID_FILE}")"
+    printf '%s\n' "${SERVER_PID}" >"${SERVER_PID_FILE}"
+  fi
 
   for ((second = 0; second < SERVER_READY_TIMEOUT; second++)); do
     server_ready && break
@@ -280,7 +311,10 @@ fi
 LOCAL_CONFIG="${TMP_DIR}/vllm_local_slm_config.json"
 "${PYTHON_BIN}" - "${LOCAL_CONFIG}" "${SERVED_MODEL_NAME}" "${BASE_URL}" \
   "${LOCAL_MAX_TOKENS}" "${LOCAL_TIMEOUT_SECONDS}" \
-  "${AGENT_LOOP_MAX_ITERATIONS}" "${EDGE_REVIEW_MODE}" <<'PY'
+  "${AGENT_LOOP_MAX_ITERATIONS}" "${EDGE_REVIEW_MODE}" \
+  "${ABLATION_VARIANT}" "${ENABLE_EDGE_AGENT}" "${ENABLE_CONTRACT_GATE}" \
+  "${ENABLE_NODE_REVIEW}" "${ENABLE_CLOUD_RECOVERY}" \
+  "${ENABLE_STATIC_FINALIZATION}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -302,6 +336,12 @@ payload = {
     "trust_env": False,
     "agent_loop_max_iterations": int(sys.argv[6]),
     "edge_review_mode": sys.argv[7],
+    "ablation_variant": sys.argv[8],
+    "enable_edge_agent": sys.argv[9] == "true",
+    "enable_contract_gate": sys.argv[10] == "true",
+    "enable_node_review": sys.argv[11] == "true",
+    "enable_cloud_recovery": sys.argv[12] == "true",
+    "enable_static_finalization": sys.argv[13] == "true",
     "edge_review_max_actions": 4,
     "edge_review_max_rows": 5,
     "edge_review_max_columns": 5,

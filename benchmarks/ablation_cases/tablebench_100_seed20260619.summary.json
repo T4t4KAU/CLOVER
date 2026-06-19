@@ -1,0 +1,47 @@
+{
+  "dataset": "tablebench",
+  "selection_policy": "mechanism_stratified_outcome_blind",
+  "size": 100,
+  "requested_size": 100,
+  "seed": 20260619,
+  "dataset_root": "datasets/tablebench",
+  "manifest": "benchmarks/ablation_cases/tablebench_100_seed20260619.jsonl",
+  "eligible_cases": 491,
+  "quotas": {
+    "FactChecking/MatchBased": 15,
+    "FactChecking/Multi-hop FactChecking": 15,
+    "NumericalReasoning/Aggregation": 9,
+    "NumericalReasoning/ArithmeticCalculation": 9,
+    "NumericalReasoning/Comparison": 9,
+    "NumericalReasoning/Counting": 9,
+    "NumericalReasoning/Multi-hop NumericalReasoing": 9,
+    "NumericalReasoning/Ranking": 9,
+    "NumericalReasoning/Domain-Specific": 8,
+    "NumericalReasoning/Time-basedCalculation": 8
+  },
+  "strata": {
+    "FactChecking/MatchBased": 15,
+    "FactChecking/Multi-hop FactChecking": 15,
+    "NumericalReasoning/Aggregation": 9,
+    "NumericalReasoning/ArithmeticCalculation": 9,
+    "NumericalReasoning/Comparison": 9,
+    "NumericalReasoning/Counting": 9,
+    "NumericalReasoning/Domain-Specific": 8,
+    "NumericalReasoning/Multi-hop NumericalReasoing": 9,
+    "NumericalReasoning/Ranking": 9,
+    "NumericalReasoning/Time-basedCalculation": 8
+  },
+  "answer_types": {
+    "number": 66,
+    "string": 34
+  },
+  "mechanism_tags": {
+    "cloud_recovery": 58,
+    "contract_gate": 44,
+    "edge_local_review": 15,
+    "local_semantic_binding": 15,
+    "node_review": 26,
+    "static_finalization": 42
+  },
+  "unique_tables": 100
+}

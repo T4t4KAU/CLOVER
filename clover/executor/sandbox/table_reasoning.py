@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import ast
 import copy
-import io
 import importlib
+import io
 import json
 import re
 import traceback
@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from clover.config import ENABLE_CONTRACT_GATE, runtime_feature_enabled
 from clover.executor.context import NodeExecutionContext
 from clover.executor.handles import SandboxProjector, TableHandle, ValueHandle
 from clover.executor.handles.table import copy_frame as copy_table_frame
@@ -38,7 +39,6 @@ from clover.tools.table_reasoning.pandas_backend import (
     PandasTable,
     PandasTableReasoningExecutor,
 )
-
 
 TABLE_OUTPUT_OPS = {
     "Scan",
@@ -200,6 +200,10 @@ class TableReasoningSandboxPolicy:
             ),
             "operation_note": _operation_note(context.node),
             "output_contract": _output_contract(context.node),
+            "_contract_gate_enabled": runtime_feature_enabled(
+                context.slm_config,
+                ENABLE_CONTRACT_GATE,
+            ),
         }
         python_task = _python_function_task(
             node=context.node,
@@ -803,6 +807,13 @@ def _solve_action(
         )
 
     stdout = _bounded_stdout(state, stdout_buffer.getvalue())
+    if not _contract_gate_enabled(state):
+        return SandboxActionResult(
+            ok=True,
+            output=candidate,
+            accepted=True,
+            terminal=True,
+        )
     contract_error = _validate_python_function_contract(candidate, state.python_task)
     if contract_error is not None:
         return SandboxActionResult(
@@ -929,6 +940,14 @@ def _rewrite_predicate_action(
                 "error": _compact_error(exc),
                 "traceback_tail": _traceback_tail(exc),
             },
+        )
+
+    if not _contract_gate_enabled(state):
+        return SandboxActionResult(
+            ok=True,
+            output=result,
+            accepted=True,
+            terminal=True,
         )
 
     candidate, validation_error = _normalize_candidate_output(result, state.task)
@@ -1208,6 +1227,13 @@ def _run_python_action(
     created_keys = sorted(set(updated_keys) - before_keys)
     if "result" in state.workspace_locals:
         candidate = state.workspace_locals["result"]
+        if not _contract_gate_enabled(state):
+            return SandboxActionResult(
+                ok=True,
+                output=candidate,
+                accepted=True,
+                terminal=True,
+            )
         candidate, validation_error = _normalize_candidate_output(candidate, state.task)
         if validation_error is None:
             return SandboxActionResult(
@@ -1396,6 +1422,13 @@ def _submit_result_action(
             },
         )
     candidate = state.workspace_locals[name]
+    if not _contract_gate_enabled(state):
+        return SandboxActionResult(
+            ok=True,
+            output=candidate,
+            accepted=True,
+            terminal=True,
+        )
     candidate, validation_error = _normalize_candidate_output(candidate, state.task)
     if validation_error is not None:
         return SandboxActionResult(
@@ -1554,6 +1587,10 @@ def _normalize_candidate_output(
     except Exception as exc:  # noqa: BLE001 - validation report only.
         return candidate, f"Output is not JSON-ready: {exc}"
     return normalized, None
+
+
+def _contract_gate_enabled(state: TableReasoningSandboxState) -> bool:
+    return state.task.get("_contract_gate_enabled") is not False
 
 
 def _output_contract(node: dict[str, Any]) -> dict[str, Any]:

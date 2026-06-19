@@ -8,6 +8,11 @@ from typing import Any
 
 import pandas as pd
 
+from clover.config import (
+    ENABLE_EDGE_AGENT,
+    ENABLE_NODE_REVIEW,
+    runtime_feature_enabled,
+)
 from clover.executor.agents.base import (
     BaseNodeAgent,
     FastPathDecision,
@@ -24,15 +29,15 @@ from clover.executor.python_function import (
     PythonFunctionParseError,
     parse_python_function_action,
 )
+from clover.task_types import (
+    TABLE_REASONING_ANALYZE_TASK_TYPE,
+    TABLE_REASONING_QUERY_TASK_TYPE,
+)
 from clover.tools import StaticToolError, build_static_tool_call
 from clover.tools.table_reasoning import TABLE_REASONING_STATIC_TOOLS
 from clover.tools.table_reasoning.pandas_backend import (
     PandasTable,
     PandasTableReasoningExecutor,
-)
-from clover.task_types import (
-    TABLE_REASONING_ANALYZE_TASK_TYPE,
-    TABLE_REASONING_QUERY_TASK_TYPE,
 )
 
 
@@ -255,6 +260,11 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         output: Any,
     ) -> FastPathReview:
         del decision
+        if not runtime_feature_enabled(
+            self.context.slm_config,
+            ENABLE_NODE_REVIEW,
+        ):
+            return FastPathReview()
         if not self._is_empty_output_review_candidate(output):
             return FastPathReview()
         edge_disabled = _agent_loop_disabled(self.context.slm_config)
@@ -552,8 +562,11 @@ def _is_analyze_local_fallback_candidate(error: Exception) -> bool:
 
 def _agent_loop_disabled(slm_config: dict[str, Any] | None) -> bool:
     if not isinstance(slm_config, dict):
-        return False
-    return bool(slm_config.get("disable_agent_loop"))
+        return True
+    return bool(slm_config.get("disable_agent_loop")) or not runtime_feature_enabled(
+        slm_config,
+        ENABLE_EDGE_AGENT,
+    )
 
 
 def _is_empty_table_output(output: Any) -> bool:

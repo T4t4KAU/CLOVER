@@ -16,6 +16,8 @@ from typing import Any
 
 from benchmarks.modelscope_utils import (
     download_modelscope_dataset_snapshot,
+)
+from benchmarks.modelscope_utils import (
     load_modelscope_rows as load_modelscope_dataset_rows,
 )
 
@@ -27,6 +29,12 @@ DEFAULT_OUTPUT_ROOT = Path("datasets") / "tablebench"
 DEFAULT_RAW_FILENAMES = {
     "TQA_test": "TableBench.jsonl",
 }
+TABLEBENCH_REASONING_QTYPES = frozenset(
+    {
+        "FactChecking",
+        "NumericalReasoning",
+    }
+)
 DATASET_SOURCES = ("huggingface", "modelscope")
 DEFAULT_DATASET_SOURCE = "huggingface"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -66,8 +74,9 @@ def download_and_convert_tablebench(
             config_name=config_name,
             splits=splits,
         )
+    retained_rows = _reasoning_rows(rows)
     source_summary = write_source_rows(
-        rows=rows,
+        rows=retained_rows,
         source_root=source_path,
         repo_id=repo_id,
         config_name=config_name,
@@ -76,7 +85,7 @@ def download_and_convert_tablebench(
         overwrite=download_overwrite,
     )
     return convert_tablebench_rows(
-        rows=rows,
+        rows=retained_rows,
         output_root=output_root,
         repo_id=repo_id,
         config_name=config_name,
@@ -270,18 +279,21 @@ def convert_tablebench_rows(
 
     output_path = _resolve_path(output_root)
     all_rows = [_json_ready(dict(row)) for row in rows]
-    visualization_case_count = sum(
-        1 for row in all_rows if _is_visualization_row(row)
+    excluded_qtype_count = sum(
+        1 for row in all_rows if not _is_supported_reasoning_row(row)
     )
+    selected_qtypes = _selected_reasoning_qtypes(qtypes)
     selected_rows = _select_rows(
         all_rows,
         case_ids=_normalize_ids(case_ids),
-        qtypes=_normalize_ids(qtypes),
+        qtypes=selected_qtypes,
         qsubtypes=_normalize_ids(qsubtypes),
         include_visualization=include_visualization,
         limit_cases=limit_cases,
     )
     grouped_rows = _group_rows_by_table(selected_rows)
+    if output_path.exists() and overwrite:
+        shutil.rmtree(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
     dataset_summaries = []
@@ -292,13 +304,11 @@ def convert_tablebench_rows(
     for table_id, table_rows in sorted(grouped_rows.items()):
         dataset_dir = output_path / table_id
         if dataset_dir.exists():
-            if not overwrite:
-                raise FileExistsError(
-                    "Output dataset already exists: "
-                    f"{_portable_path(dataset_dir)}. "
-                    "Pass --overwrite to replace it."
-                )
-            shutil.rmtree(dataset_dir)
+            raise FileExistsError(
+                "Output dataset already exists: "
+                f"{_portable_path(dataset_dir)}. "
+                "Pass --overwrite to replace the converted dataset root."
+            )
         dataset_dir.mkdir(parents=True, exist_ok=True)
 
         frame = _table_frame(table_rows[0]["table"])
@@ -335,9 +345,13 @@ def convert_tablebench_rows(
         "splits": list(splits),
         "output_root": _portable_path(output_path),
         "include_visualization": include_visualization,
+        "retained_qtypes": sorted(TABLEBENCH_REASONING_QTYPES),
         "source_case_count": len(all_rows),
-        "visualization_case_count": visualization_case_count,
-        "visualization_excluded": not include_visualization,
+        "excluded_qtype_count": excluded_qtype_count,
+        "visualization_case_count": sum(
+            1 for row in all_rows if _is_visualization_row(row)
+        ),
+        "visualization_excluded": True,
         "dataset_count": len(dataset_summaries),
         "case_count": total_cases,
         "qtype_counts": dict(sorted(qtype_counts.items())),
@@ -409,9 +423,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--include-visualization",
         action="store_true",
         help=(
-            "Include TableBench Visualization cases. By default conversion "
-            "excludes chart-generation cases because CLOVER evaluates "
-            "non-visual table reasoning here."
+            "Deprecated compatibility option. CLOVER's TableBench conversion "
+            "retains only FactChecking and NumericalReasoning."
         ),
     )
     parser.add_argument("--limit-cases", type=int, default=None)
@@ -451,6 +464,11 @@ def _select_rows(
     include_visualization: bool,
     limit_cases: int | None,
 ) -> list[dict[str, Any]]:
+    if include_visualization:
+        raise ValueError(
+            "TableBench conversion only supports FactChecking and "
+            "NumericalReasoning; Visualization cannot be retained."
+        )
     selected = []
     seen_case_ids = set()
     for row in rows:
@@ -459,7 +477,7 @@ def _select_rows(
         seen_case_ids.add(original_id)
         if case_ids is not None and original_id not in case_ids:
             continue
-        if not include_visualization and _is_visualization_row(payload):
+        if not _is_supported_reasoning_row(payload):
             continue
         if qtypes is not None and str(payload.get("qtype")) not in qtypes:
             continue
@@ -499,6 +517,33 @@ def _find_raw_modelscope_file(snapshot_root: Path, filename: str) -> Path:
 
 def _is_visualization_row(row: dict[str, Any]) -> bool:
     return str(row.get("qtype") or "").strip().lower() == "visualization"
+
+
+def _is_supported_reasoning_row(row: dict[str, Any]) -> bool:
+    return str(row.get("qtype") or "").strip() in TABLEBENCH_REASONING_QTYPES
+
+
+def _reasoning_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        _json_ready(dict(row))
+        for row in rows
+        if _is_supported_reasoning_row(row)
+    ]
+
+
+def _selected_reasoning_qtypes(
+    qtypes: Sequence[str] | None,
+) -> set[str]:
+    selected = _normalize_ids(qtypes)
+    if selected is None:
+        return set(TABLEBENCH_REASONING_QTYPES)
+    unsupported = sorted(selected - TABLEBENCH_REASONING_QTYPES)
+    if unsupported:
+        raise ValueError(
+            "Unsupported TableBench qtypes for CLOVER conversion: "
+            f"{unsupported}. Allowed: {sorted(TABLEBENCH_REASONING_QTYPES)}"
+        )
+    return selected
 
 
 def _group_rows_by_table(rows: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

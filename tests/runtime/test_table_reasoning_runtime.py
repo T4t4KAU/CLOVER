@@ -621,6 +621,39 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(result.case_results[0].retry_count, 0)
         self.assertNotIn("supervisor_repair_calls", result.profile["counters"])
 
+    def test_cloud_recovery_ablation_prevents_second_cloud_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        [
+                            'SELECT "missing" AS "answer_1" FROM "table_1";',
+                        ]
+                    ),
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec("case_1", Path(tmpdir), table_path, "How many rows?", "number"),
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                local_slm_config={
+                    "enable_cloud_recovery": False,
+                    "edge_review_mode": "off",
+                },
+                remote_batch_size=1,
+                max_retries=1,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(len(client.chat.completions.requests), 1)
+        self.assertFalse(result.case_results[0].ok)
+        self.assertEqual(result.case_results[0].retry_count, 0)
+        self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+
     def test_analyze_profile_runs_evidence_sql_then_supervisor_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
@@ -738,6 +771,65 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             1,
         )
         self.assertEqual(len(client.chat.completions.requests), 1)
+
+    def test_cloud_finalize_ablation_sends_scalar_answer_to_cloud(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT COUNT(*) AS "answer_1__a1" '
+                                'FROM "table_1";'
+                            )
+                        }
+                    ),
+                    json.dumps({"a": 2}),
+                ]
+            )
+            scalar_table = {
+                "n": 1,
+                "cols": ["answer_1__a1"],
+                "rows": [{"answer_1__a1": 2}],
+            }
+
+            with patch(
+                "clover.runtime.table_reasoning.pipeline.execute_execution_plan",
+                return_value=ExecutionResult(
+                    ok=True,
+                    answer={"answer_1__a1": scalar_table},
+                    outputs={"answer_1__a1": scalar_table},
+                    collector_outputs={"answer": {"answer_1__a1": scalar_table}},
+                    traces=[],
+                    output_summaries={},
+                ),
+            ):
+                result = run_table_reasoning_system(
+                    case_specs=[
+                        _case_spec(
+                            "case_1",
+                            Path(tmpdir),
+                            table_path,
+                            "How many rows are present?",
+                            "number",
+                            profile="analyze",
+                        ),
+                    ],
+                    remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                    local_slm_config={
+                        "enable_static_finalization": False,
+                        "edge_review_mode": "off",
+                    },
+                    remote_batch_size=8,
+                    validation_mode="remote_supervisor",
+                    client=client,
+                )
+
+        self.assertEqual(result.case_results[0].answer, 2)
+        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
+        self.assertNotIn("action_group_static_answer_hits", result.profile["counters"])
+        self.assertEqual(len(client.chat.completions.requests), 2)
 
     def test_analyze_string_scalar_action_can_finalize_locally(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 STRING_FIELDS = {
     "provider",
     "api_type",
@@ -20,6 +19,7 @@ STRING_FIELDS = {
     "reasoning_effort",
     "slm_scheduler",
     "edge_review_mode",
+    "ablation_variant",
 }
 INTEGER_FIELDS = {
     "agent_loop_max_iterations",
@@ -51,6 +51,11 @@ FLOAT_FIELDS = {
 }
 BOOLEAN_FIELDS = {
     "disable_agent_loop",
+    "enable_cloud_recovery",
+    "enable_contract_gate",
+    "enable_edge_agent",
+    "enable_node_review",
+    "enable_static_finalization",
     "http2",
     "trust_env",
 }
