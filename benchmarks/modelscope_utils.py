@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -12,15 +13,27 @@ def load_modelscope_rows(
     repo_id: str,
     subset_name: str | None,
     splits: Sequence[str],
+    cache_dir: str | Path | None = None,
+    trust_remote_code: bool = False,
+    force_redownload: bool = False,
 ) -> list[dict[str, Any]]:
     """Load rows from ModelScope with MsDataset.load."""
 
+    _patch_datasets_verification_mode_compat()
     MsDataset = _import_ms_dataset()
     rows: list[dict[str, Any]] = []
     for split in splits:
         kwargs: dict[str, Any] = {"split": split}
         if subset_name:
             kwargs["subset_name"] = subset_name
+        if cache_dir is not None:
+            kwargs["cache_dir"] = str(Path(cache_dir).expanduser())
+        if trust_remote_code:
+            kwargs["trust_remote_code"] = True
+        if force_redownload:
+            from modelscope.utils.constant import DownloadMode
+
+            kwargs["download_mode"] = DownloadMode.FORCE_REDOWNLOAD
         dataset = MsDataset.load(repo_id, **kwargs)
         for row in _iter_dataset_rows(dataset):
             payload = _row_to_dict(row)
@@ -65,6 +78,33 @@ def _import_ms_dataset() -> Any:
                 "Missing optional dependency 'modelscope'. Install it with "
                 "`pip install modelscope` or `pip install .[modelscope]`."
             ) from exc
+
+
+def _patch_datasets_verification_mode_compat() -> None:
+    """Bridge ModelScope releases that pass a removed datasets argument."""
+
+    try:
+        import datasets
+    except ImportError:
+        return
+
+    as_dataset = datasets.DatasetBuilder.as_dataset
+    if getattr(as_dataset, "_clover_modelscope_compat", False):
+        return
+    parameters = inspect.signature(as_dataset).parameters.values()
+    if any(
+        parameter.name == "verification_mode"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    ):
+        return
+
+    def compatible_as_dataset(self: Any, *args: Any, **kwargs: Any) -> Any:
+        kwargs.pop("verification_mode", None)
+        return as_dataset(self, *args, **kwargs)
+
+    compatible_as_dataset._clover_modelscope_compat = True  # type: ignore[attr-defined]
+    datasets.DatasetBuilder.as_dataset = compatible_as_dataset
 
 
 def _iter_dataset_rows(dataset: Any) -> Iterable[Any]:

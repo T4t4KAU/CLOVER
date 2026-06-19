@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# =============================================================================
+# User settings
+# Edit these values, then run: bash benchmarks/run_vllm_eval.sh
+# Environment variables or positional arguments can still override them.
+# =============================================================================
+DATASET="${CLOVER_EVAL_DATASET:-tablebench}"  # tablebench | wikitq | tablefact
+EDGE_MODEL_PATH="${CLOVER_EDGE_MODEL_PATH:-/path/to/Qwen2.5-3B-Instruct}"
+DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}"
+GPU_DEVICES="${CLOVER_VLLM_GPUS:-0}"  # Example: "0,1"
+
+# Use the same `python` executable that the user gets in the current shell.
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python 2>/dev/null || true)}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
@@ -8,12 +21,16 @@ cd "${REPO_ROOT}"
 usage() {
   cat <<'EOF'
 Usage:
-  bash benchmarks/run_vllm_eval.sh DATASET MODEL [eval options...]
+  bash benchmarks/run_vllm_eval.sh [DATASET] [EDGE_MODEL_PATH] [eval options...]
 
 DATASET:
   tablebench | wikitq | tablefact
 
 Examples:
+  # Use the settings at the top of this script:
+  bash benchmarks/run_vllm_eval.sh
+
+  # Temporarily override dataset/model:
   bash benchmarks/run_vllm_eval.sh tablebench /models/Qwen2.5-3B-Instruct --max-cases 10
   bash benchmarks/run_vllm_eval.sh wikitq Qwen/Qwen2.5-3B-Instruct --sample-size 100
   TABLEFACT_SUBSET=simple bash benchmarks/run_vllm_eval.sh tablefact /models/Qwen2.5-3B-Instruct
@@ -28,14 +45,19 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
 fi
-if [[ "$#" -lt 2 ]]; then
-  usage >&2
-  exit 2
+
+# Optional positional overrides preserve the previous invocation style.
+if [[ "${1:-}" != "" && "${1:-}" != --* ]]; then
+  DATASET="$1"
+  shift
+fi
+if [[ "${1:-}" != "" && "${1:-}" != --* ]]; then
+  EDGE_MODEL_PATH="$1"
+  shift
 fi
 
-DATASET="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-MODEL_PATH="$2"
-shift 2
+DATASET="$(printf '%s' "${DATASET}" | tr '[:upper:]' '[:lower:]')"
+MODEL_PATH="${EDGE_MODEL_PATH}"
 case "${DATASET}" in
   tablebench) ;;
   wikitq|wikitablequestions) DATASET="wikitq" ;;
@@ -48,8 +70,6 @@ case "${DATASET}" in
 esac
 EXTRA_EVAL_ARGS=("$@")
 
-PYTHON_BIN="${PYTHON_BIN:-${CONDA_PREFIX:+${CONDA_PREFIX}/bin/python}}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
 HOST="${CLOVER_VLLM_HOST:-${CLOVER_LOCAL_HOST:-127.0.0.1}}"
 PORT="${CLOVER_VLLM_PORT:-${CLOVER_LOCAL_PORT:-8000}}"
 BASE_URL="http://${HOST}:${PORT}/v1"
@@ -75,7 +95,6 @@ AGENT_LOOP_MAX_ITERATIONS="${CLOVER_AGENT_LOOP_MAX_ITERATIONS:-8}"
 DTYPE="${CLOVER_VLLM_DTYPE:-auto}"
 MAX_MODEL_LEN="${CLOVER_VLLM_MAX_MODEL_LEN:-}"
 GPU_MEMORY_UTILIZATION="${CLOVER_VLLM_GPU_MEMORY_UTILIZATION:-0.88}"
-TENSOR_PARALLEL_SIZE="${CLOVER_VLLM_TENSOR_PARALLEL_SIZE:-1}"
 ENABLE_PREFIX_CACHING="${CLOVER_VLLM_ENABLE_PREFIX_CACHING:-true}"
 VLLM_SERVER_ARGS="${CLOVER_VLLM_SERVER_ARGS:-}"
 SERVER_READY_TIMEOUT="${CLOVER_VLLM_READY_TIMEOUT:-600}"
@@ -89,8 +108,17 @@ MAX_PARALLEL_SLM_SEQUENCES="${CLOVER_MAX_PARALLEL_SLM_SEQUENCES:-32}"
 MAX_PENDING_SLM_SEQUENCES="${CLOVER_MAX_PENDING_SLM_SEQUENCES:-64}"
 SLM_SCHEDULER="${CLOVER_SLM_SCHEDULER:-tptt}"
 
-if [[ ! -x "${PYTHON_BIN}" ]] && ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  echo "Python not found: ${PYTHON_BIN}" >&2
+if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
+  echo "The current shell has no executable 'python' command." >&2
+  echo "Activate the intended environment first, then rerun this script." >&2
+  exit 1
+fi
+if [[ "${MODEL_PATH}" == /path/to/* ]]; then
+  echo "Set EDGE_MODEL_PATH at the top of this script or pass a model path." >&2
+  exit 1
+fi
+if [[ "${MODEL_PATH}" == /* && ! -e "${MODEL_PATH}" ]]; then
+  echo "Local edge model path not found: ${MODEL_PATH}" >&2
   exit 1
 fi
 if [[ ! -e "${MODEL_PATH}" && "${MODEL_PATH}" != */* ]]; then
@@ -103,6 +131,37 @@ if [[ ! -f "${REMOTE_LLM_CONFIG}" ]]; then
 fi
 if [[ ! -f "${SYNTHESIZE_LLM_CONFIG}" ]]; then
   echo "Synthesis LLM config not found: ${SYNTHESIZE_LLM_CONFIG}" >&2
+  exit 1
+fi
+
+if grep -Eq '"api_key_env"[[:space:]]*:[[:space:]]*"DEEPSEEK_API_KEY"' \
+    "${REMOTE_LLM_CONFIG}" "${SYNTHESIZE_LLM_CONFIG}" \
+    && [[ -z "${DEEPSEEK_API_KEY}" ]]; then
+  echo "DEEPSEEK_API_KEY is empty." >&2
+  echo "Set it in the user settings block at the top of this script." >&2
+  exit 1
+fi
+export DEEPSEEK_API_KEY
+
+GPU_DEVICES="$(printf '%s' "${GPU_DEVICES}" | tr -d '[:space:]')"
+if [[ ! "${GPU_DEVICES}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+  echo "Invalid GPU_DEVICES: ${GPU_DEVICES}" >&2
+  echo "Use comma-separated GPU ids, for example 0 or 0,1." >&2
+  exit 1
+fi
+IFS=',' read -r -a GPU_DEVICE_ITEMS <<< "${GPU_DEVICES}"
+GPU_COUNT=0
+for gpu_id in "${GPU_DEVICE_ITEMS[@]}"; do
+  GPU_COUNT=$((GPU_COUNT + 1))
+done
+export CUDA_VISIBLE_DEVICES="${GPU_DEVICES}"
+TENSOR_PARALLEL_SIZE="${CLOVER_VLLM_TENSOR_PARALLEL_SIZE:-${GPU_COUNT}}"
+if [[ ! "${TENSOR_PARALLEL_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Invalid tensor parallel size: ${TENSOR_PARALLEL_SIZE}" >&2
+  exit 1
+fi
+if ((TENSOR_PARALLEL_SIZE > GPU_COUNT)); then
+  echo "Tensor parallel size (${TENSOR_PARALLEL_SIZE}) exceeds visible GPUs (${GPU_COUNT})." >&2
   exit 1
 fi
 
@@ -188,6 +247,9 @@ else
 
   echo "Starting vLLM" >&2
   echo "  model: ${MODEL_PATH}" >&2
+  echo "  python: ${PYTHON_BIN}" >&2
+  echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}" >&2
+  echo "  tensor_parallel_size: ${TENSOR_PARALLEL_SIZE}" >&2
   echo "  endpoint: ${BASE_URL}" >&2
   echo "  log: ${SERVER_LOG}" >&2
   "${VLLM_CMD[@]}" >"${SERVER_LOG}" 2>&1 &
