@@ -32,6 +32,24 @@ benchmark/runs/<dataset>_ablation_<timestamp>/
 ```
 
 目录中的 `sanity_check.json` 会校验固定 case 集、feature flags、OneShot 后续云调用和 CloudFinalize 静态终止计数。
+六个变体结束后，脚本会在终端直接打印汇总表，并生成：
+
+```text
+ablation_summary.md
+ablation_summary.csv
+ablation_summary.json
+```
+
+表中包含正确率、相对 Full CLOVER 的百分点变化、相对 Full 的退化/恢复
+case 数，以及 Cloud/Edge 调用、token、估算成本和耗时。
+
+如果六组实验已经跑完，只需要补生成汇总而不重跑：
+
+```bash
+python -m benchmarks.summarize_ablation_suite \
+  --suite-root benchmark/runs/wikitq_ablation_<timestamp> \
+  --dataset wikitq
+```
 
 ## 重新生成固定子集
 

@@ -367,4 +367,9 @@ run_variant cloud_finalize true true true true false
   --dataset "${DATASET}" \
   >"${SUITE_ROOT}/sanity_check_stdout.json"
 
+"${PYTHON_BIN}" -m benchmarks.summarize_ablation_suite \
+  --suite-root "${SUITE_ROOT}" \
+  --dataset "${DATASET}"
+
 echo "Ablation suite completed: ${SUITE_ROOT}" >&2
+echo "Summary: ${SUITE_ROOT}/ablation_summary.md" >&2
