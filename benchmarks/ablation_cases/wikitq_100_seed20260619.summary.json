@@ -4,8 +4,8 @@
   "size": 100,
   "requested_size": 100,
   "seed": 20260619,
-  "dataset_root": "datasets/wikitq",
-  "manifest": "benchmarks/ablation_cases/wikitq_100_seed20260619.jsonl",
+  "dataset_root": "/Users/huangwenxuan/Documents/codes/CLOVER/datasets/wikitq",
+  "manifest": "/Users/huangwenxuan/Documents/codes/CLOVER/benchmarks/ablation_cases/wikitq_100_seed20260619.jsonl",
   "eligible_cases": 4344,
   "quotas": {
     "aggregation": 20,
