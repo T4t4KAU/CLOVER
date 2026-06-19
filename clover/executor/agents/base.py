@@ -29,15 +29,20 @@ class FastPathDecision:
 
 @dataclass(frozen=True)
 class FastPathReview:
-    """Post-execution verdict for a successful Fast Path output."""
+    """Local post-execution review for a successful Fast Path output."""
 
     route: str = "accept"
+    action: str = "accept"
     trigger: str | None = None
     reason: str | None = None
     evidence: dict[str, Any] | None = None
 
     def to_trace(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"route": self.route}
+        payload: dict[str, Any] = {
+            "scope": "local_node",
+            "route": self.route,
+            "action": self.action,
+        }
         if self.reason:
             payload["reason"] = self.reason
         if self.evidence:
@@ -85,8 +90,10 @@ class BaseNodeAgent:
                     )
                 review = self.review_fast_path_output(decision, output)
                 if review.route != "accept":
-                    trace["verification_verdict"] = review.to_trace()
-                if review.route == "edge_repair":
+                    review_trace = review.to_trace()
+                    trace["local_review"] = review_trace
+                    trace["verification_verdict"] = review_trace
+                if review.action == "local_repair":
                     trigger = review.trigger or "fast_path_empty_output"
                     trace["execution_path"] = "agent_loop"
                     trace["agent_loop_trigger"] = trigger
@@ -219,6 +226,7 @@ class BaseNodeAgent:
         if self.should_run_agent_loop_after_fast_path(decision, output):
             return FastPathReview(
                 route="edge_repair",
+                action="local_repair",
                 trigger="fast_path_empty_output",
                 reason="fast_path_empty_output",
             )

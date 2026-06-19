@@ -25,6 +25,11 @@ from clover.executor.slm_dispatcher import (
     DEFAULT_MAX_PENDING_SLM_SEQUENCES,
     LocalSlmSequenceDispatcher,
 )
+from clover.executor.edge_review import (
+    EDGE_REVIEW_SAFE,
+    EdgeReviewResult,
+    run_edge_local_review,
+)
 from clover.executor.result import json_ready
 from clover.optimizer.ir import TABLE_REASONING_QUERY_TASK_TYPE
 from clover.reasoning_profiles import (
@@ -80,6 +85,7 @@ _TABLE_DIAGNOSTICS_KEY = "table_diagnostics"
 _FINAL_ANSWER_SOURCE_KEY = "final_answer_source"
 _DECOMPOSE_TRACE_KEY = "decompose_trace"
 _SYNTHESIS_TRACE_KEY = "synthesis_trace"
+_EDGE_REVIEW_TRACE_KEY = "edge_review_trace"
 _AGENT_LOOP_TRACE_KEY = "agent_loop_trace"
 _CACHE_MISSING = object()
 
@@ -1078,7 +1084,19 @@ def _run_action_groups_batch(
             profiler=profiler,
         ):
             continue
-        report_items.append((result.item, _public_action_group_observation(observation)))
+        public_observation = _public_action_group_observation(observation)
+        if _try_finalize_edge_local_review(
+            task=result.item.task,
+            evidence=public_observation,
+            scope="action_group_answer",
+            local_slm_config=local_slm_config,
+            local_slm_dispatcher=local_slm_dispatcher,
+            final_results=final_results,
+            finalized=finalized,
+            profiler=profiler,
+        ):
+            continue
+        report_items.append((result.item, public_observation))
     if report_items:
         _run_supervisor_action_reports_batch(
             report_items=report_items,
@@ -3188,6 +3206,8 @@ def _finish_table_execution_batch(
     supervisor: SupervisorAgent,
     max_retries: int,
     validation_mode: str,
+    local_slm_config: dict[str, Any] | None,
+    local_slm_dispatcher: LocalSlmSequenceDispatcher | None,
     profiler: PipelineProfiler,
 ) -> bool:
     if execution_result.ok:
@@ -3198,6 +3218,8 @@ def _finish_table_execution_batch(
             finalized=finalized,
             profiler=profiler,
             fail_unfinalized=not _needs_supervisor_review(batch, validation_mode),
+            local_slm_config=local_slm_config,
+            local_slm_dispatcher=local_slm_dispatcher,
         )
         if remaining and _needs_supervisor_review(remaining, validation_mode):
             _run_supervisor_synthesis(
@@ -3249,6 +3271,8 @@ def _finish_table_execution_batch(
             finalized=finalized,
             profiler=profiler,
             fail_unfinalized=not _needs_supervisor_review(unaffected, validation_mode),
+            local_slm_config=local_slm_config,
+            local_slm_dispatcher=local_slm_dispatcher,
         )
         if remaining and _needs_supervisor_review(remaining, validation_mode):
             _run_supervisor_synthesis(
@@ -3297,6 +3321,8 @@ def _run_static_synthesis_review(
     finalized: set[str],
     profiler: PipelineProfiler,
     fail_unfinalized: bool,
+    local_slm_config: dict[str, Any] | None,
+    local_slm_dispatcher: LocalSlmSequenceDispatcher | None,
 ) -> list[LogicDagItem]:
     for item in batch:
         item.task.status = TASK_SUPERVISOR_REVIEW
@@ -3385,8 +3411,19 @@ def _run_static_synthesis_review(
                         "confidence": "invalid",
                         "reason": reason,
                     },
-                ),
-            )
+                    ),
+                )
+            if _try_finalize_edge_local_review(
+                task=item.task,
+                evidence=raw_answer,
+                scope="format_answer",
+                local_slm_config=local_slm_config,
+                local_slm_dispatcher=local_slm_dispatcher,
+                final_results=final_results,
+                finalized=finalized,
+                profiler=profiler,
+            ):
+                continue
             if fail_unfinalized:
                 _finalize_failed(
                     item.task,
@@ -3400,6 +3437,115 @@ def _run_static_synthesis_review(
             else:
                 remaining.append(item)
     return remaining
+
+
+def _try_finalize_edge_local_review(
+    *,
+    task: TaskItem,
+    evidence: Any,
+    scope: str,
+    local_slm_config: dict[str, Any] | None,
+    local_slm_dispatcher: LocalSlmSequenceDispatcher | None,
+    final_results: list[CaseResult],
+    finalized: set[str],
+    profiler: PipelineProfiler,
+) -> bool:
+    try:
+        with profiler.measure("edge_local_review", items=1):
+            result = run_edge_local_review(
+                question=task.question,
+                answer_type=task.answer_type,
+                evidence=evidence,
+                scope=scope,
+                slm_config=local_slm_config,
+                dispatcher=local_slm_dispatcher,
+                job_id=f"{task.answer_key}:{scope}",
+            )
+    except Exception as exc:  # noqa: BLE001 - local review must safely fall back.
+        profiler.increment("edge_local_review_failures")
+        _record_table_diagnostic(
+            task,
+            {
+                "stage": "edge_local_review",
+                "scope": scope,
+                "finalization": {
+                    "source": "edge_local_review",
+                    "bypass_synthesis": False,
+                    "confidence": "invalid",
+                    "reason": "edge_local_review_error",
+                },
+                "error": _error_payload(exc),
+            },
+        )
+        return False
+    if result is None:
+        return False
+
+    profiler.increment("edge_local_review_calls")
+    _record_edge_local_review_usage(profiler, result)
+    if result.accepted:
+        profiler.increment("edge_local_review_accepted")
+    elif result.route == "escalate":
+        profiler.increment("edge_local_review_escalations")
+    if result.validation_error:
+        profiler.increment("edge_local_review_validation_failures")
+
+    trace = {
+        "scope": scope,
+        "prompt": result.prompt,
+        "response": result.response,
+        **result.to_trace(),
+    }
+    rounds = task.metadata.setdefault(_EDGE_REVIEW_TRACE_KEY, [])
+    if isinstance(rounds, list):
+        rounds.append(json_ready(trace))
+    _record_table_diagnostic(
+        task,
+        {
+            "stage": "edge_local_review",
+            "scope": scope,
+            "review": result.to_trace(),
+            "finalization": {
+                "source": "edge_local_review",
+                "bypass_synthesis": bool(
+                    result.mode == EDGE_REVIEW_SAFE and result.accepted
+                ),
+                "confidence": "validated" if result.accepted else "abstain",
+                "reason": (
+                    "validated_local_answer"
+                    if result.accepted
+                    else result.reason or result.validation_error or "escalate"
+                ),
+            },
+        },
+    )
+    if result.mode != EDGE_REVIEW_SAFE or not result.accepted:
+        profiler.increment("edge_local_review_cloud_fallbacks")
+        return False
+
+    profiler.increment("edge_local_review_hits")
+    task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "edge_local_review"
+    _finalize_success(
+        task,
+        answer=result.answer,
+        final_results=final_results,
+        finalized=finalized,
+    )
+    return True
+
+
+def _record_edge_local_review_usage(
+    profiler: PipelineProfiler,
+    result: EdgeReviewResult,
+) -> None:
+    profiler.increment("local_slm_calls")
+    for key, value in result.token_usage.items():
+        try:
+            amount = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if amount > 0:
+            profiler.increment(f"local_slm_{key}", amount)
 
 
 def _static_final_answer_from_value(
@@ -4467,6 +4613,11 @@ def _record_executor_trace_counters(
                 if isinstance(steps, list):
                     profiler.increment("executor_local_slm_steps", len(steps))
                     _record_local_slm_trace_usage(profiler, steps)
+        local_review = trace.get("local_review")
+        if isinstance(local_review, dict):
+            profiler.increment("executor_edge_local_reviews")
+            action = _counter_suffix(local_review.get("action") or "unknown")
+            profiler.increment(f"executor_edge_local_review_{action}")
         fast_path_error = trace.get("fast_path_error")
         if isinstance(fast_path_error, dict):
             error_type = _counter_suffix(fast_path_error.get("type") or "unknown")
@@ -4521,6 +4672,18 @@ def _profile_with_summary(
         "remote_calls": profile.get("counters", {}).get("supervisor_decompose_calls", 0)
         + profile.get("counters", {}).get("supervisor_synthesis_calls", 0),
         "local_slm_calls": profile.get("counters", {}).get("local_slm_calls", 0),
+        "edge_local_review_calls": profile.get("counters", {}).get(
+            "edge_local_review_calls",
+            0,
+        ),
+        "edge_local_review_hits": profile.get("counters", {}).get(
+            "edge_local_review_hits",
+            0,
+        ),
+        "edge_local_review_escalations": profile.get("counters", {}).get(
+            "edge_local_review_escalations",
+            0,
+        ),
         "merged_plan_count": profile.get("counters", {}).get("merged_plan_count", 0),
         "reused_nodes": profile.get("counters", {}).get("reused_nodes", 0),
         "remote_token_usage": _remote_token_usage_summary(profile.get("counters", {})),

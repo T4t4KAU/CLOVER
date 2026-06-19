@@ -262,11 +262,13 @@ class TableReasoningNodeAgent(BaseNodeAgent):
             if edge_disabled:
                 return FastPathReview(
                     route="cloud_replan",
+                    action="escalate",
                     reason="edge_repair_disabled",
                     evidence=_empty_output_evidence(self, output),
                 )
             return FastPathReview(
                 route="edge_repair",
+                action="local_repair",
                 trigger="fast_path_empty_output",
                 reason="empty_local_operation",
                 evidence=_empty_output_evidence(self, output),
@@ -282,6 +284,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         if dominant == "wrong_column" or mismatch_analysis.get("candidates"):
             return FastPathReview(
                 route="cloud_replan",
+                action="escalate",
                 reason=(
                     "predicate_candidate_column"
                     if mismatch_analysis.get("candidates")
@@ -292,11 +295,13 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         if edge_disabled:
             return FastPathReview(
                 route="cloud_replan",
+                action="escalate",
                 reason="edge_repair_disabled",
                 evidence=evidence,
             )
         return FastPathReview(
             route="edge_repair",
+            action="local_repair",
             trigger="fast_path_empty_output",
             reason=f"predicate_{dominant or 'unclassified'}",
             evidence=evidence,

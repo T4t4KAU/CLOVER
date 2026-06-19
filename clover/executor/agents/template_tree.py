@@ -126,6 +126,12 @@ TABLE_BOOLEAN_REWRITE_PREDICATE_LEAF_KEY = (
     "contract:boolean",
     "mode:rewrite_predicate",
 )
+TABLE_LOCAL_REVIEW_LEAF_KEY = (
+    "agent:review",
+    "family:table_reasoning",
+    "interface:evidence_review",
+    "contract:answer_or_escalate",
+)
 DOCUMENT_WORKER_LEAF_KEY = (
     "agent:data",
     "family:document_reasoning",
@@ -321,6 +327,29 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                 ),
             ),
         ),
+        TemplateNode(
+            name="agent:review",
+            children=(
+                TemplateNode(
+                    name="family:table_reasoning",
+                    children=(
+                        TemplateNode(
+                            name="interface:evidence_review",
+                            template="table_reasoning/local_review.md",
+                            children=(
+                                TemplateNode(
+                                    name="contract:answer_or_escalate",
+                                    leaf_description=(
+                                        "Bounded local evidence review with "
+                                        "answer or escalation output."
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
     ),
 )
 
@@ -417,6 +446,21 @@ def render_document_worker_prompt(
     )
 
 
+def render_table_local_review_prompt(*, payload: dict[str, Any]) -> str:
+    """Render the bounded Edge local evidence review prompt."""
+
+    return _render_templates(
+        template_paths_for_leaf_key(TABLE_LOCAL_REVIEW_LEAF_KEY),
+        context={
+            "REVIEW_PAYLOAD": json.dumps(
+                json_ready(payload),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        },
+    )
+
+
 def template_paths_for_task_type(task_type: str) -> tuple[str, ...]:
     return template_paths_for_leaf_key(_default_leaf_key_for_task_type(task_type))
 
@@ -442,6 +486,8 @@ def template_leaf_key_for_local_slm_prompt(
         return _table_reasoning_empty_filter_repair_leaf_key_for_node(node or {})
     if prompt_kind == "table_reasoning_rewrite_predicate":
         return _table_reasoning_rewrite_predicate_leaf_key_for_node(node or {})
+    if prompt_kind == "table_reasoning_local_review":
+        return TABLE_LOCAL_REVIEW_LEAF_KEY
     raise ValueError(f"Unsupported local SLM prompt kind: {prompt_kind!r}")
 
 

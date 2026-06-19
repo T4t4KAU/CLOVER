@@ -926,6 +926,8 @@ def _execute_mixed_plan_entries(
                 supervisor=adapter.supervisor,
                 max_retries=adapter.max_retries,
                 validation_mode=adapter.validation_mode,
+                local_slm_config=adapter.local_slm_config,
+                local_slm_dispatcher=adapter.local_slm_dispatcher,
                 profiler=adapter.profiler,
             )
             continue
@@ -984,6 +986,8 @@ def _execute_single_plan_entry(
             supervisor=adapter.supervisor,
             max_retries=adapter.max_retries,
             validation_mode=adapter.validation_mode,
+            local_slm_config=adapter.local_slm_config,
+            local_slm_dispatcher=adapter.local_slm_dispatcher,
             profiler=adapter.profiler,
         )
         return

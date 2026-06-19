@@ -12,6 +12,7 @@ from clover.executor.agents.template_tree import (
     NODE_AGENT_SLM_TEMPLATE_LEAVES,
     TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY,
     TABLE_BOOLEAN_LEAF_KEY,
+    TABLE_LOCAL_REVIEW_LEAF_KEY,
     TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY,
     TABLE_NUMBER_LEAF_KEY,
     TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY,
@@ -198,6 +199,7 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
             TABLE_NUMBER_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
             TABLE_STRING_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
             TABLE_BOOLEAN_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
+            TABLE_LOCAL_REVIEW_LEAF_KEY: ("table_reasoning/local_review.md",),
             DOCUMENT_WORKER_LEAF_KEY: ("document_reasoning/worker.md",),
         }
         for contract in ("number", "string", "boolean"):

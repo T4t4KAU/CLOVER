@@ -19,6 +19,7 @@ STRING_FIELDS = {
     "proxy",
     "reasoning_effort",
     "slm_scheduler",
+    "edge_review_mode",
 }
 INTEGER_FIELDS = {
     "agent_loop_max_iterations",
@@ -32,6 +33,10 @@ INTEGER_FIELDS = {
     "max_tptt_leaf_sequences_per_tree",
     "top_k",
     "tptt_prefix_tokens",
+    "edge_review_max_actions",
+    "edge_review_max_columns",
+    "edge_review_max_facts",
+    "edge_review_max_rows",
 }
 FLOAT_FIELDS = {
     "temperature",

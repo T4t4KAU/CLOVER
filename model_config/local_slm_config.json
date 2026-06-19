@@ -12,5 +12,10 @@
   "http2": false,
   "trust_env": false,
   "agent_loop_max_iterations": 5,
-  "agent_loop_repeat_error_early_stop": 2
+  "agent_loop_repeat_error_early_stop": 2,
+  "edge_review_mode": "safe",
+  "edge_review_max_actions": 4,
+  "edge_review_max_rows": 5,
+  "edge_review_max_columns": 5,
+  "edge_review_max_facts": 40
 }

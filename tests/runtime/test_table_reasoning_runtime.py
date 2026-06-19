@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from clover.executor import ExecutionResult
+from clover.executor.slm_dispatcher import LocalSlmSequenceDispatcher
 from clover.optimizer import SqlParseError
 from clover.runtime import TableReasoningCaseSpec, run_table_reasoning_system
 from clover.runtime.table_reasoning import pipeline as table_pipeline
@@ -74,6 +75,79 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_pipeline._normalize_answer_for_task(task, -18),  # noqa: SLF001
             18,
         )
+
+    def test_safe_edge_local_review_finalizes_grounded_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = _write_people_table(root)
+            task = next(
+                iter(
+                    table_pipeline._build_task_items(  # noqa: SLF001
+                        [
+                            _case_spec(
+                                "case_1",
+                                root,
+                                table_path,
+                                "Which country appears first?",
+                                "string",
+                            )
+                        ]
+                    ).values()
+                )
+            )
+            local_config = {
+                "api_type": "chat_completions",
+                "model": "edge-model",
+                "edge_review_mode": "safe",
+            }
+            local_client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "route": "normalize",
+                            "a": "France",
+                            "support": ["e0"],
+                            "operation": "identity",
+                        }
+                    )
+                ]
+            )
+            dispatcher = LocalSlmSequenceDispatcher(
+                slm_config=local_config,
+                client=local_client,
+                max_parallel_sequences=1,
+                max_pending_sequences=4,
+                slm_scheduler="fifo",
+            )
+            final_results = []
+            finalized = set()
+            profiler = table_pipeline.PipelineProfiler()
+            try:
+                hit = table_pipeline._try_finalize_edge_local_review(  # noqa: SLF001
+                    task=task,
+                    evidence={
+                        "n": 1,
+                        "cols": ["country", "year"],
+                        "rows": [{"country": "France", "year": 2020}],
+                    },
+                    scope="format_answer",
+                    local_slm_config=local_config,
+                    local_slm_dispatcher=dispatcher,
+                    final_results=final_results,
+                    finalized=finalized,
+                    profiler=profiler,
+                )
+            finally:
+                dispatcher.close()
+
+        self.assertTrue(hit)
+        self.assertEqual(final_results[0].answer, "France")
+        self.assertEqual(
+            final_results[0].metadata["final_answer_source"],
+            "edge_local_review",
+        )
+        self.assertEqual(profiler.counters["edge_local_review_hits"], 1)
+        self.assertEqual(profiler.counters["local_slm_calls"], 1)
 
     def test_query_with_explicit_local_sql_skips_remote_decompose(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

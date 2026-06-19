@@ -502,6 +502,12 @@ def _merge_system_profiles(profiles: list[dict[str, Any]]) -> dict[str, Any]:
         + counters.get("supervisor_repair_calls", 0),
         "local_slm_calls": counters.get("local_slm_calls", 0)
         or counters.get("executor_local_slm_steps", 0),
+        "edge_local_review_calls": counters.get("edge_local_review_calls", 0),
+        "edge_local_review_hits": counters.get("edge_local_review_hits", 0),
+        "edge_local_review_escalations": counters.get(
+            "edge_local_review_escalations",
+            0,
+        ),
         "merged_plan_count": counters.get("merged_plan_count", 0),
         "reused_nodes": counters.get("reused_nodes", 0),
         "parallel_system_instances": len(profiles),
@@ -887,6 +893,18 @@ def build_summary(
         "supervisor_synthesis_token_usage": supervisor_synthesis_token_usage,
         "remote_calls": summary_profile.get("remote_calls", 0),
         "local_slm_calls": summary_profile.get("local_slm_calls", 0),
+        "edge_local_review_calls": summary_profile.get(
+            "edge_local_review_calls",
+            0,
+        ),
+        "edge_local_review_hits": summary_profile.get(
+            "edge_local_review_hits",
+            0,
+        ),
+        "edge_local_review_escalations": summary_profile.get(
+            "edge_local_review_escalations",
+            0,
+        ),
         "total_cases": total,
         "parse_successes": sum(1 for record in records if record.get("parse_ok")),
         "parse_failures": sum(1 for record in records if not record.get("parse_ok")),

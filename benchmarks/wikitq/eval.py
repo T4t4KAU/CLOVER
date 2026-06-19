@@ -547,6 +547,18 @@ def build_summary(
         "supervisor_synthesis_token_usage": supervisor_synthesis_token_usage,
         "remote_calls": summary_profile.get("remote_calls", 0),
         "local_slm_calls": summary_profile.get("local_slm_calls", 0),
+        "edge_local_review_calls": summary_profile.get(
+            "edge_local_review_calls",
+            0,
+        ),
+        "edge_local_review_hits": summary_profile.get(
+            "edge_local_review_hits",
+            0,
+        ),
+        "edge_local_review_escalations": summary_profile.get(
+            "edge_local_review_escalations",
+            0,
+        ),
         "total_cases": total,
         "parse_successes": sum(1 for record in records if record.get("parse_ok")),
         "parse_failures": sum(1 for record in records if not record.get("parse_ok")),

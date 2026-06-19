@@ -91,6 +91,7 @@ SYNTHESIZE_LLM_CONFIG="${CLOVER_SYNTHESIZE_LLM_CONFIG:-${REMOTE_LLM_CONFIG}}"
 LOCAL_MAX_TOKENS="${CLOVER_LOCAL_MAX_TOKENS:-512}"
 LOCAL_TIMEOUT_SECONDS="${CLOVER_LOCAL_TIMEOUT_SECONDS:-600}"
 AGENT_LOOP_MAX_ITERATIONS="${CLOVER_AGENT_LOOP_MAX_ITERATIONS:-8}"
+EDGE_REVIEW_MODE="${CLOVER_EDGE_REVIEW_MODE:-safe}"  # off | shadow | safe
 
 DTYPE="${CLOVER_VLLM_DTYPE:-auto}"
 MAX_MODEL_LEN="${CLOVER_VLLM_MAX_MODEL_LEN:-}"
@@ -107,6 +108,11 @@ MAX_PARALLEL_SLM_NODE_JOBS="${CLOVER_MAX_PARALLEL_SLM_NODE_JOBS:-32}"
 MAX_PARALLEL_SLM_SEQUENCES="${CLOVER_MAX_PARALLEL_SLM_SEQUENCES:-32}"
 MAX_PENDING_SLM_SEQUENCES="${CLOVER_MAX_PENDING_SLM_SEQUENCES:-64}"
 SLM_SCHEDULER="${CLOVER_SLM_SCHEDULER:-tptt}"
+
+if [[ ! "${EDGE_REVIEW_MODE}" =~ ^(off|shadow|safe)$ ]]; then
+  echo "Invalid CLOVER_EDGE_REVIEW_MODE: ${EDGE_REVIEW_MODE}" >&2
+  exit 1
+fi
 
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   echo "The current shell has no executable 'python' command." >&2
@@ -274,7 +280,7 @@ fi
 LOCAL_CONFIG="${TMP_DIR}/vllm_local_slm_config.json"
 "${PYTHON_BIN}" - "${LOCAL_CONFIG}" "${SERVED_MODEL_NAME}" "${BASE_URL}" \
   "${LOCAL_MAX_TOKENS}" "${LOCAL_TIMEOUT_SECONDS}" \
-  "${AGENT_LOOP_MAX_ITERATIONS}" <<'PY'
+  "${AGENT_LOOP_MAX_ITERATIONS}" "${EDGE_REVIEW_MODE}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -295,6 +301,11 @@ payload = {
     "http2": False,
     "trust_env": False,
     "agent_loop_max_iterations": int(sys.argv[6]),
+    "edge_review_mode": sys.argv[7],
+    "edge_review_max_actions": 4,
+    "edge_review_max_rows": 5,
+    "edge_review_max_columns": 5,
+    "edge_review_max_facts": 40,
     "tptt_coalesce_ms": 60,
     "tptt_prefix_tokens": 200,
     "max_tptt_leaf_sequences_per_tree": 128,
