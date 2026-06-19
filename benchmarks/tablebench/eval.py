@@ -13,7 +13,7 @@ from threading import Lock
 from typing import Any
 
 from benchmarks.costing import estimate_openai_text_cost, normalize_remote_token_usage
-from benchmarks.databench.static_tool_eval import (
+from benchmarks.utils import (
     display_path,
     format_error,
     json_ready,
