@@ -84,8 +84,8 @@ _AGENT_LOOP_TRACE_KEY = "agent_loop_trace"
 _CACHE_MISSING = object()
 
 # Maps normalised SQL text to the (evidence_key, DataFrame) produced by a
-# preceding sql action within the same action group.  Used to avoid
-# re-executing an identical seed SQL for a subsequent inspect/analyze action.
+# preceding sql action within the same action group. Used to avoid
+# re-executing an identical seed SQL for a subsequent analyze action.
 _PriorSqlResults = dict[str, tuple[str, pd.DataFrame]]
 
 
@@ -682,7 +682,7 @@ def _parse_single_table_command(
     if "final" in payload:
         raise SqlParseError("Remote table command must not include final")
     action_op = _payload_action_op(payload)
-    if action_op and action_op not in {"sql", "inspect", "analyze", "answer"}:
+    if action_op and action_op not in {"sql", "analyze", "answer"}:
         raise SqlParseError(f"Unsupported remote table action op: {action_op}")
     if action_op == "answer":
         if "a" not in payload:
@@ -796,7 +796,7 @@ def _normalize_table_actions(payload: dict[str, Any]) -> tuple[SupervisorAction,
             actions.extend(_normalize_one_table_action(item, label=f"acts[{index}]"))
         return tuple(actions)
     action_op = _payload_action_op(payload)
-    if action_op in {"sql", "inspect", "analyze"}:
+    if action_op in {"sql", "analyze"}:
         return tuple(_normalize_one_table_action(payload, label="action"))
     if any(key in payload for key in ("q", "sql", "sqls")):
         return tuple(_normalize_one_table_action({"op": "sql", **payload}, label="action"))
@@ -814,18 +814,6 @@ def _normalize_one_table_action(
         if not sqls:
             raise SqlParseError(f"{label} requires SQL q")
         return tuple(SupervisorAction(op="sql", q=sql) for sql in sqls)
-    if action_op == "inspect":
-        question = payload.get("q", payload.get("ask", payload.get("task")))
-        if not isinstance(question, str) or not question.strip():
-            raise SqlParseError(f"{label} inspect requires non-empty q")
-        seed = payload.get("seed")
-        seed_sql = None
-        if seed is not None and seed != "":
-            seed_sqls = _normalize_sqls(seed)
-            if len(seed_sqls) != 1:
-                raise SqlParseError(f"{label} inspect seed requires one SQL")
-            seed_sql = seed_sqls[0]
-        return (SupervisorAction(op="inspect", q=question.strip(), seed=seed_sql),)
     if action_op == "analyze":
         kind = payload.get("kind")
         if not isinstance(kind, str) or not kind.strip():
@@ -2271,24 +2259,6 @@ def _execute_table_action_group(
                     evidence_key = f"{task.answer_key}__a{index + 1}"
                     prior_sql[normalized_sql] = (evidence_key, sql_exec.frame)
             continue
-        if action.op == "inspect":
-            observations.append(
-                _execute_inspect_action_observation(
-                    task=task,
-                    action=action,
-                    index=index,
-                    table_cache=table_cache,
-                    local_slm_config=local_slm_config,
-                    local_slm_dispatcher=local_slm_dispatcher,
-                    max_parallel_execution_units=max_parallel_execution_units,
-                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-                    max_parallel_slm_sequences=max_parallel_slm_sequences,
-                    max_pending_slm_sequences=max_pending_slm_sequences,
-                    profiler=profiler,
-                    prior_sql=prior_sql,
-                )
-            )
-            continue
         if action.op == "analyze":
             observations.append(
                 _execute_analyze_action_observation(
@@ -2773,84 +2743,6 @@ def _restore_cached_frame(
         table_cache[cache_key] = previous
 
 
-def _inspect_action_physical_plan(
-    *,
-    task: TaskItem,
-    action: SupervisorAction,
-    action_index: int,
-    profiler: PipelineProfiler,
-    prior_sql: _PriorSqlResults | None = None,
-) -> tuple[dict[str, Any], str, str | None]:
-    """Return (physical_plan, evidence_key, cache_key).
-
-    *cache_key* is non-None when the seed SQL matched a prior sql action; the
-    caller must inject the cached DataFrame into ``table_cache`` under this
-    key before executing the plan.
-    """
-    evidence_key = f"{task.answer_key}__a{action_index + 1}"
-    source_ids = _task_source_ids(task)
-    if not source_ids:
-        raise ValueError("inspect action requires at least one source table")
-
-    cache_key: str | None = None
-
-    if action.seed:
-        # Check if the seed SQL was already executed by a preceding sql action.
-        prior_match = (prior_sql or {}).get(action.seed.strip())
-
-        if prior_match is not None:
-            prior_evidence_key, prior_frame = prior_match
-            physical_plan, cache_key = _physical_plan_from_cached_frame(
-                prior_frame, prior_evidence_key, task, action_index,
-            )
-            dependencies = [prior_evidence_key]
-        else:
-            seed_key = f"{evidence_key}__seed"
-            seed_dsl = _query_remote_dsl_with_answer(
-                task,
-                {"name": seed_key, "type": "table"},
-            )
-            logic_dag = parse_remote_sql_to_logic_dag(action.seed, seed_dsl)
-            physical_plan = _optimize_table_logic_dag(
-                logic_dag=logic_dag,
-                context=_batch_context(task),
-                local_dsl=_query_local_dsl(task),
-                profiler=profiler,
-                stage_name="action_group_inspect_seed_optimizer",
-                items=1,
-            )
-            dependencies = [seed_key]
-    else:
-        physical_plan = prepare_physical_plan_resources(
-            {
-                "task_type": task.task_type,
-                "resources": copy.deepcopy(task.local_dsl.get("sources", [])),
-                "resource_processing": [],
-                "nodes": [],
-                "edges": [],
-            }
-        )
-        dependencies = []
-
-    inspect_node = {
-        "id": f"A{action_index + 1}_inspect",
-        "op": "Inspect",
-        "dependency": dependencies,
-        "input": source_ids,
-        "params": {
-            "question": task.question,
-            "request": action.q,
-            "need": _inspect_action_need(task),
-        },
-        "output": evidence_key,
-        "output_type": "evidence",
-        "instruction": action.q or "",
-    }
-    physical_plan.setdefault("nodes", []).append(inspect_node)
-    physical_plan.setdefault("edges", [])
-    return physical_plan, evidence_key, cache_key
-
-
 def _analyze_action_physical_plan(
     *,
     task: TaskItem,
@@ -2928,37 +2820,6 @@ def _pre_format_table_dependency(physical_plan: dict[str, Any], output_key: str)
     return output_key
 
 
-def _inspect_action_need(task: TaskItem) -> dict[str, Any]:
-    payload: dict[str, Any] = {"answer_type": task.answer_type}
-    profile = table_reasoning_profile_from_dsl(task.local_dsl)
-    if profile:
-        payload["profile"] = profile
-    return payload
-
-
-def _task_source_ids(task: TaskItem) -> list[str]:
-    source_ids = []
-    for source in task.local_dsl.get("sources", []):
-        if isinstance(source, dict) and isinstance(source.get("id"), str):
-            source_ids.append(source["id"])
-    return source_ids
-
-
-def _inspect_action_iterations(
-    execution_result: ExecutionResult,
-    evidence_key: str,
-) -> int | None:
-    for trace in execution_result.traces:
-        if not isinstance(trace, dict):
-            continue
-        if trace.get("output") != evidence_key or trace.get("op") != "Inspect":
-            continue
-        agent_loop = trace.get("agent_loop")
-        if isinstance(agent_loop, dict) and isinstance(agent_loop.get("iterations"), int):
-            return agent_loop["iterations"]
-    return None
-
-
 def _execution_value_for_key(execution_result: ExecutionResult, key: str) -> Any:
     if isinstance(execution_result.answer, dict) and key in execution_result.answer:
         return execution_result.answer[key]
@@ -2967,82 +2828,6 @@ def _execution_value_for_key(execution_result: ExecutionResult, key: str) -> Any
     if "answer" in execution_result.outputs:
         return execution_result.outputs["answer"]
     return execution_result.answer
-
-
-def _execute_inspect_action_observation(
-    *,
-    task: TaskItem,
-    action: SupervisorAction,
-    index: int,
-    table_cache: dict[str, Any] | None,
-    local_slm_config: dict[str, Any] | None,
-    local_slm_dispatcher: LocalSlmSequenceDispatcher | None,
-    max_parallel_execution_units: int,
-    max_parallel_slm_node_jobs: int,
-    max_parallel_slm_sequences: int,
-    max_pending_slm_sequences: int,
-    profiler: PipelineProfiler,
-    prior_sql: _PriorSqlResults | None = None,
-) -> dict[str, Any]:
-    observation: dict[str, Any] = {
-        "i": index,
-        "op": "inspect",
-        "ok": False,
-        "q": action.q,
-    }
-    if action.seed:
-        observation["seed"] = action.seed
-    try:
-        with profiler.measure("action_group_inspect", items=1):
-            physical_plan, evidence_key, cache_key = _inspect_action_physical_plan(
-                task=task,
-                action=action,
-                action_index=index,
-                profiler=profiler,
-                prior_sql=prior_sql,
-            )
-            selected_table_cache, previous_cached_frame = _install_cached_frame(
-                table_cache,
-                cache_key,
-                _prior_sql_frame(prior_sql, action.seed),
-            )
-            try:
-                execution_result = _execute_table_physical_plan(
-                    physical_plan=physical_plan,
-                    table_cache=selected_table_cache,
-                    local_slm_config=local_slm_config,
-                    local_slm_dispatcher=local_slm_dispatcher,
-                    profiler=profiler,
-                    stage_name="action_group_inspect_executor",
-                    items=1,
-                    max_parallel_execution_units=max_parallel_execution_units,
-                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-                    max_parallel_slm_sequences=max_parallel_slm_sequences,
-                    max_pending_slm_sequences=max_pending_slm_sequences,
-                )
-            finally:
-                _restore_cached_frame(
-                    selected_table_cache,
-                    cache_key,
-                    previous_cached_frame,
-                )
-        _record_executor_trace_counters(profiler, execution_result)
-        if not execution_result.ok:
-            observation["err"] = execution_result.error or {
-                "type": "ExecutionFailed",
-                "message": "inspect action failed",
-            }
-            return observation
-        observation["ok"] = True
-        observation["ev"] = _execution_value_for_key(execution_result, evidence_key)
-        iterations = _inspect_action_iterations(execution_result, evidence_key)
-        if iterations is not None:
-            observation["it"] = iterations
-        profiler.increment("action_group_inspect_calls")
-        return observation
-    except Exception as exc:  # noqa: BLE001 - surfaced as action observation.
-        observation["err"] = _error_payload(exc)
-        return observation
 
 
 def _execute_analyze_action_observation(

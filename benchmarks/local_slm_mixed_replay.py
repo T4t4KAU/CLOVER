@@ -65,7 +65,7 @@ DEFAULT_TABLE_PROMPTS = (
     / "benchmark"
     / "runs"
     / "local_slm_replay"
-    / "tablebench_256case_evidence_prompts_current_template.json"
+    / "tablebench_256case_agent_prompts_current_template.json"
 )
 DEFAULT_FINANCEBENCH_ROOT = REPO_ROOT / "datasets" / "financebench"
 DEFAULT_REMOTE_CONFIG = REPO_ROOT / "model_config" / "doubao_remote_llm_config.json"
@@ -182,7 +182,9 @@ def _load_table_sequences(
                 "sequence_id": str(item.get("sequence_id") or f"table_{index + 1}"),
                 "prompt": prompt,
                 "leaf_key": list(item["leaf_key"]),
-                "prompt_kind": "table_evidence",
+                "prompt_kind": str(
+                    item.get("prompt_kind") or "table_reasoning_agent_loop"
+                ),
                 "prompt_tokens": int(
                     item.get("prompt_tokens")
                     or count_tokens(prompt, tokenizer_name=tokenizer_name)

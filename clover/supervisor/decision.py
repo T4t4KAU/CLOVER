@@ -52,7 +52,7 @@ def parse_supervisor_decision(remote_response: str) -> SupervisorDecision:
             "Legacy retry/new_sql/done protocol is not supported"
         )
     action_op = _action_op(payload)
-    if action_op and action_op not in {"sql", "inspect", "analyze", "answer"}:
+    if action_op and action_op not in {"sql", "analyze", "answer"}:
         raise SupervisorParseError(f"Unsupported Supervisor action op: {action_op}")
     if action_op == "answer":
         if "a" not in payload:
@@ -208,7 +208,7 @@ def _normalize_actions(payload: dict[str, Any]) -> tuple[SupervisorAction, ...]:
         return tuple(actions)
 
     action_op = _action_op(payload)
-    if action_op in {"sql", "inspect", "analyze"}:
+    if action_op in {"sql", "analyze"}:
         return tuple(_normalize_one_action(payload, label="action"))
 
     if any(key in payload for key in ("q", "sql", "sqls")):
@@ -224,24 +224,6 @@ def _normalize_one_action(payload: dict[str, Any], *, label: str) -> tuple[Super
         if not sqls:
             raise SupervisorParseError(f"{label} requires SQL q")
         return tuple(SupervisorAction(op="sql", q=sql) for sql in sqls)
-    if action_op == "inspect":
-        question = payload.get("q", payload.get("ask", payload.get("task")))
-        if not isinstance(question, str) or not question.strip():
-            raise SupervisorParseError(f"{label} inspect requires non-empty q")
-        seed = payload.get("seed")
-        normalized_seed = None
-        if seed is not None and seed != "":
-            seed_sqls = _normalize_sqls(seed)
-            if len(seed_sqls) != 1:
-                raise SupervisorParseError(f"{label} inspect seed requires one SQL")
-            normalized_seed = seed_sqls[0]
-        return (
-            SupervisorAction(
-                op="inspect",
-                q=question.strip(),
-                seed=normalized_seed,
-            ),
-        )
     if action_op == "analyze":
         kind = payload.get("kind")
         if not isinstance(kind, str) or not kind.strip():

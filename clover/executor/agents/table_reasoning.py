@@ -24,7 +24,6 @@ from clover.executor.python_function import (
     PythonFunctionParseError,
     parse_python_function_action,
 )
-from clover.executor.table_evidence import run_table_evidence_action
 from clover.tools import StaticToolError, build_static_tool_call
 from clover.tools.table_reasoning import TABLE_REASONING_STATIC_TOOLS
 from clover.tools.table_reasoning.pandas_backend import (
@@ -136,13 +135,6 @@ class TableReasoningNodeAgent(BaseNodeAgent):
             )
 
         op = node.get("op")
-        if op == "Inspect":
-            return FastPathDecision(
-                hit=False,
-                backend="local_slm",
-                miss_reason="requires_open_evidence",
-                miss_detail="Open table evidence requests require a local evidence worker.",
-            )
         if op not in TABLE_REASONING_STATIC_TOOLS:
             return FastPathDecision(
                 hit=False,
@@ -333,10 +325,6 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         trigger: str = "fast_path_miss",
         error: Exception | None = None,
     ) -> Any:
-        if self.node.get("op") == "Inspect":
-            result = _run_inspect_evidence_node(self)
-            self.agent_loop_trace = result.trace
-            return result.output
         use_empty_filter_repair = _use_empty_filter_repair_prompt(
             task_type=self.context.task_type,
             node=self.node,
@@ -412,38 +400,6 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         return result.output
 
 
-def _run_inspect_evidence_node(agent: TableReasoningNodeAgent) -> Any:
-    params = agent.node.get("params")
-    if not isinstance(params, dict):
-        params = {}
-    source_frames = _materialized_frames(
-        agent.context.materialize_sources(target="pandas").values()
-    )
-    view_frames = _materialized_frames(
-        agent.context.materialize_dependencies(target="pandas").values()
-    )
-    if not source_frames:
-        raise ValueError("Inspect node requires at least one source table")
-    request = _optional_text(params.get("request") or params.get("q"))
-    question = _optional_text(
-        params.get("question")
-        or params.get("q")
-        or agent.context.external_params.get("question")
-    )
-    if not question:
-        question = request or "Collect compact table evidence."
-    return run_table_evidence_action(
-        source_frames=source_frames,
-        view_frames=view_frames,
-        question=question,
-        request=request,
-        need=params.get("need"),
-        slm_config=agent.context.slm_config,
-        slm_dispatcher=agent.context.slm_dispatcher,
-        max_iterations=agent.context.agent_loop_max_iterations,
-    )
-
-
 def _materialized_frames(values: Any) -> list[pd.DataFrame]:
     frames: list[pd.DataFrame] = []
     for value in values:
@@ -462,10 +418,6 @@ def _materialized_frames(values: Any) -> list[pd.DataFrame]:
             elif isinstance(data, list):
                 frames.append(pd.DataFrame(data))
     return frames
-
-
-def _optional_text(value: Any) -> str:
-    return value.strip() if isinstance(value, str) and value.strip() else ""
 
 
 _EMPTY_OUTPUT_REPAIRABLE_OPS = frozenset({"Filter", "Project", "Derive", "Join"})

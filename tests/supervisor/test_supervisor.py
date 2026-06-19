@@ -38,7 +38,7 @@ class SupervisorTest(unittest.TestCase):
         self.assertIn("Evidence plan:", prompt)
         self.assertIn("Terminal answer:", prompt)
         self.assertIn("Choose one mutually exclusive action form", prompt)
-        self.assertIn("`acts` may contain only `sql`, `inspect`, or `analyze` actions", prompt)
+        self.assertIn("`acts` may contain only `sql` or `analyze` actions", prompt)
         self.assertIn('Never put `{"op":"answer"}` inside `acts`', prompt)
 
     def test_synthesis_payload_strips_evaluation_labels(self) -> None:
@@ -329,11 +329,12 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(explicit_answer.answer, "yes")
         action_group = parse_supervisor_decision(
             '{"acts":[{"op":"sql","q":"SELECT \\"year\\" FROM \\"table_1\\" LIMIT 5;"},'
-            '{"op":"inspect","q":"find trend evidence","seed":"SELECT \\"year\\", \\"sales\\" FROM \\"table_1\\";"}]}'
+            '{"op":"analyze","kind":"correlation",'
+            '"seed":"SELECT \\"year\\", \\"sales\\" FROM \\"table_1\\";"}]}'
         )
         self.assertFalse(action_group.done)
-        self.assertEqual([action.op for action in action_group.actions], ["sql", "inspect"])
-        self.assertEqual(action_group.actions[1].q, "find trend evidence")
+        self.assertEqual([action.op for action in action_group.actions], ["sql", "analyze"])
+        self.assertEqual(action_group.actions[1].kind, "correlation")
         self.assertEqual(
             action_group.actions[1].seed,
             'SELECT "year", "sales" FROM "table_1";',
@@ -362,6 +363,11 @@ class SupervisorTest(unittest.TestCase):
         with self.assertRaises(SupervisorParseError):
             parse_supervisor_decision(
                 '{"op":"ev","seed":"SELECT \\"year\\", \\"sales\\" FROM \\"table_1\\";"}'
+            )
+        with self.assertRaises(SupervisorParseError):
+            parse_supervisor_decision(
+                '{"op":"inspect","q":"find trend evidence",'
+                '"seed":"SELECT \\"year\\", \\"sales\\" FROM \\"table_1\\";"}'
             )
 
     def test_rejects_final_protocol_marker(self) -> None:

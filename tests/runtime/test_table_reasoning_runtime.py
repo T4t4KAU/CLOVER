@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from clover.executor import ExecutionResult
+from clover.optimizer import SqlParseError
 from clover.runtime import TableReasoningCaseSpec, run_table_reasoning_system
 from clover.runtime.table_reasoning import pipeline as table_pipeline
 from clover.runtime.table_reasoning.pipeline import _load_json_object
@@ -41,6 +42,16 @@ class TableReasoningRuntimeTest(unittest.TestCase):
 
         self.assertEqual(actions[0].op, "analyze")
         self.assertEqual(actions[0].seed, 'SELECT "year" FROM "table_1"')
+
+    def test_table_action_parser_rejects_removed_inspect_action(self) -> None:
+        with self.assertRaises(SqlParseError):
+            table_pipeline._normalize_table_actions(  # noqa: SLF001
+                {
+                    "op": "inspect",
+                    "q": "find trend evidence",
+                    "seed": 'SELECT "year" FROM "table_1";',
+                }
+            )
 
     def test_second_repair_requires_changed_failure_signature(self) -> None:
         stalled = SimpleNamespace(memory=[{"sig": "same"}, {"sig": "same"}])

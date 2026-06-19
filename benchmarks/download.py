@@ -53,6 +53,11 @@ from benchmarks.tablebench.download import (
     DEFAULT_SPLITS as TABLEBENCH_DEFAULT_SPLITS,
     download_and_convert_tablebench,
 )
+from benchmarks.tablefact.download import (
+    DEFAULT_SOURCE_ROOT as TABLEFACT_DEFAULT_SOURCE_ROOT,
+    DEFAULT_SPLITS as TABLEFACT_DEFAULT_SPLITS,
+    convert_tablefact_release,
+)
 from benchmarks.wikitq.download import (
     DEFAULT_SOURCE_ROOT as WIKITQ_DEFAULT_SOURCE_ROOT,
     DEFAULT_SPLIT as WIKITQ_DEFAULT_SPLIT,
@@ -88,6 +93,10 @@ def download_and_convert_benchmarks(
     wikitq_split: str = WIKITQ_DEFAULT_SPLIT,
     wikitq_case_ids: Sequence[str] | None = None,
     wikitq_limit_cases: int | None = None,
+    tablefact_source_root: str | Path = TABLEFACT_DEFAULT_SOURCE_ROOT,
+    tablefact_splits: Sequence[str] = TABLEFACT_DEFAULT_SPLITS,
+    tablefact_case_ids: Sequence[str] | None = None,
+    tablefact_limit_cases: int | None = None,
     financebench_download: bool = True,
     financebench_github_repo: str = FINANCEBENCH_DEFAULT_GITHUB_REPO,
     financebench_github_ref: str = FINANCEBENCH_DEFAULT_GITHUB_REF,
@@ -154,6 +163,16 @@ def download_and_convert_benchmarks(
             overwrite=overwrite,
         )
 
+    if "tablefact" in selected:
+        summaries["tablefact"] = convert_tablefact_release(
+            source_root=tablefact_source_root,
+            output_root=root / "tablefact",
+            splits=tuple(tablefact_splits),
+            case_ids=tablefact_case_ids,
+            limit_cases=tablefact_limit_cases,
+            overwrite=overwrite,
+        )
+
     if "financebench" in selected:
         summaries["financebench"] = download_and_convert_financebench(
             output_root=root / "financebench",
@@ -199,11 +218,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--dataset",
         action="append",
         default=None,
-        metavar="{databench,tablebench,wikitq,financebench,all}",
+        metavar="{databench,tablebench,wikitq,tablefact,financebench,all}",
         help=(
             "Dataset to prepare. Repeat for multiple datasets. Defaults to "
-            "databench, tablebench, and financebench. Choose wikitq explicitly "
-            "when a local WikiTableQuestions source root is available."
+            "databench, tablebench, and financebench. Choose wikitq or "
+            "tablefact explicitly when a local source root is available."
         ),
     )
     parser.add_argument(
@@ -305,6 +324,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     wikitq.add_argument("--wikitq-limit-cases", type=int, default=None)
 
+    tablefact = parser.add_argument_group("TableFact / TabFact")
+    tablefact.add_argument(
+        "--tablefact-source-root",
+        "--tabfact-source-root",
+        dest="tablefact_source_root",
+        default=str(TABLEFACT_DEFAULT_SOURCE_ROOT),
+    )
+    tablefact.add_argument(
+        "--tablefact-split",
+        "--tabfact-split",
+        dest="tablefact_splits",
+        action="append",
+        default=None,
+    )
+    tablefact.add_argument(
+        "--tablefact-case-id",
+        "--tabfact-case-id",
+        dest="tablefact_case_id",
+        action="append",
+        default=None,
+        help="TableFact case id to include. Repeat or comma-separate.",
+    )
+    tablefact.add_argument(
+        "--tablefact-limit-cases",
+        "--tabfact-limit-cases",
+        dest="tablefact_limit_cases",
+        type=int,
+        default=None,
+    )
+
     financebench = parser.add_argument_group("FinanceBench")
     financebench.add_argument(
         "--financebench-skip-download",
@@ -373,6 +422,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         wikitq_split=args.wikitq_split,
         wikitq_case_ids=_expand_csv_values(args.wikitq_case_id),
         wikitq_limit_cases=args.wikitq_limit_cases,
+        tablefact_source_root=args.tablefact_source_root,
+        tablefact_splits=tuple(args.tablefact_splits or TABLEFACT_DEFAULT_SPLITS),
+        tablefact_case_ids=_expand_csv_values(args.tablefact_case_id),
+        tablefact_limit_cases=args.tablefact_limit_cases,
         financebench_download=args.financebench_download,
         financebench_github_repo=args.financebench_github_repo,
         financebench_github_ref=args.financebench_github_ref,
@@ -394,9 +447,15 @@ def _normalize_datasets(datasets: Sequence[str]) -> set[str]:
     expanded = set(_expand_csv_values(datasets))
     if not expanded or "all" in expanded:
         expanded = {"databench", "tablebench", "financebench"}
-    unknown = sorted(expanded - {"databench", "tablebench", "wikitq", "financebench"})
+    unknown = sorted(
+        expanded
+        - {"databench", "tablebench", "wikitq", "tablefact", "tabfact", "financebench"}
+    )
     if unknown:
         raise ValueError(f"Unknown dataset selection: {unknown}")
+    if "tabfact" in expanded:
+        expanded.remove("tabfact")
+        expanded.add("tablefact")
     return expanded
 
 

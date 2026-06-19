@@ -174,7 +174,7 @@ def _with_legacy_tablebench_hints(
     case: dict[str, Any],
 ) -> dict[str, Any]:
     updated = dict(task_dsl)
-    hints = {}
+    hints = dict(case.get("hints") or {}) if isinstance(case.get("hints"), dict) else {}
     if case.get("qtype") is not None:
         hints["category"] = case["qtype"]
     if case.get("qsubtype") is not None:

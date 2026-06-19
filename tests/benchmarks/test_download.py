@@ -18,6 +18,9 @@ class BenchmarkDownloadScriptTest(unittest.TestCase):
             {"databench", "tablebench"},
         )
 
+    def test_dataset_selection_accepts_tabfact_alias(self) -> None:
+        self.assertEqual(_normalize_datasets(("tabfact",)), {"tablefact"})
+
     def test_tablebench_visualization_is_excluded_by_default(self) -> None:
         args = build_arg_parser().parse_args(["--dataset", "tablebench"])
         self.assertFalse(args.include_tablebench_visualization)
@@ -27,6 +30,20 @@ class BenchmarkDownloadScriptTest(unittest.TestCase):
             ["--dataset", "tablebench", "--dataset-source", "modelscope"]
         )
         self.assertEqual(args.dataset_source, "modelscope")
+
+    def test_tablefact_local_source_arguments(self) -> None:
+        args = build_arg_parser().parse_args(
+            [
+                "--dataset",
+                "tablefact",
+                "--tablefact-source-root",
+                "/tmp/Table-Fact-Checking",
+                "--tablefact-split",
+                "test",
+            ]
+        )
+        self.assertEqual(args.tablefact_source_root, "/tmp/Table-Fact-Checking")
+        self.assertEqual(args.tablefact_splits, ["test"])
 
 
 if __name__ == "__main__":

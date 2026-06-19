@@ -126,14 +126,6 @@ TABLE_BOOLEAN_REWRITE_PREDICATE_LEAF_KEY = (
     "contract:boolean",
     "mode:rewrite_predicate",
 )
-TABLE_EVIDENCE_LEAF_KEY = (
-    "agent:data",
-    "family:table_reasoning",
-    "interface:evidence_python",
-    "tool:pandas_env",
-    "contract:evidence_json",
-    "mode:initial",
-)
 DOCUMENT_WORKER_LEAF_KEY = (
     "agent:data",
     "family:document_reasoning",
@@ -297,29 +289,6 @@ NODE_AGENT_TEMPLATE_TREE = TemplateNode(
                                 ),
                             ),
                         ),
-                        TemplateNode(
-                            name="interface:evidence_python",
-                            template="table_reasoning/evidence.md",
-                            children=(
-                                TemplateNode(
-                                    name="tool:pandas_env",
-                                    children=(
-                                        TemplateNode(
-                                            name="contract:evidence_json",
-                                            children=(
-                                                TemplateNode(
-                                                    name="mode:initial",
-                                                    leaf_description=(
-                                                        "Table-local evidence "
-                                                        "collection with Python."
-                                                    ),
-                                                ),
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                            ),
-                        ),
                     ),
                 ),
                 TemplateNode(
@@ -448,26 +417,6 @@ def render_document_worker_prompt(
     )
 
 
-def render_table_evidence_prompt(
-    *,
-    prompt_code: str,
-    feedback: str,
-    iteration: int,
-    last_iteration: bool,
-) -> str:
-    """Render the table evidence collection prompt."""
-
-    return _render_templates(
-        template_paths_for_leaf_key(TABLE_EVIDENCE_LEAF_KEY),
-        context={
-            "prompt_code": prompt_code,
-            "feedback": feedback,
-            "iteration": iteration,
-            "last_iteration": last_iteration,
-        },
-    )
-
-
 def template_paths_for_task_type(task_type: str) -> tuple[str, ...]:
     return template_paths_for_leaf_key(_default_leaf_key_for_task_type(task_type))
 
@@ -487,8 +436,6 @@ def template_leaf_key_for_local_slm_prompt(
     del task_type
     if prompt_kind == "document_worker":
         return DOCUMENT_WORKER_LEAF_KEY
-    if prompt_kind == "table_evidence":
-        return TABLE_EVIDENCE_LEAF_KEY
     if prompt_kind == "table_reasoning_agent_loop":
         return _table_reasoning_leaf_key_for_node(node or {})
     if prompt_kind == "table_reasoning_empty_filter_repair":

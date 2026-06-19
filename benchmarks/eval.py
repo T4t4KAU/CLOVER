@@ -61,6 +61,7 @@ DEFAULT_REMOTE_LLM_CONFIG = REPO_ROOT / "model_config" / "remote_llm_config.json
 DEFAULT_SLM_CONFIG_PATH = REPO_ROOT / "model_config" / "local_slm_config.json"
 DEFAULT_FINANCEBENCH_EXAMPLES_ROOT = REPO_ROOT / "datasets" / "financebench"
 DEFAULT_WIKITQ_ROOT = REPO_ROOT / "datasets" / "wikitq"
+DEFAULT_TABLEFACT_ROOT = REPO_ROOT / "datasets" / "tablefact"
 DEFAULT_STATIC_TOOL_RUN_DIR = (
     REPO_ROOT / "benchmark" / "runs" / "databench_full_static_merged_20260527"
 )
@@ -75,6 +76,7 @@ SUPPORTED_EVAL_MODES = frozenset(
     {"closedBook", "inContext", "inContext_reverse", "oracle", "oracle_reverse"}
 )
 TABLEBENCH_INSTRUCTION_TYPES = frozenset({"DP", "TCoT", "PoT"})
+COT_DATASETS = frozenset({"tablebench", "tablefact", "wikitq"})
 SLM_SCHEDULER_TPTT = "tptt"
 SLM_SCHEDULER_CHOICES = frozenset({SLM_SCHEDULER_TPTT, "fifo"})
 REMOTE_LLM_ENV_PREFIXES = (
@@ -148,12 +150,61 @@ def _run_selected_mode(
     databench_root = args.databench_root.expanduser().resolve()
     tablebench_root = args.tablebench_root.expanduser().resolve()
     wikitq_root = args.wikitq_root.expanduser().resolve()
+    tablefact_root = args.tablefact_root.expanduser().resolve()
     financebench_root = args.financebench_root.expanduser().resolve()
     case_ids = set(args.case_id or [])
     qtypes = set(args.qtype or [])
     qsubtypes = set(args.qsubtype or [])
     run_name = output_dir.name
     progress_factory = None if args.no_progress else EvalProgressBar
+
+    if args.pure_cot_baseline:
+        from benchmarks.table_cot_baseline import run_table_cot_baseline
+
+        remote_config = _load_remote_config(args)
+        dataset_roots = {
+            "tablebench": tablebench_root,
+            "tablefact": tablefact_root,
+            "wikitq": wikitq_root,
+        }
+        split = None
+        subset = None
+        if args.cot_dataset == "wikitq":
+            split = args.wikitq_split
+        elif args.cot_dataset == "tablefact":
+            split = args.tablefact_split
+            subset = args.tablefact_subset
+        print_eval_startup_banner(
+            remote_config=remote_config,
+            local_slm_config=None,
+            workflow=f"pure_cot_{args.cot_dataset}",
+            remote_concurrency=args.max_workers,
+        )
+        preflight_model_api_checks(
+            args=args,
+            remote_config=remote_config,
+            local_slm_config=None,
+        )
+        return run_table_cot_baseline(
+            dataset=args.cot_dataset,
+            dataset_root=dataset_roots[args.cot_dataset],
+            output_dir=output_dir,
+            remote_config=remote_config,
+            max_cases=args.max_cases,
+            case_ids=case_ids,
+            dataset_id=args.dataset_id,
+            split=split,
+            subset=subset,
+            qtypes=qtypes,
+            qsubtypes=qsubtypes,
+            include_visualization=args.include_visualization,
+            sample_size=args.sample_size,
+            seed=args.seed,
+            max_workers=args.max_workers,
+            overwrite=args.overwrite,
+            remote_cost_model=args.remote_cost_model,
+            progress_factory=progress_factory,
+        )
 
     if args.financebench_eval:
         from benchmarks.financebench.eval import run_financebench_document_eval
@@ -373,6 +424,60 @@ def _run_selected_mode(
             progress_factory=progress_factory,
         )
 
+    if args.tablefact_eval:
+        from benchmarks.tablefact.eval import run_tablefact_eval
+
+        remote_config = _load_remote_config(args)
+        synthesize_config = _load_synthesize_config(args)
+        local_slm_config = _load_local_config(args)
+        print_eval_startup_banner(
+            remote_config=remote_config,
+            synthesize_config=synthesize_config,
+            local_slm_config=local_slm_config,
+            workflow="table_reasoning.tablefact",
+            remote_batch_size=args.remote_batch_size,
+            remote_concurrency=args.remote_concurrency,
+            max_parallel_execution_units=args.max_parallel_execution_units,
+            max_parallel_slm_node_jobs=args.max_parallel_slm_node_jobs,
+            max_parallel_slm_sequences=args.max_parallel_slm_sequences,
+            max_pending_slm_sequences=args.max_pending_slm_sequences,
+            slm_scheduler=args.slm_scheduler,
+        )
+        preflight_model_api_checks(
+            args=args,
+            remote_config=remote_config,
+            synthesize_config=synthesize_config,
+            local_slm_config=local_slm_config,
+        )
+        return run_tablefact_eval(
+            tablefact_root=tablefact_root,
+            output_dir=output_dir,
+            remote_config=remote_config,
+            synthesize_config=synthesize_config,
+            local_slm_config=local_slm_config,
+            max_cases=args.max_cases,
+            case_ids=case_ids,
+            dataset_id=args.dataset_id,
+            split=args.tablefact_split,
+            subset=args.tablefact_subset,
+            sample_size=args.sample_size,
+            seed=args.seed,
+            max_workers=args.max_workers,
+            max_retries=args.max_retries,
+            validation_mode=args.validation_mode,
+            remote_batch_size=args.remote_batch_size,
+            remote_concurrency=args.remote_concurrency,
+            max_parallel_execution_units=args.max_parallel_execution_units,
+            max_parallel_slm_node_jobs=args.max_parallel_slm_node_jobs,
+            max_parallel_slm_sequences=args.max_parallel_slm_sequences,
+            max_pending_slm_sequences=args.max_pending_slm_sequences,
+            eval_batch_size=args.eval_batch_size,
+            profile_baseline=args.profile_baseline,
+            remote_cost_model=args.remote_cost_model,
+            overwrite=args.overwrite,
+            progress_factory=progress_factory,
+        )
+
     if args.databench_eval:
         from benchmarks.databench.eval import run_databench_eval
 
@@ -501,6 +606,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--wikitq-root", type=Path, default=DEFAULT_WIKITQ_ROOT)
     parser.add_argument(
+        "--tablefact-root",
+        "--tabfact-root",
+        dest="tablefact_root",
+        type=Path,
+        default=DEFAULT_TABLEFACT_ROOT,
+    )
+    parser.add_argument(
         "--financebench-root",
         type=Path,
         default=REPO_ROOT / "datasets" / "financebench",
@@ -516,16 +628,42 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--qtype", action="append", default=[])
     parser.add_argument("--qsubtype", action="append", default=[])
     parser.add_argument("--wikitq-split", default=None)
+    parser.add_argument("--tablefact-split", "--tabfact-split", default="test")
+    parser.add_argument(
+        "--tablefact-subset",
+        "--tabfact-subset",
+        choices=("simple", "complex", "small"),
+        default=None,
+    )
     parser.add_argument("--include-visualization", action="store_true")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--run-name", default=None)
+    parser.add_argument(
+        "--cot-dataset",
+        choices=tuple(sorted(COT_DATASETS)),
+        default="tablebench",
+        help="Dataset used by --pure-cot-baseline.",
+    )
 
     modes = parser.add_argument_group("modes")
+    modes.add_argument(
+        "--pure-cot-baseline",
+        "--cot-baseline",
+        dest="pure_cot_baseline",
+        action="store_true",
+        help="Single-model table CoT baseline with no agents, tools, SQL, or code.",
+    )
     modes.add_argument("--eval", dest="databench_eval", action="store_true")
     modes.add_argument("--remote-only-baseline", action="store_true")
     modes.add_argument("--tablebench-eval", action="store_true")
     modes.add_argument("--tablebench-remote-only-baseline", action="store_true")
     modes.add_argument("--wikitq-eval", action="store_true")
+    modes.add_argument(
+        "--tablefact-eval",
+        "--tabfact-eval",
+        dest="tablefact_eval",
+        action="store_true",
+    )
     modes.add_argument("--financebench-eval", action="store_true")
     modes.add_argument("--financebench-remote-only-baseline", action="store_true")
     modes.add_argument("--static-tool-eval", action="store_true")
@@ -622,11 +760,13 @@ def _parse_args() -> argparse.Namespace:
 
 def _validate_modes(args: argparse.Namespace) -> None:
     selected = [
+        args.pure_cot_baseline,
         args.databench_eval,
         args.remote_only_baseline,
         args.tablebench_eval,
         args.tablebench_remote_only_baseline,
         args.wikitq_eval,
+        args.tablefact_eval,
         args.financebench_eval,
         args.financebench_remote_only_baseline,
         args.static_tool_eval,
@@ -637,12 +777,16 @@ def _validate_modes(args: argparse.Namespace) -> None:
 
 
 def _default_run_name(args: argparse.Namespace) -> str:
+    if args.pure_cot_baseline:
+        return f"{args.cot_dataset}_pure_cot_baseline"
     if args.tablebench_eval:
         return "tablebench_eval"
     if args.tablebench_remote_only_baseline:
         return f"tablebench_remote_only_baseline_{args.tablebench_instruction_type.lower()}"
     if args.wikitq_eval:
         return "wikitq_eval"
+    if args.tablefact_eval:
+        return "tablefact_eval"
     if args.financebench_eval:
         return "financebench_document_eval"
     if args.financebench_remote_only_baseline:

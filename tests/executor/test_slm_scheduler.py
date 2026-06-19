@@ -12,7 +12,6 @@ from clover.executor.agents.template_tree import (
     NODE_AGENT_SLM_TEMPLATE_LEAVES,
     TABLE_BOOLEAN_EMPTY_FILTER_REPAIR_LEAF_KEY,
     TABLE_BOOLEAN_LEAF_KEY,
-    TABLE_EVIDENCE_LEAF_KEY,
     TABLE_NUMBER_EMPTY_FILTER_REPAIR_LEAF_KEY,
     TABLE_NUMBER_LEAF_KEY,
     TABLE_STRING_EMPTY_FILTER_REPAIR_LEAF_KEY,
@@ -21,7 +20,6 @@ from clover.executor.agents.template_tree import (
     build_slm_template_scheduler_tree,
     collect_slm_template_leaf_specs,
     render_table_empty_filter_repair_prompt,
-    render_table_evidence_prompt,
     slm_template_leaf_specs,
     template_paths_for_leaf_key,
     template_paths_for_task_type,
@@ -166,18 +164,6 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
             ),
             tree.leaf_keys(),
         )
-        self.assertIn(
-            (
-                "agent:data",
-                "family:table_reasoning",
-                "interface:evidence_python",
-                "tool:pandas_env",
-                "contract:evidence_json",
-                "mode:initial",
-            ),
-            tree.leaf_keys(),
-        )
-
     def test_default_leaf_specs_are_derived_from_static_template_tree(self) -> None:
         _shared_prefix = (
             "common/root.md",
@@ -212,7 +198,6 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
             TABLE_NUMBER_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
             TABLE_STRING_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
             TABLE_BOOLEAN_LEAF_KEY: _shared_prefix + ("table_reasoning/agent_loop.md",),
-            TABLE_EVIDENCE_LEAF_KEY: ("table_reasoning/evidence.md",),
             DOCUMENT_WORKER_LEAF_KEY: ("document_reasoning/worker.md",),
         }
         for contract in ("number", "string", "boolean"):
@@ -239,19 +224,6 @@ class ThreadedPrefixTemplateTreeTest(unittest.TestCase):
             template_paths_for_task_type("document_reasoning"),
             expected_paths[DOCUMENT_WORKER_LEAF_KEY],
         )
-
-    def test_table_evidence_prompt_keeps_dynamic_payload_after_static_prefix(self) -> None:
-        prompt = render_table_evidence_prompt(
-            prompt_code="# EVIDENCE.py\npass",
-            feedback="none",
-            iteration=1,
-            last_iteration=False,
-        )
-
-        self.assertTrue(prompt.startswith("```python\n# DEBUG.py\n"))
-        self.assertLess(prompt.index("# DEBUG.py"), prompt.index("JSON only."))
-        self.assertLess(prompt.index("JSON only."), prompt.index("# EVIDENCE.py"))
-        self.assertLess(prompt.index("# EVIDENCE.py"), prompt.index("# FEEDBACK"))
 
     def test_empty_filter_repair_prompt_keeps_case_payload_at_tail(self) -> None:
         view = NodeView(

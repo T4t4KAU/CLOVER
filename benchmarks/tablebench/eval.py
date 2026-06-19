@@ -1083,13 +1083,18 @@ def list_tablebench_cases(tablebench_root: Path) -> list[dict[str, Any]]:
                     "answer_type": case.get("type"),
                     "qtype": case.get("qtype"),
                     "qsubtype": case.get("qsubtype"),
+                    "hints": case.get("hints"),
                 }
             )
     return cases
 
 
 def _tablebench_hints(sampled_case: dict[str, Any]) -> dict[str, Any]:
-    hints = {}
+    hints = (
+        dict(sampled_case.get("hints") or {})
+        if isinstance(sampled_case.get("hints"), dict)
+        else {}
+    )
     if sampled_case.get("qtype") is not None:
         hints["category"] = sampled_case["qtype"]
     if sampled_case.get("qsubtype") is not None:
