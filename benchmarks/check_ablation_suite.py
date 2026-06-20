@@ -17,6 +17,19 @@ VARIANT_FLAGS = {
         "enable_cloud_recovery": True,
         "enable_cloud_replan": True,
         "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
+        "enable_static_finalization": True,
+    },
+    "all_edge": {
+        "enable_edge_agent": True,
+        "enable_edge_repair": True,
+        "enable_terminal_edge_review": True,
+        "enable_contract_gate": True,
+        "enable_node_review": True,
+        "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
+        "enable_static_fast_path": False,
         "enable_static_finalization": True,
     },
     "no_edge": {
@@ -28,6 +41,7 @@ VARIANT_FLAGS = {
         "enable_cloud_recovery": True,
         "enable_cloud_replan": True,
         "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
         "enable_static_finalization": True,
     },
     "static": {
@@ -39,6 +53,7 @@ VARIANT_FLAGS = {
         "enable_cloud_recovery": True,
         "enable_cloud_replan": True,
         "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
         "enable_static_finalization": True,
     },
     "no_contract": {
@@ -50,6 +65,7 @@ VARIANT_FLAGS = {
         "enable_cloud_recovery": True,
         "enable_cloud_replan": True,
         "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
         "enable_static_finalization": True,
     },
     "end_review": {
@@ -61,6 +77,7 @@ VARIANT_FLAGS = {
         "enable_cloud_recovery": True,
         "enable_cloud_replan": True,
         "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
         "enable_static_finalization": True,
     },
     "one_shot": {
@@ -72,6 +89,7 @@ VARIANT_FLAGS = {
         "enable_cloud_recovery": True,
         "enable_cloud_replan": False,
         "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
         "enable_static_finalization": True,
     },
     "cloud_finalize": {
@@ -83,6 +101,7 @@ VARIANT_FLAGS = {
         "enable_cloud_recovery": True,
         "enable_cloud_replan": True,
         "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
         "enable_static_finalization": False,
     },
 }
@@ -164,6 +183,30 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
                 "all_edge_paths_disabled",
                 all(value == 0 for value in no_edge_activity.values()),
                 no_edge_activity,
+            )
+        if variant == "all_edge":
+            routed = int(counters.get("executor_all_edge_routed_nodes", 0) or 0)
+            comparisons = int(
+                counters.get("executor_all_edge_comparisons", 0) or 0
+            )
+            agreements = int(
+                counters.get("executor_all_edge_agreements", 0) or 0
+            )
+            disagreements = int(
+                counters.get("executor_all_edge_disagreements", 0) or 0
+            )
+            _record_check(
+                checks,
+                failures,
+                variant,
+                "static_fast_path_replaced_by_edge",
+                routed > 0 and comparisons == agreements + disagreements,
+                {
+                    "routed_nodes": routed,
+                    "comparisons": comparisons,
+                    "agreements": agreements,
+                    "disagreements": disagreements,
+                },
             )
         if variant in {"static", "end_review"}:
             edge_steps = int(counters.get("executor_local_slm_steps", 0) or 0)

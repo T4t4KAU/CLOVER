@@ -4762,6 +4762,25 @@ def _record_executor_trace_counters(
     profiler.increment("executor_fast_path_hits", execution_result.fast_path_hits)
     profiler.increment("executor_fast_path_misses", execution_result.fast_path_misses)
     for trace in execution_result.traces:
+        all_edge = trace.get("all_edge_routing")
+        if isinstance(all_edge, dict) and all_edge.get("routed") is True:
+            profiler.increment("executor_all_edge_routed_nodes")
+            if all_edge.get("edge_status") == "ok":
+                profiler.increment("executor_all_edge_edge_successes")
+            else:
+                profiler.increment("executor_all_edge_edge_failures")
+            if all_edge.get("static_reference_status") == "ok":
+                profiler.increment("executor_all_edge_static_reference_successes")
+            else:
+                profiler.increment("executor_all_edge_static_reference_failures")
+            agreement = all_edge.get("agreement")
+            if isinstance(agreement, bool):
+                profiler.increment("executor_all_edge_comparisons")
+                profiler.increment(
+                    "executor_all_edge_agreements"
+                    if agreement
+                    else "executor_all_edge_disagreements"
+                )
         if trace.get("fast_path_hit") is False:
             reason = _counter_suffix(trace.get("fast_path_miss_reason") or "unknown")
             profiler.increment(f"executor_fast_path_miss_{reason}")

@@ -12,6 +12,7 @@ from typing import Any, Sequence
 
 VARIANTS = (
     ("full", "Full CLOVER"),
+    ("all_edge", "All-Edge Routing"),
     ("no_edge", "w/o Edge Agent"),
     ("static", "w/o Edge Repair"),
     ("no_contract", "w/o Contract Verification"),
@@ -84,6 +85,10 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
         end_review=row_by_variant["end_review"],
         no_edge=row_by_variant["no_edge"],
     )
+    static_fast_path_ablation = _static_fast_path_ablation(
+        full=full_row,
+        all_edge=row_by_variant["all_edge"],
+    )
     case_diagnostics, discordant_cases = _build_case_diagnostics(
         variant_data=variant_data,
         full_cases=full_cases,
@@ -104,6 +109,7 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
         "variants": rows,
         "edge_substitution": edge_substitution,
         "edge_role_decomposition": edge_role_decomposition,
+        "static_fast_path_ablation": static_fast_path_ablation,
         "paired_case_diagnostics": {
             "all_cases_file": "ablation_case_diagnostics.jsonl",
             "discordant_cases_file": "ablation_discordant_cases.csv",
@@ -316,6 +322,75 @@ def render_markdown(report: dict[str, Any]) -> str:
             "End-only Review. These are paired mechanism contrasts, not additive "
             "causal guarantees when execution paths interact.",
             "",
+            "## Static fast-path ablation",
+            "",
+            "| Metric | Full CLOVER | All-Edge Routing | Δ All-Edge vs Full |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+    )
+    static_fast_path = report["static_fast_path_ablation"]
+    static_fast_path_rows = (
+        (
+            "Accuracy",
+            _format_percent(static_fast_path["full_accuracy"]),
+            _format_percent(static_fast_path["all_edge_accuracy"]),
+            _format_pp(static_fast_path["accuracy_delta_pp"]),
+        ),
+        (
+            "Cloud calls",
+            str(static_fast_path["full_cloud_calls"]),
+            str(static_fast_path["all_edge_cloud_calls"]),
+            _format_signed_integer(static_fast_path["cloud_call_delta"]),
+        ),
+        (
+            "Edge calls",
+            str(static_fast_path["full_edge_calls"]),
+            str(static_fast_path["all_edge_edge_calls"]),
+            _format_signed_integer(static_fast_path["edge_call_delta"]),
+        ),
+        (
+            "Edge tokens",
+            _format_integer(static_fast_path["full_edge_tokens"]),
+            _format_integer(static_fast_path["all_edge_edge_tokens"]),
+            _format_signed_integer(static_fast_path["edge_token_delta"]),
+        ),
+        (
+            "Total runtime",
+            _format_duration(static_fast_path["full_elapsed_seconds"]),
+            _format_duration(static_fast_path["all_edge_elapsed_seconds"]),
+            _format_signed_duration(static_fast_path["elapsed_seconds_delta"]),
+        ),
+        (
+            "Runtime failures",
+            str(static_fast_path["full_runtime_failures"]),
+            str(static_fast_path["all_edge_runtime_failures"]),
+            _format_signed_integer(static_fast_path["runtime_failure_delta"]),
+        ),
+        (
+            "Edge/static comparisons",
+            "---",
+            str(static_fast_path["comparisons"]),
+            "---",
+        ),
+        (
+            "Edge/static agreement",
+            "---",
+            _format_optional_percent(static_fast_path["agreement_rate"]),
+            (
+                f"{static_fast_path['agreements']} agree / "
+                f"{static_fast_path['disagreements']} disagree"
+            ),
+        ),
+    )
+    for metric, full_value, all_edge_value, change in static_fast_path_rows:
+        lines.append(
+            f"| {metric} | {full_value} | {all_edge_value} | {change} |"
+        )
+    lines.extend(
+        [
+            "",
+            static_fast_path["interpretation"],
+            "",
             "## Calls and cost",
             "",
             "| Experiment | Cloud calls | Δ Cloud calls | Cloud synthesis | Local SLM calls "
@@ -462,6 +537,30 @@ def _build_row(
         "node_edge_failures": int(counters.get("executor_edge_agent_failures", 0) or 0),
         "node_edge_fallbacks": int(counters.get("executor_edge_agent_fallbacks", 0) or 0),
         "node_edge_steps": int(counters.get("executor_local_slm_steps", 0) or 0),
+        "all_edge_routed_nodes": int(
+            counters.get("executor_all_edge_routed_nodes", 0) or 0
+        ),
+        "all_edge_edge_successes": int(
+            counters.get("executor_all_edge_edge_successes", 0) or 0
+        ),
+        "all_edge_edge_failures": int(
+            counters.get("executor_all_edge_edge_failures", 0) or 0
+        ),
+        "all_edge_static_reference_successes": int(
+            counters.get("executor_all_edge_static_reference_successes", 0) or 0
+        ),
+        "all_edge_static_reference_failures": int(
+            counters.get("executor_all_edge_static_reference_failures", 0) or 0
+        ),
+        "all_edge_comparisons": int(
+            counters.get("executor_all_edge_comparisons", 0) or 0
+        ),
+        "all_edge_agreements": int(
+            counters.get("executor_all_edge_agreements", 0) or 0
+        ),
+        "all_edge_disagreements": int(
+            counters.get("executor_all_edge_disagreements", 0) or 0
+        ),
         "node_review_calls": int(counters.get("executor_edge_local_reviews", 0) or 0),
         "contract_rejections": int(counters.get("executor_contract_rejections", 0) or 0),
         "terminal_edge_calls": int(summary.get("edge_local_review_calls", 0) or 0),
@@ -657,6 +756,84 @@ def _edge_role_decomposition(
     ]
 
 
+def _static_fast_path_ablation(
+    *,
+    full: dict[str, Any],
+    all_edge: dict[str, Any],
+) -> dict[str, Any]:
+    comparisons = int(all_edge["all_edge_comparisons"])
+    agreements = int(all_edge["all_edge_agreements"])
+    disagreements = int(all_edge["all_edge_disagreements"])
+    agreement_rate = (
+        agreements / comparisons
+        if comparisons
+        else None
+    )
+    edge_call_delta = all_edge["local_slm_calls"] - full["local_slm_calls"]
+    edge_token_delta = all_edge["local_slm_tokens"] - full["local_slm_tokens"]
+    elapsed_delta = all_edge["elapsed_seconds"] - full["elapsed_seconds"]
+    accuracy_delta_pp = (all_edge["accuracy"] - full["accuracy"]) * 100.0
+    if edge_call_delta > 0 and edge_token_delta > 0:
+        interpretation = (
+            "**Observed direction: static fast path reduces local inference.** "
+            f"Routing static-capable nodes through Edge added {edge_call_delta} "
+            f"Edge calls and {edge_token_delta:,} Edge tokens. "
+        )
+    else:
+        interpretation = (
+            "**Observed direction: local-overhead result is inconclusive.** "
+            "All-Edge did not increase both Edge calls and Edge tokens. "
+        )
+    if agreement_rate is not None:
+        interpretation += (
+            f"Accepted Edge outputs matched the static reference in "
+            f"{agreements}/{comparisons} comparisons "
+            f"({agreement_rate * 100:.1f}%); the remaining {disagreements} "
+            "mismatches quantify uncertainty introduced on deterministic nodes."
+        )
+    else:
+        interpretation += (
+            "No accepted Edge/static output pairs were available for agreement "
+            "measurement."
+        )
+    return {
+        "full_accuracy": full["accuracy"],
+        "all_edge_accuracy": all_edge["accuracy"],
+        "accuracy_delta_pp": accuracy_delta_pp,
+        "full_cloud_calls": full["remote_calls"],
+        "all_edge_cloud_calls": all_edge["remote_calls"],
+        "cloud_call_delta": all_edge["remote_calls"] - full["remote_calls"],
+        "full_edge_calls": full["local_slm_calls"],
+        "all_edge_edge_calls": all_edge["local_slm_calls"],
+        "edge_call_delta": edge_call_delta,
+        "full_edge_tokens": full["local_slm_tokens"],
+        "all_edge_edge_tokens": all_edge["local_slm_tokens"],
+        "edge_token_delta": edge_token_delta,
+        "full_elapsed_seconds": full["elapsed_seconds"],
+        "all_edge_elapsed_seconds": all_edge["elapsed_seconds"],
+        "elapsed_seconds_delta": elapsed_delta,
+        "full_runtime_failures": full["runtime_failures"],
+        "all_edge_runtime_failures": all_edge["runtime_failures"],
+        "runtime_failure_delta": (
+            all_edge["runtime_failures"] - full["runtime_failures"]
+        ),
+        "routed_nodes": all_edge["all_edge_routed_nodes"],
+        "edge_successes": all_edge["all_edge_edge_successes"],
+        "edge_failures": all_edge["all_edge_edge_failures"],
+        "static_reference_successes": all_edge[
+            "all_edge_static_reference_successes"
+        ],
+        "static_reference_failures": all_edge[
+            "all_edge_static_reference_failures"
+        ],
+        "comparisons": comparisons,
+        "agreements": agreements,
+        "disagreements": disagreements,
+        "agreement_rate": agreement_rate,
+        "interpretation": interpretation,
+    }
+
+
 def _case_results(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
     results: dict[tuple[str, str], dict[str, Any]] = {}
     for record in _read_jsonl(path):
@@ -756,6 +933,15 @@ def _format_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
     return f"{seconds / 60:.1f}m"
+
+
+def _format_signed_duration(seconds: float) -> str:
+    sign = "+" if seconds >= 0 else "-"
+    return sign + _format_duration(abs(seconds))
+
+
+def _format_optional_percent(value: float | None) -> str:
+    return "---" if value is None else _format_percent(value)
 
 
 def _format_case_ids(case_ids: list[str], *, limit: int = 8) -> str:

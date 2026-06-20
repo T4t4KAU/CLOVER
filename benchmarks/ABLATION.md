@@ -7,7 +7,7 @@
 
 抽样仅依据数据集元信息、问题文本、答案类型、表格规模和单元格表示形式，
 不读取模型预测、运行轨迹或正确性结果。默认 manifest 位于
-`benchmarks/ablation_cases/`，七个变体严格复用同一 case 集合。
+`benchmarks/ablation_cases/`，八个变体严格复用同一 case 集合。
 
 脚本支持两种互补的固定子集：
 
@@ -34,15 +34,21 @@ bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
 bash benchmarks/run_tablebench_ablation.sh /path/to/edge-model
 ```
 
-每套脚本运行以下七个变体：
+每套脚本运行以下八个变体：
 
 1. `full`：完整 CLOVER；
-2. `no_edge`：关闭 Edge Agent、节点修复、节点复核与末端 Edge Review，其他静态和 Cloud 能力与 Full 保持一致；
-3. `static`：仅关闭节点级 Edge Repair，保留末端 Edge Review；
-4. `no_contract`：关闭 Edge Agent 输出契约验证；
-5. `end_review`：关闭节点级 Edge Repair 和 Node Review，只保留末端 Edge Review；
-6. `one_shot`：保留 Cloud 最终综合，但禁止 Cloud 生成后续 SQL/DAG action；
-7. `cloud_finalize`：关闭静态与末端 Edge 最终化，统一交给 Cloud 综合。
+2. `all_edge`：关闭 Static Fast Path，将所有静态可执行节点交给 Edge Agent；
+3. `no_edge`：关闭 Edge Agent、节点修复、节点复核与末端 Edge Review，其他静态和 Cloud 能力与 Full 保持一致；
+4. `static`：仅关闭节点级 Edge Repair，保留末端 Edge Review；
+5. `no_contract`：关闭 Edge Agent 输出契约验证；
+6. `end_review`：关闭节点级 Edge Repair 和 Node Review，只保留末端 Edge Review；
+7. `one_shot`：保留 Cloud 最终综合，但禁止 Cloud 生成后续 SQL/DAG action；
+8. `cloud_finalize`：关闭静态与末端 Edge 最终化，统一交给 Cloud 综合。
+
+`all_edge` 中，Edge 输出直接进入后续 DAG；静态执行结果仅作为 shadow
+reference 计算一致率，不会在不一致时替换 Edge 输出。汇总报告额外给出
+Accuracy、Cloud calls、Edge calls、Edge tokens、总运行时间、Runtime
+failures，以及 Edge 输出与静态参照结果的一致率。
 
 `no_edge` 是验证 Edge 是否真正替代 Cloud 的无混杂对照组。它保留静态最终化、
 Cloud synthesis 和 Cloud replan，因此与 Full 之间的 Cloud 调用差异可归因于
@@ -60,11 +66,11 @@ CLOVER_EDGE_REVIEW_PROACTIVE=true
 静态或 Cloud 路径。包含最高、排序、计数或跨行比较的列表问题不会进入主动
 Edge 整理，而是保留在确定性或 Cloud 路径。
 
-为了减少顺序偏差，默认使用 seed 对七个变体进行可复现打乱，实际顺序记录在
+为了减少顺序偏差，默认使用 seed 对八个变体进行可复现打乱，实际顺序记录在
 `variant_order.txt`。可通过以下变量指定固定顺序：
 
 ```bash
-CLOVER_ABLATION_VARIANT_ORDER=full,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
+CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
 ```
 
 同一套实验只启动一次 vLLM 服务。每个变体开始前会执行一次不计入评测时间的
@@ -76,7 +82,7 @@ benchmark/runs/<dataset>_ablation_<timestamp>/
 
 目录中的 `sanity_check.json` 会校验固定 case 集、细粒度 feature flags、
 `w/o Cloud Replan` 的重规划计数，以及 Cloud Finalization 的终止路径。
-七个变体结束后，脚本会在终端直接打印汇总表，并生成：
+八个变体结束后，脚本会在终端直接打印汇总表，并生成：
 
 ```text
 ablation_summary.md
@@ -105,11 +111,11 @@ ablation_case_diagnostics.jsonl
 ablation_discordant_cases.csv
 ```
 
-前者保存每个 case 在七个变体下的正确性、答案来源、retry 和错误类型；后者只
+前者保存每个 case 在八个变体下的正确性、答案来源、retry 和错误类型；后者只
 保存 Full 与变体结果不同的配对 case，便于直接检查 Contract Verification 和
 Cloud Replan 为什么出现反向增益。
 
-如果七组实验已经跑完，只需要补生成汇总而不重跑：
+如果八组实验已经跑完，只需要补生成汇总而不重跑：
 
 ```bash
 python -m benchmarks.summarize_ablation_suite \

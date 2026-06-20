@@ -34,7 +34,7 @@ USER_ABLATION_SELECTION_POLICY="edge_opportunity"  # representative | edge_oppor
 USER_MAX_RETRIES="1"
 USER_VALIDATE_ONLY="false"         # true: validate settings/cases without running
 USER_VARIANT_ORDER=""              # Empty: deterministic shuffle using the seed
-                                    # Or: full,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
+                                    # Or: full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
 
 # Optional explicit case IDs. Leave this empty to use the bundled fixed
 # 100-case manifest in benchmarks/ablation_cases.
@@ -58,10 +58,11 @@ Usage:
 DATASET:
   tablebench | wikitq
 
-This runs seven variants on one fixed 100-case manifest:
-  full, no_edge, static, no_contract, end_review, one_shot, cloud_finalize
+This runs eight variants on one fixed 100-case manifest:
+  full, all_edge, no_edge, static, no_contract, end_review, one_shot, cloud_finalize
 
 The internal names map to:
+  all_edge      = All-Edge Routing / w/o Static Fast Path
   no_edge        = w/o Edge Agent (all local Edge paths disabled)
   static         = w/o Edge Repair (terminal Edge review remains enabled)
   end_review     = end-only Edge review
@@ -83,7 +84,7 @@ Useful environment variables:
   CLOVER_ABLATION_REGENERATE_MANIFEST=1
   CLOVER_ABLATION_OUTPUT_ROOT=/path/to/output
   CLOVER_EDGE_MODEL_PATH=/path/to/model
-  CLOVER_ABLATION_VARIANT_ORDER=full,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
+  CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
   CLOVER_VLLM_WARMUP=true
   CLOVER_EDGE_REVIEW_PROACTIVE=true
 EOF
@@ -358,7 +359,8 @@ run_variant() {
   local node_review="$6"
   local cloud_replan="$7"
   local cloud_synthesis="$8"
-  local static_finalization="$9"
+  local static_fast_path="$9"
+  local static_finalization="${10}"
   local edge_review_mode="safe"
   if [[ "${edge_agent}" != "true" || "${terminal_edge_review}" != "true" ]]; then
     edge_review_mode="off"
@@ -374,6 +376,7 @@ run_variant() {
   CLOVER_ENABLE_CLOUD_RECOVERY=true \
   CLOVER_ENABLE_CLOUD_REPLAN="${cloud_replan}" \
   CLOVER_ENABLE_CLOUD_SYNTHESIS="${cloud_synthesis}" \
+  CLOVER_ENABLE_STATIC_FAST_PATH="${static_fast_path}" \
   CLOVER_ENABLE_STATIC_FINALIZATION="${static_finalization}" \
   CLOVER_EDGE_REVIEW_MODE="${edge_review_mode}" \
   CLOVER_VLLM_PERSIST_SERVER=true \
@@ -396,25 +399,28 @@ run_variant() {
 run_named_variant() {
   case "$1" in
     full)
-      run_variant full true true true true true true true true
+      run_variant full true true true true true true true true true
+      ;;
+    all_edge)
+      run_variant all_edge true true true true true true true false true
       ;;
     no_edge)
-      run_variant no_edge false false false true false true true true
+      run_variant no_edge false false false true false true true true true
       ;;
     static)
-      run_variant static true false true true true true true true
+      run_variant static true false true true true true true true true
       ;;
     no_contract)
-      run_variant no_contract true true true false true true true true
+      run_variant no_contract true true true false true true true true true
       ;;
     end_review)
-      run_variant end_review true false true true false true true true
+      run_variant end_review true false true true false true true true true
       ;;
     one_shot)
-      run_variant one_shot true true true true true false true true
+      run_variant one_shot true true true true true false true true true
       ;;
     cloud_finalize)
-      run_variant cloud_finalize true true false true true true true false
+      run_variant cloud_finalize true true false true true true true true false
       ;;
     *)
       echo "Unknown ablation variant: $1" >&2
@@ -443,6 +449,7 @@ import sys
 
 variants = [
     "full",
+    "all_edge",
     "no_edge",
     "static",
     "no_contract",
@@ -461,6 +468,7 @@ import sys
 
 expected = {
     "full",
+    "all_edge",
     "no_edge",
     "static",
     "no_contract",

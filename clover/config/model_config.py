@@ -58,6 +58,7 @@ BOOLEAN_FIELDS = {
     "enable_edge_agent",
     "enable_edge_repair",
     "enable_node_review",
+    "enable_static_fast_path",
     "enable_static_finalization",
     "enable_terminal_edge_review",
     "edge_review_proactive",

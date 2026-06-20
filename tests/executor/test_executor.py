@@ -111,6 +111,53 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(result.answer, {"status": "complete", "output": "ok"})
         self.assertEqual(result.traces[0]["agent_loop"]["iterations"], 1)
 
+    def test_all_edge_routing_replaces_static_outputs_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text("value\n1\n2\n3\n", encoding="utf-8")
+            client = _FakeChatClient(
+                [
+                    '{"s":"def solve(df):\\n    return df.copy()"}',
+                    (
+                        '{"s":"def solve(df):\\n'
+                        "    return pd.DataFrame({'answer': [99]})\"}"
+                    ),
+                    (
+                        '{"s":"def solve(df):\\n'
+                        "    return int(df['answer'].iloc[0])\"}"
+                    ),
+                ]
+            )
+
+            result = _execute_plan(
+                _count_plan(table_path),
+                slm_config={
+                    "api_type": "chat_completions",
+                    "model": "fake-slm",
+                    "temperature": 0,
+                    "enable_static_fast_path": False,
+                },
+                slm_client=client,
+                agent_loop_max_iterations=1,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.answer, 99)
+        self.assertEqual(result.fast_path_hits, 0)
+        self.assertEqual(result.fast_path_misses, 3)
+        audits = [trace["all_edge_routing"] for trace in result.traces]
+        self.assertEqual([audit["agreement"] for audit in audits], [True, False, True])
+        self.assertTrue(all(audit["static_reference_status"] == "ok" for audit in audits))
+        self.assertTrue(
+            all(
+                trace["fast_path_miss_reason"] == "static_fast_path_disabled"
+                for trace in result.traces
+            )
+        )
+        first_prompt = client.chat.completions.requests[0]["messages"][-1]["content"]
+        self.assertIn("All-Edge ablation instruction", first_prompt)
+        self.assertIn("Do not call a prebuilt deterministic table tool", first_prompt)
+
     def test_fast_path_execution_error_recovers_with_agent_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"

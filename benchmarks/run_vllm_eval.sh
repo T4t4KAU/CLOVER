@@ -130,6 +130,7 @@ ENABLE_NODE_REVIEW="${CLOVER_ENABLE_NODE_REVIEW:-true}"
 ENABLE_CLOUD_RECOVERY="${CLOVER_ENABLE_CLOUD_RECOVERY:-true}"
 ENABLE_CLOUD_REPLAN="${CLOVER_ENABLE_CLOUD_REPLAN:-${ENABLE_CLOUD_RECOVERY}}"
 ENABLE_CLOUD_SYNTHESIS="${CLOVER_ENABLE_CLOUD_SYNTHESIS:-${ENABLE_CLOUD_RECOVERY}}"
+ENABLE_STATIC_FAST_PATH="${CLOVER_ENABLE_STATIC_FAST_PATH:-true}"
 ENABLE_STATIC_FINALIZATION="${CLOVER_ENABLE_STATIC_FINALIZATION:-true}"
 
 DTYPE="${CLOVER_VLLM_DTYPE:-auto}"
@@ -175,6 +176,7 @@ ENABLE_NODE_REVIEW="$(normalize_bool "${ENABLE_NODE_REVIEW}")"
 ENABLE_CLOUD_RECOVERY="$(normalize_bool "${ENABLE_CLOUD_RECOVERY}")"
 ENABLE_CLOUD_REPLAN="$(normalize_bool "${ENABLE_CLOUD_REPLAN}")"
 ENABLE_CLOUD_SYNTHESIS="$(normalize_bool "${ENABLE_CLOUD_SYNTHESIS}")"
+ENABLE_STATIC_FAST_PATH="$(normalize_bool "${ENABLE_STATIC_FAST_PATH}")"
 ENABLE_STATIC_FINALIZATION="$(normalize_bool "${ENABLE_STATIC_FINALIZATION}")"
 EDGE_REVIEW_PROACTIVE="$(normalize_bool "${EDGE_REVIEW_PROACTIVE}")"
 PERSIST_SERVER="$(normalize_bool "${PERSIST_SERVER}")"
@@ -450,7 +452,7 @@ LOCAL_CONFIG="${TMP_DIR}/vllm_local_slm_config.json"
   "${ENABLE_TERMINAL_EDGE_REVIEW}" "${ENABLE_CONTRACT_GATE}" \
   "${ENABLE_NODE_REVIEW}" "${ENABLE_CLOUD_RECOVERY}" \
   "${ENABLE_CLOUD_REPLAN}" "${ENABLE_CLOUD_SYNTHESIS}" \
-  "${ENABLE_STATIC_FINALIZATION}" <<'PY'
+  "${ENABLE_STATIC_FAST_PATH}" "${ENABLE_STATIC_FINALIZATION}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -482,7 +484,8 @@ payload = {
     "enable_cloud_recovery": sys.argv[15] == "true",
     "enable_cloud_replan": sys.argv[16] == "true",
     "enable_cloud_synthesis": sys.argv[17] == "true",
-    "enable_static_finalization": sys.argv[18] == "true",
+    "enable_static_fast_path": sys.argv[18] == "true",
+    "enable_static_finalization": sys.argv[19] == "true",
     "edge_review_max_actions": 4,
     "edge_review_max_rows": 5,
     "edge_review_max_columns": 5,

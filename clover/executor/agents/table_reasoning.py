@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
 import pandas as pd
+from pandas.testing import assert_frame_equal
 
 from clover.config import (
     ENABLE_EDGE_REPAIR,
     ENABLE_NODE_REVIEW,
+    ENABLE_STATIC_FAST_PATH,
     runtime_feature_enabled,
 )
 from clover.executor.agents.base import (
@@ -29,6 +32,7 @@ from clover.executor.python_function import (
     PythonFunctionParseError,
     parse_python_function_action,
 )
+from clover.executor.result import NodeExecutionRecord, json_ready, summarize_output
 from clover.task_types import (
     TABLE_REASONING_ANALYZE_TASK_TYPE,
     TABLE_REASONING_QUERY_TASK_TYPE,
@@ -56,6 +60,39 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         super().__init__(*args, **kwargs)
         self._mismatch_analysis: dict[str, Any] | None = None
         self._dependency_frame_cache: list[pd.DataFrame] | None = None
+        self._static_reference_decision: FastPathDecision | None = None
+
+    def run(self) -> NodeExecutionRecord:
+        """Run one node, optionally replacing the Static Fast Path with Edge."""
+
+        self._static_reference_decision = None
+        record = super().run()
+        decision = self._static_reference_decision
+        if decision is None:
+            return record
+
+        audit: dict[str, Any] = {
+            "routed": True,
+            "edge_status": "ok" if record.ok else "failed",
+            "static_reference_status": "not_run",
+            "agreement": None,
+        }
+        try:
+            static_output = self.execute_fast_path(decision)
+        except Exception as exc:  # noqa: BLE001 - reference execution is diagnostic only.
+            audit["static_reference_status"] = "failed"
+            audit["static_reference_error"] = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+        else:
+            audit["static_reference_status"] = "ok"
+            audit["static_output_summary"] = summarize_output(static_output)
+            if record.ok:
+                audit["edge_output_summary"] = summarize_output(record.output)
+                audit["agreement"] = _outputs_equivalent(record.output, static_output)
+        record.trace["all_edge_routing"] = audit
+        return record
 
     def _compute_mismatch_analysis(self) -> dict[str, Any] | None:
         """Compute mismatch analysis for the current Filter node.
@@ -195,11 +232,29 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         # backend should consume live upstream objects, not deep-copied tables.
         call["upstream_outputs"] = dict(self.context.upstream_outputs)
 
-        return FastPathDecision(
+        decision = FastPathDecision(
             hit=True,
             call=call,
             tool=call.get("tool"),
             backend=self.backend_name,
+        )
+        if runtime_feature_enabled(
+            self.context.slm_config,
+            ENABLE_STATIC_FAST_PATH,
+        ):
+            return decision
+
+        # All-Edge ablation: keep the deterministic decision only as a shadow
+        # reference for agreement measurement. The Edge output remains the
+        # actual DAG artifact, even when it disagrees with this reference.
+        self._static_reference_decision = decision
+        return FastPathDecision(
+            hit=False,
+            backend=self.backend_name,
+            miss_reason="static_fast_path_disabled",
+            miss_detail=(
+                "All-Edge Routing sends this static-capable node to the Edge Agent"
+            ),
         )
 
     def execute_fast_path(self, decision: FastPathDecision) -> Any:
@@ -398,10 +453,14 @@ class TableReasoningNodeAgent(BaseNodeAgent):
                             node=self.node,
                         )
                         if use_empty_filter_repair
-                        else render_agent_loop_prompt(
+                        else _render_initial_agent_prompt(
                             task_type=self.context.task_type,
                             view=view,
                             iteration=iteration,
+                            all_edge=(
+                                decision.miss_reason
+                                == "static_fast_path_disabled"
+                            ),
                         )
                     )
                 ),
@@ -413,6 +472,79 @@ class TableReasoningNodeAgent(BaseNodeAgent):
             raise
         self.agent_loop_trace = result.trace
         return result.output
+
+
+def _render_initial_agent_prompt(
+    *,
+    task_type: str,
+    view: Any,
+    iteration: int,
+    all_edge: bool,
+) -> str:
+    prompt = render_agent_loop_prompt(
+        task_type=task_type,
+        view=view,
+        iteration=iteration,
+    )
+    if not all_edge:
+        return prompt
+    return (
+        prompt
+        + "\n\nAll-Edge ablation instruction:\n"
+        + "- Implement the exact node operation shown in the file payload.\n"
+        + "- Do not reinterpret, repair, broaden, or revise the Cloud plan.\n"
+        + "- Use only the solve-function arguments and return a contract-valid result.\n"
+        + "- Do not call a prebuilt deterministic table tool.\n"
+    )
+
+
+def _outputs_equivalent(edge_output: Any, static_output: Any) -> bool:
+    edge_frame = _output_frame(edge_output)
+    static_frame = _output_frame(static_output)
+    if edge_frame is not None or static_frame is not None:
+        if edge_frame is None or static_frame is None:
+            return False
+        try:
+            assert_frame_equal(
+                edge_frame.reset_index(drop=True),
+                static_frame.reset_index(drop=True),
+                check_dtype=False,
+                check_exact=False,
+                rtol=1e-9,
+                atol=1e-9,
+            )
+        except AssertionError:
+            return False
+        return True
+    return _values_equivalent(edge_output, static_output)
+
+
+def _output_frame(value: Any) -> pd.DataFrame | None:
+    if isinstance(value, PandasTable):
+        return value.frame
+    if isinstance(value, pd.DataFrame):
+        return value
+    frame = getattr(value, "frame", None)
+    return frame if isinstance(frame, pd.DataFrame) else None
+
+
+def _values_equivalent(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left is right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        if pd.isna(left) and pd.isna(right):
+            return True
+        return math.isclose(float(left), float(right), rel_tol=1e-9, abs_tol=1e-9)
+    if isinstance(left, dict) and isinstance(right, dict):
+        return set(left) == set(right) and all(
+            _values_equivalent(left[key], right[key]) for key in left
+        )
+    if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+        return len(left) == len(right) and all(
+            _values_equivalent(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return json_ready(left) == json_ready(right)
 
 
 def _materialized_frames(values: Any) -> list[pd.DataFrame]:

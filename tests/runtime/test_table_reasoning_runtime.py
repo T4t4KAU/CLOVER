@@ -675,6 +675,12 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                     "fast_path_hit": False,
                     "fast_path_miss_reason": "unsupported_op",
                     "agent_loop_trigger": "fast_path_miss",
+                    "all_edge_routing": {
+                        "routed": True,
+                        "edge_status": "ok",
+                        "static_reference_status": "ok",
+                        "agreement": False,
+                    },
                     "agent_loop": {
                         "steps": [
                             {
@@ -713,6 +719,14 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(counters["local_slm_output_tokens"], 5)
         self.assertEqual(counters["local_slm_reasoning_tokens"], 1)
         self.assertEqual(counters["local_slm_total_tokens"], 17)
+        self.assertEqual(counters["executor_all_edge_routed_nodes"], 1)
+        self.assertEqual(counters["executor_all_edge_edge_successes"], 1)
+        self.assertEqual(
+            counters["executor_all_edge_static_reference_successes"],
+            1,
+        )
+        self.assertEqual(counters["executor_all_edge_comparisons"], 1)
+        self.assertEqual(counters["executor_all_edge_disagreements"], 1)
         self.assertEqual(profile["summary"]["local_slm_calls"], 2)
         self.assertEqual(
             profile["summary"]["local_slm_token_usage"],

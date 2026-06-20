@@ -12,6 +12,7 @@ ENABLE_NODE_REVIEW = "enable_node_review"
 ENABLE_CLOUD_RECOVERY = "enable_cloud_recovery"
 ENABLE_CLOUD_REPLAN = "enable_cloud_replan"
 ENABLE_CLOUD_SYNTHESIS = "enable_cloud_synthesis"
+ENABLE_STATIC_FAST_PATH = "enable_static_fast_path"
 ENABLE_STATIC_FINALIZATION = "enable_static_finalization"
 
 RUNTIME_FEATURE_FLAGS = (
@@ -23,6 +24,7 @@ RUNTIME_FEATURE_FLAGS = (
     ENABLE_CLOUD_RECOVERY,
     ENABLE_CLOUD_REPLAN,
     ENABLE_CLOUD_SYNTHESIS,
+    ENABLE_STATIC_FAST_PATH,
     ENABLE_STATIC_FINALIZATION,
 )
 

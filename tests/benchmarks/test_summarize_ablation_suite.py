@@ -29,6 +29,7 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
             full_results = [True, True, False, False]
             variant_results = {
                 "full": full_results,
+                "all_edge": [True, True, False, False],
                 "no_edge": [True, False, False, False],
                 "static": [True, False, False, False],
                 "no_contract": [True, True, True, False],
@@ -80,6 +81,15 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
             self.assertEqual(rows["full"]["retry_cases"], 1)
             self.assertEqual(rows["full"]["retry_correct"], 1)
             self.assertEqual(rows["no_edge"]["regression_case_ids"], ["case-1"])
+            self.assertEqual(rows["all_edge"]["all_edge_routed_nodes"], 8)
+            self.assertEqual(
+                report["static_fast_path_ablation"]["agreement_rate"],
+                6 / 7,
+            )
+            self.assertEqual(
+                report["static_fast_path_ablation"]["edge_call_delta"],
+                7,
+            )
             roles = {row["role"]: row for row in report["edge_role_decomposition"]}
             self.assertEqual(
                 roles["Terminal/proactive semantic review"]["accuracy_contribution_pp"],
@@ -107,6 +117,8 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
         self.assertIn("Mechanism activity", markdown)
         self.assertIn("Edge-to-Cloud substitution", markdown)
         self.assertIn("Edge role decomposition", markdown)
+        self.assertIn("Static fast-path ablation", markdown)
+        self.assertIn("| Edge/static agreement | --- | 85.7% | 6 agree / 1 disagree |", markdown)
         self.assertIn("Paired case diagnostics", markdown)
         self.assertIn("`case-1`", markdown)
         self.assertIn("Observed direction: supported", markdown)
@@ -156,6 +168,39 @@ def _write_variant(
         proactive_opportunities = 3
         proactive_calls = 3
         proactive_hits = 2
+        all_edge_routed = 0
+        all_edge_edge_successes = 0
+        all_edge_edge_failures = 0
+        all_edge_reference_successes = 0
+        all_edge_reference_failures = 0
+        all_edge_comparisons = 0
+        all_edge_agreements = 0
+        all_edge_disagreements = 0
+    elif variant == "all_edge":
+        remote_calls = 10
+        synthesis_calls = 2
+        replan_calls = 0
+        local_slm_calls = 12
+        terminal_calls = 3
+        terminal_hits = 2
+        node_calls = 8
+        node_successes = 7
+        node_steps = 12
+        node_reviews = 4
+        contract_rejections = 1
+        terminal_escalations = 1
+        local_tokens = 500
+        proactive_opportunities = 3
+        proactive_calls = 3
+        proactive_hits = 2
+        all_edge_routed = 8
+        all_edge_edge_successes = 7
+        all_edge_edge_failures = 1
+        all_edge_reference_successes = 8
+        all_edge_reference_failures = 0
+        all_edge_comparisons = 7
+        all_edge_agreements = 6
+        all_edge_disagreements = 1
     elif variant == "no_edge":
         remote_calls = 16
         synthesis_calls = 8
@@ -173,6 +218,14 @@ def _write_variant(
         proactive_opportunities = 0
         proactive_calls = 0
         proactive_hits = 0
+        all_edge_routed = 0
+        all_edge_edge_successes = 0
+        all_edge_edge_failures = 0
+        all_edge_reference_successes = 0
+        all_edge_reference_failures = 0
+        all_edge_comparisons = 0
+        all_edge_agreements = 0
+        all_edge_disagreements = 0
     else:
         remote_calls = 10 + index
         synthesis_calls = 2 + index
@@ -190,6 +243,14 @@ def _write_variant(
         proactive_opportunities = index
         proactive_calls = index
         proactive_hits = max(0, index - 1)
+        all_edge_routed = 0
+        all_edge_edge_successes = 0
+        all_edge_edge_failures = 0
+        all_edge_reference_successes = 0
+        all_edge_reference_failures = 0
+        all_edge_comparisons = 0
+        all_edge_agreements = 0
+        all_edge_disagreements = 0
 
     summary = {
         "runtime_successes": len(results),
@@ -216,6 +277,18 @@ def _write_variant(
                 "edge_review_proactive_opportunities": proactive_opportunities,
                 "edge_review_proactive_calls": proactive_calls,
                 "edge_review_proactive_hits": proactive_hits,
+                "executor_all_edge_routed_nodes": all_edge_routed,
+                "executor_all_edge_edge_successes": all_edge_edge_successes,
+                "executor_all_edge_edge_failures": all_edge_edge_failures,
+                "executor_all_edge_static_reference_successes": (
+                    all_edge_reference_successes
+                ),
+                "executor_all_edge_static_reference_failures": (
+                    all_edge_reference_failures
+                ),
+                "executor_all_edge_comparisons": all_edge_comparisons,
+                "executor_all_edge_agreements": all_edge_agreements,
+                "executor_all_edge_disagreements": all_edge_disagreements,
             }
         },
     }

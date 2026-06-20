@@ -27,6 +27,14 @@ class CheckAblationSuiteTest(unittest.TestCase):
             check["check"]: check for check in report["checks"] if check["variant"] == "no_edge"
         }
         self.assertTrue(no_edge_checks["all_edge_paths_disabled"]["ok"])
+        all_edge_checks = {
+            check["check"]: check
+            for check in report["checks"]
+            if check["variant"] == "all_edge"
+        }
+        self.assertTrue(
+            all_edge_checks["static_fast_path_replaced_by_edge"]["ok"]
+        )
 
     def test_detects_hidden_edge_activity_in_no_edge_variant(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -60,6 +68,15 @@ def _write_suite(suite_root: Path, *, dataset: str) -> None:
             encoding="utf-8",
         )
         counters: dict[str, int] = {}
+        if variant == "all_edge":
+            counters.update(
+                {
+                    "executor_all_edge_routed_nodes": 1,
+                    "executor_all_edge_comparisons": 1,
+                    "executor_all_edge_agreements": 1,
+                    "executor_all_edge_disagreements": 0,
+                }
+            )
         summary = {
             "local_slm": {"runtime_features": flags},
             "local_slm_calls": 0,
