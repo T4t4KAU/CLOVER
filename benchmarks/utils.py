@@ -133,23 +133,23 @@ def build_brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-_BRIEF_HEADERS = (
-    "Benchmark",
-    "Cloud Model",
-    "Edge Model",
-    "Acc. (%)",
-    "Cloud Tokens",
-    "Edge Tokens",
-    "API Cost (USD)",
-    "Cloud Tok/Q",
-    "Edge Tok/Q",
-    "Calls/Q",
-    "API Cost/Q (USD)",
+_BRIEF_LABELS = (
+    ("Benchmark", "benchmark"),
+    ("Cloud Model", "cloud_model"),
+    ("Edge Model", "edge_model"),
+    ("Acc. (%)", "acc_pct"),
+    ("Cloud Tokens", "cloud_tokens"),
+    ("Edge Tokens", "edge_tokens"),
+    ("API Cost (USD)", "api_cost_usd"),
+    ("Cloud Tok/Q", "cloud_tokens_per_q"),
+    ("Edge Tok/Q", "edge_tokens_per_q"),
+    ("Calls/Q", "calls_per_q"),
+    ("API Cost/Q (USD)", "api_cost_per_q_usd"),
 )
 
 
 def format_brief_summary(brief: dict[str, Any]) -> str:
-    """Render the brief summary as a fixed-width table for stdout."""
+    """Render the brief summary as a vertical key-value list for stdout."""
 
     def _fmt(value: Any, *, is_cost: bool = False) -> str:
         if value is None:
@@ -160,21 +160,9 @@ def format_brief_summary(brief: dict[str, Any]) -> str:
             return f"{value:.4f}" if abs(value) < 1000 else f"{value:.2f}"
         return str(value)
 
-    row = (
-        brief.get("benchmark", "unknown"),
-        brief.get("cloud_model", "n/a"),
-        brief.get("edge_model", "n/a"),
-        _fmt(brief.get("acc_pct")),
-        _fmt(brief.get("cloud_tokens")),
-        _fmt(brief.get("edge_tokens")),
-        _fmt(brief.get("api_cost_usd"), is_cost=True),
-        _fmt(brief.get("cloud_tokens_per_q")),
-        _fmt(brief.get("edge_tokens_per_q")),
-        _fmt(brief.get("calls_per_q")),
-        _fmt(brief.get("api_cost_per_q_usd"), is_cost=True),
-    )
-    widths = [max(len(str(header)), len(str(cell))) for header, cell in zip(_BRIEF_HEADERS, row)]
-    sep = "+".join("-" * (w + 2) for w in widths)
-    header_line = " | ".join(str(h).ljust(w) for h, w in zip(_BRIEF_HEADERS, widths))
-    value_line = " | ".join(str(c).ljust(w) for c, w in zip(row, widths))
-    return f"{sep}\n{header_line}\n{sep}\n{value_line}\n{sep}"
+    label_width = max(len(label) for label, _ in _BRIEF_LABELS)
+    lines = []
+    for label, key in _BRIEF_LABELS:
+        is_cost = key in ("api_cost_usd", "api_cost_per_q_usd")
+        lines.append(f"{label.ljust(label_width)} : {_fmt(brief.get(key), is_cost=is_cost)}")
+    return "\n".join(lines)
