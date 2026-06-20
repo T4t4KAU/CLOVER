@@ -24,6 +24,7 @@ from benchmarks.tablebench.adapter import (
 from benchmarks.tablebench.download import TABLEBENCH_REASONING_QTYPES
 from benchmarks.tablebench.metrics import score_tablebench_answer, tablebench_metric_name
 from benchmarks.utils import (
+    build_brief_summary,
     display_path,
     format_error,
     json_ready,
@@ -853,7 +854,7 @@ def build_summary(
         remote_config=remote_config,
         pricing_model=remote_cost_model,
     )
-    return {
+    summary = {
         "run_name": output_dir.name,
         "stage": "tablebench_eval",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -948,6 +949,8 @@ def build_summary(
         "answer_mismatch_cases": display_path(mismatch_cases),
         "failure_cases": display_path(failure_cases),
     }
+    summary["brief_summary"] = build_brief_summary(summary)
+    return summary
 
 
 def _score_groups(records: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:

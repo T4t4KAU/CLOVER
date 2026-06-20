@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from benchmarks.utils import safe_divide, write_jsonl
+from benchmarks.utils import build_brief_summary, safe_divide, write_jsonl
 from benchmarks.tablebench.adapter import iter_tablebench_dataset_dirs, read_cases, write_json
 from benchmarks.tablebench.eval import run_tablebench_eval
 
@@ -223,6 +223,7 @@ def _normalize_tablefact_outputs(
         }
         for label, count in sorted(label_counts.items())
     }
+    normalized["brief_summary"] = build_brief_summary(normalized)
     write_json(output_dir / "run_summary.json", normalized)
     return normalized
 

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from benchmarks.utils import build_brief_summary, format_brief_summary
 from benchmarks.warnings import suppress_benchmark_warnings
 from clover.config import load_model_config, load_optional_model_config
 from clover.supervisor.client import generate_remote_text
@@ -231,7 +232,8 @@ def main(argv: list[str] | None = None) -> int:
                 **common,
             )
 
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    brief = build_brief_summary(summary)
+    print(format_brief_summary(brief))
     return 0
 
 

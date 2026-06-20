@@ -3,7 +3,7 @@
   "api_type": "chat_completions",
   "api_key": "EMPTY",
   "base_url": "http://127.0.0.1:8000/v1",
-  "model": "/home/hwx/Documents/models/Qwen2.5-3B-Instruct",
+  "model": "Qwen2.5-3B-Instruct",
   "timeout": 1800,
   "max_retries": 2,
   "max_tokens": 4096,

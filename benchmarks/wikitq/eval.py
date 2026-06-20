@@ -14,6 +14,7 @@ from typing import Any
 
 from benchmarks.costing import estimate_openai_text_cost, normalize_remote_token_usage
 from benchmarks.utils import (
+    build_brief_summary,
     display_path,
     json_ready,
     preview,
@@ -514,7 +515,7 @@ def build_summary(
         remote_config=remote_config,
         pricing_model=remote_cost_model,
     )
-    return {
+    summary = {
         "run_name": output_dir.name,
         "stage": "wikitq_eval",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -597,6 +598,8 @@ def build_summary(
         "answer_mismatch_cases": display_path(mismatch_cases),
         "failure_cases": display_path(failure_cases),
     }
+    summary["brief_summary"] = build_brief_summary(summary)
+    return summary
 
 
 def mismatch_record(record: dict[str, Any]) -> dict[str, Any]:
