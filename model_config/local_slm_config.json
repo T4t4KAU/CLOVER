@@ -24,6 +24,7 @@
   "enable_cloud_synthesis": true,
   "enable_static_finalization": true,
   "edge_review_mode": "safe",
+  "edge_review_proactive": true,
   "edge_review_max_actions": 4,
   "edge_review_max_rows": 5,
   "edge_review_max_columns": 5,

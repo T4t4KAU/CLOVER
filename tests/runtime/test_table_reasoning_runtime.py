@@ -19,8 +19,7 @@ from clover.runtime.table_reasoning.pipeline import _load_json_object
 class TableReasoningRuntimeTest(unittest.TestCase):
     def test_table_command_parser_uses_first_json_object(self) -> None:
         payload = _load_json_object(
-            '{"op":"sql","q":"SELECT COUNT(*) FROM table_1"}\n'
-            '{"op":"answer","a":0}'
+            '{"op":"sql","q":"SELECT COUNT(*) FROM table_1"}\n' '{"op":"answer","a":0}'
         )
 
         self.assertEqual(
@@ -150,6 +149,178 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         )
         self.assertEqual(profiler.counters["edge_local_review_hits"], 1)
         self.assertEqual(profiler.counters["local_slm_calls"], 1)
+
+    def test_proactive_edge_review_can_select_one_field_before_static_finalization(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = _write_people_table(root)
+            task = next(
+                iter(
+                    table_pipeline._build_task_items(  # noqa: SLF001
+                        [
+                            _case_spec(
+                                "case_1",
+                                root,
+                                table_path,
+                                "Which country appears first?",
+                                "string",
+                            )
+                        ]
+                    ).values()
+                )
+            )
+            local_config = {
+                "api_type": "chat_completions",
+                "model": "edge-model",
+                "edge_review_mode": "safe",
+                "edge_review_proactive": True,
+                "enable_terminal_edge_review": True,
+            }
+            local_client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "route": "normalize",
+                            "a": "France",
+                            "support": ["e0"],
+                            "operation": "identity",
+                        }
+                    )
+                ]
+            )
+            dispatcher = LocalSlmSequenceDispatcher(
+                slm_config=local_config,
+                client=local_client,
+                max_parallel_sequences=1,
+                max_pending_sequences=4,
+                slm_scheduler="fifo",
+            )
+            final_results = []
+            finalized = set()
+            profiler = table_pipeline.PipelineProfiler()
+            evidence = {
+                "n": 1,
+                "cols": ["country", "year"],
+                "rows": [{"country": "France", "year": 2020}],
+            }
+            try:
+                selected = table_pipeline._proactive_edge_review_opportunity(  # noqa: SLF001
+                    question=task.question,
+                    answer_type=task.answer_type,
+                    evidence=evidence,
+                    local_slm_config=local_config,
+                    profiler=profiler,
+                )
+                hit = table_pipeline._try_finalize_edge_local_review(  # noqa: SLF001
+                    task=task,
+                    evidence=evidence,
+                    scope="format_answer",
+                    local_slm_config=local_config,
+                    local_slm_dispatcher=dispatcher,
+                    final_results=final_results,
+                    finalized=finalized,
+                    profiler=profiler,
+                    proactive=True,
+                )
+            finally:
+                dispatcher.close()
+
+        self.assertTrue(selected)
+        self.assertTrue(hit)
+        self.assertEqual(final_results[0].answer, "France")
+        self.assertEqual(profiler.counters["edge_review_proactive_calls"], 1)
+        self.assertEqual(
+            profiler.counters["edge_review_accepted_field_selection"],
+            1,
+        )
+
+    def test_invalid_proactive_review_falls_back_to_static_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = _write_people_table(root)
+            task = next(
+                iter(
+                    table_pipeline._build_task_items(  # noqa: SLF001
+                        [
+                            _case_spec(
+                                "case_1",
+                                root,
+                                table_path,
+                                "Which countries are listed?",
+                                "list[string]",
+                            )
+                        ]
+                    ).values()
+                )
+            )
+            local_config = {
+                "api_type": "chat_completions",
+                "model": "edge-model",
+                "edge_review_mode": "safe",
+                "edge_review_proactive": True,
+                "enable_terminal_edge_review": True,
+            }
+            local_client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "route": "normalize",
+                            "a": ["Germany"],
+                            "support": ["e0"],
+                            "operation": "identity",
+                        }
+                    )
+                ]
+            )
+            dispatcher = LocalSlmSequenceDispatcher(
+                slm_config=local_config,
+                client=local_client,
+                max_parallel_sequences=1,
+                max_pending_sequences=4,
+                slm_scheduler="fifo",
+            )
+            batch = [
+                table_pipeline.LogicDagItem(
+                    task=task,
+                    command_output="SELECT country",
+                    output_type="sql",
+                    logic_dag={},
+                )
+            ]
+            execution_result = ExecutionResult(
+                ok=True,
+                answer={task.answer_key: ["France", "Spain"]},
+                outputs={},
+                traces=[],
+                output_summaries={},
+            )
+            final_results = []
+            finalized = set()
+            profiler = table_pipeline.PipelineProfiler()
+            try:
+                remaining = table_pipeline._run_static_synthesis_review(  # noqa: SLF001
+                    batch=batch,
+                    execution_result=execution_result,
+                    final_results=final_results,
+                    finalized=finalized,
+                    profiler=profiler,
+                    fail_unfinalized=False,
+                    local_slm_config=local_config,
+                    local_slm_dispatcher=dispatcher,
+                )
+            finally:
+                dispatcher.close()
+
+        self.assertEqual(remaining, [])
+        self.assertEqual(final_results[0].answer, ["France", "Spain"])
+        self.assertEqual(
+            final_results[0].metadata["final_answer_source"],
+            "format_answer",
+        )
+        self.assertEqual(profiler.counters["edge_review_proactive_calls"], 1)
+        self.assertEqual(profiler.counters["static_final_answer_hits"], 1)
 
     def test_query_with_explicit_local_sql_skips_remote_decompose(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -289,9 +460,9 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                     json.dumps(
                         [
                             'SELECT "selfMade" AS "answer_1" FROM "table_1" '
-                            'WHERE "country" = \'missing\';',
+                            "WHERE \"country\" = 'missing';",
                             'SELECT "country" AS "answer_2" FROM "table_1" '
-                            'WHERE "country" = \'missing\';',
+                            "WHERE \"country\" = 'missing';",
                         ]
                     ),
                     json.dumps(
@@ -377,7 +548,9 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                 ["user"],
             )
         self.assertEqual(len(client.chat.completions.requests), 2)
-        second_supervisor_decompose_prompt = client.chat.completions.requests[1]["messages"][0]["content"]
+        second_supervisor_decompose_prompt = client.chat.completions.requests[1]["messages"][0][
+            "content"
+        ]
         self.assertIn('"sources"', second_supervisor_decompose_prompt)
 
     def test_passes_local_parallel_limits_to_executor(self) -> None:
@@ -441,12 +614,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             client = _StatefulChatClient(
                 [
                     json.dumps(
-                        {
-                            "q": (
-                                'SELECT "country" AS "answer_1__a1" '
-                                'FROM "table_1" LIMIT 1;'
-                            )
-                        }
+                        {"q": ('SELECT "country" AS "answer_1__a1" ' 'FROM "table_1" LIMIT 1;')}
                     ),
                     json.dumps({"a": "France"}),
                 ]
@@ -816,14 +984,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        {
-                            "q": (
-                                'SELECT COUNT(*) AS "answer_1__a1" '
-                                'FROM "table_1";'
-                            )
-                        }
-                    ),
+                    json.dumps({"q": ('SELECT COUNT(*) AS "answer_1__a1" ' 'FROM "table_1";')}),
                 ]
             )
             scalar_table = {
@@ -874,14 +1035,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        {
-                            "q": (
-                                'SELECT COUNT(*) AS "answer_1__a1" '
-                                'FROM "table_1";'
-                            )
-                        }
-                    ),
+                    json.dumps({"q": ('SELECT COUNT(*) AS "answer_1__a1" ' 'FROM "table_1";')}),
                     json.dumps({"a": 2}),
                 ]
             )
@@ -934,12 +1088,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             client = _StatefulChatClient(
                 [
                     json.dumps(
-                        {
-                            "q": (
-                                'SELECT "country" AS "answer_1__a1" '
-                                'FROM "table_1" LIMIT 1;'
-                            )
-                        }
+                        {"q": ('SELECT "country" AS "answer_1__a1" ' 'FROM "table_1" LIMIT 1;')}
                     ),
                 ]
             )
@@ -991,8 +1140,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             root = Path(tmpdir)
             table_path = root / "table.csv"
             table_path.write_text(
-                "commodity,2002 - 03,2003 - 04,2004 - 05,2005 - 06\n"
-                "wheat,2692,5636,4320,5905\n",
+                "commodity,2002 - 03,2003 - 04,2004 - 05,2005 - 06\n" "wheat,2692,5636,4320,5905\n",
                 encoding="utf-8",
             )
             client = _StatefulChatClient(
@@ -1042,8 +1190,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             root = Path(tmpdir)
             table_path = root / "table.csv"
             table_path.write_text(
-                "commodity,2002 - 03,2003 - 04,2004 - 05,2005 - 06\n"
-                "wheat,2692,5636,4320,5905\n",
+                "commodity,2002 - 03,2003 - 04,2004 - 05,2005 - 06\n" "wheat,2692,5636,4320,5905\n",
                 encoding="utf-8",
             )
             client = _StatefulChatClient(
@@ -1054,7 +1201,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                                 'SELECT AVG(("2002 - 03" + "2003 - 04" + '
                                 '"2004 - 05" + "2005 - 06") * 1.0) '
                                 'AS avg_wheat_production FROM "table_1" '
-                                'WHERE "commodity" = \'Wheat\';'
+                                "WHERE \"commodity\" = 'Wheat';"
                             )
                         }
                     ),
@@ -1192,21 +1339,12 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             root = Path(tmpdir)
             table_path = root / "table.csv"
             table_path.write_text(
-                "driver,points,laps\n"
-                "kasey kahne,185,334\n"
-                "brian vickers,34,24\n",
+                "driver,points,laps\n" "kasey kahne,185,334\n" "brian vickers,34,24\n",
                 encoding="utf-8",
             )
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        {
-                            "q": (
-                                'SELECT "driver", "points", "laps" '
-                                'FROM "table_1";'
-                            )
-                        }
-                    ),
+                    json.dumps({"q": ('SELECT "driver", "points", "laps" ' 'FROM "table_1";')}),
                     json.dumps({"a": "brian vickers"}),
                 ]
             )
@@ -1248,14 +1386,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        {
-                            "q": (
-                                'SELECT "driver", "points", "laps" '
-                                'FROM "table_1";'
-                            )
-                        }
-                    ),
+                    json.dumps({"q": ('SELECT "driver", "points", "laps" ' 'FROM "table_1";')}),
                 ]
             )
             spec = _case_spec(
@@ -1472,12 +1603,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             client = _StatefulChatClient(
                 [
                     json.dumps(
-                        {
-                            "q": (
-                                'SELECT "name" FROM "table_1" '
-                                'WHERE "name" = \'Beta\' LIMIT 1'
-                            )
-                        }
+                        {"q": ('SELECT "name" FROM "table_1" ' "WHERE \"name\" = 'Beta' LIMIT 1")}
                     )
                 ]
             )
@@ -1527,7 +1653,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                         {
                             "q": (
                                 'SELECT "Name" FROM "table_1" '
-                                'WHERE "Name" = \'Anders Theil\' LIMIT 1'
+                                "WHERE \"Name\" = 'Anders Theil' LIMIT 1"
                             )
                         }
                     )
@@ -1615,12 +1741,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             client = _StatefulChatClient(
                 [
                     json.dumps(
-                        {
-                            "q": (
-                                'SELECT "country" FROM "table_1" '
-                                'WHERE "country" = \'Missing\''
-                            )
-                        }
+                        {"q": ('SELECT "country" FROM "table_1" ' "WHERE \"country\" = 'Missing'")}
                     ),
                     json.dumps(
                         {
@@ -1629,7 +1750,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                                     "op": "sql",
                                     "q": (
                                         'SELECT "country" FROM "table_1" '
-                                        'WHERE "country" LIKE \'%Missing%\''
+                                        "WHERE \"country\" LIKE '%Missing%'"
                                     ),
                                 }
                             ]
@@ -1667,7 +1788,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                             "input_rows": 2,
                             "output_rows": 0,
                             "mismatch": {
-                                "sql": '"country" = \'Missing\'',
+                                "sql": "\"country\" = 'Missing'",
                                 "roots": [
                                     {
                                         "col": "country",
@@ -1692,7 +1813,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                             "input_rows": 2,
                             "output_rows": 0,
                             "mismatch": {
-                                "sql": '"country" LIKE \'%Missing%\'',
+                                "sql": "\"country\" LIKE '%Missing%'",
                                 "roots": [
                                     {
                                         "col": "country",
@@ -1761,9 +1882,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(result.case_results[0].answer, "United States")
         self.assertEqual(result.case_results[0].retry_count, 2)
         self.assertEqual(len(client.chat.completions.requests), 3)
-        second_repair_prompt = client.chat.completions.requests[2]["messages"][0][
-            "content"
-        ]
+        second_repair_prompt = client.chat.completions.requests[2]["messages"][0]["content"]
         self.assertIn('"prior"', second_repair_prompt)
         self.assertNotIn('"logic_dag"', second_repair_prompt)
         self.assertNotIn('"execution_traces"', second_repair_prompt)
@@ -1773,9 +1892,7 @@ def _write_people_table(tmpdir: Path) -> Path:
     tmpdir.mkdir(parents=True, exist_ok=True)
     table_path = tmpdir / "table.csv"
     table_path.write_text(
-        "selfMade,country,finalWorth\n"
-        "False,France,100\n"
-        "True,United States,200\n",
+        "selfMade,country,finalWorth\n" "False,France,100\n" "True,United States,200\n",
         encoding="utf-8",
     )
     return table_path
@@ -1804,15 +1921,13 @@ def _case_spec(
 
 def _self_made_sql(answer_key: str) -> str:
     return (
-        f'SELECT "selfMade" AS "{answer_key}" FROM "table_1" '
-        'ORDER BY "finalWorth" DESC LIMIT 1;'
+        f'SELECT "selfMade" AS "{answer_key}" FROM "table_1" ' 'ORDER BY "finalWorth" DESC LIMIT 1;'
     )
 
 
 def _country_sql(answer_key: str) -> str:
     return (
-        f'SELECT "country" AS "{answer_key}" FROM "table_1" '
-        'ORDER BY "finalWorth" DESC LIMIT 1;'
+        f'SELECT "country" AS "{answer_key}" FROM "table_1" ' 'ORDER BY "finalWorth" DESC LIMIT 1;'
     )
 
 
@@ -1835,6 +1950,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,
         )
+
         self.assertIsNone(_extract_filter_evidence_from_traces(None))
         self.assertIsNone(_extract_filter_evidence_from_traces([]))
 
@@ -1842,6 +1958,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,
         )
+
         traces = [{"op": "Scan", "output": "T0"}]
         self.assertIsNone(_extract_filter_evidence_from_traces(traces))
 
@@ -1849,6 +1966,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,
         )
+
         traces = [
             {
                 "op": "Filter",
@@ -1867,6 +1985,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,
         )
+
         traces = [
             {
                 "op": "Filter",
@@ -1900,6 +2019,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,
         )
+
         traces = [
             {
                 "op": "Filter",
@@ -1911,7 +2031,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
                         "input_rows": 8,
                         "output_rows": 0,
                         "mismatch": {
-                            "sql": '"Date" = \'April 8\'',
+                            "sql": "\"Date\" = 'April 8'",
                             "roots": [
                                 {
                                     "col": "Date",
@@ -1920,9 +2040,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
                                     "mismatch": "wrong_column",
                                 }
                             ],
-                            "candidates": [
-                                {"col": "Rnd", "sample": ["April 8", "April 22"]}
-                            ],
+                            "candidates": [{"col": "Rnd", "sample": ["April 8", "April 22"]}],
                         },
                     },
                 },
@@ -1944,6 +2062,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,
         )
+
         traces = [
             {
                 "op": "Filter",
@@ -1979,9 +2098,8 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,
         )
-        many_values = [
-            {"value": f"v{i}", "count": 10 - i} for i in range(15)
-        ]
+
+        many_values = [{"value": f"v{i}", "count": 10 - i} for i in range(15)]
         traces = [
             {
                 "agent_loop": {
@@ -2005,6 +2123,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
             _SqlActionExecution,
             _sql_result_is_empty,
         )
+
         result = _SqlActionExecution(
             ok=True,
             value={"rows": [{"a": 1}], "n": 1},
@@ -2018,6 +2137,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
             _SqlActionExecution,
             _sql_result_is_empty,
         )
+
         result = _SqlActionExecution(
             ok=True,
             value={"rows": [], "n": 0},
@@ -2030,6 +2150,7 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
             _SqlActionExecution,
             _sql_result_is_empty,
         )
+
         result = _SqlActionExecution(
             ok=False,
             error={"type": "ExecutionFailed", "message": "err"},
@@ -2042,6 +2163,7 @@ class TraceStepFeedbackTest(unittest.TestCase):
 
     def test_trace_step_preserves_feedback_with_column_values(self) -> None:
         from clover.executor.agents.loop import _trace_step
+
         observation = {
             "type": "python_error",
             "ok": False,
@@ -2068,6 +2190,7 @@ class TraceStepFeedbackTest(unittest.TestCase):
 
     def test_trace_step_omits_feedback_when_absent(self) -> None:
         from clover.executor.agents.loop import _trace_step
+
         observation = {
             "type": "invalid_action_json",
             "ok": False,

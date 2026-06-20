@@ -79,6 +79,11 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
         full=full_row,
         no_edge=row_by_variant["no_edge"],
     )
+    edge_role_decomposition = _edge_role_decomposition(
+        full=full_row,
+        end_review=row_by_variant["end_review"],
+        no_edge=row_by_variant["no_edge"],
+    )
 
     report = {
         "dataset": dataset,
@@ -87,6 +92,7 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
         "total_cases": rows[0]["total_cases"],
         "variants": rows,
         "edge_substitution": edge_substitution,
+        "edge_role_decomposition": edge_role_decomposition,
     }
     markdown = render_markdown(report)
 
@@ -135,8 +141,10 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "| Experiment | Node Edge runs | Node Edge successes | Node Edge steps "
             "| Node reviews | Contract rejects | Terminal Edge calls "
-            "| Terminal hits | Terminal escalations | Cloud replans |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Terminal hits | Proactive opportunities | Proactive hits "
+            "| Terminal escalations | Cloud replans |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
+            "| ---: | ---: | ---: |",
         ]
     )
     for row in report["variants"]:
@@ -144,6 +152,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "| {display_name} | {node_edge_calls} | {node_edge_successes} "
             "| {node_edge_steps} | {node_review_calls} | {contract_rejections} "
             "| {terminal_edge_calls} | {terminal_edge_hits} "
+            "| {proactive_edge_opportunities} | {proactive_edge_hits} "
             "| {terminal_edge_escalations} | {cloud_replan_calls} |".format_map(row)
         )
 
@@ -225,6 +234,29 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"{edge['full_node_edge_successes']} successful node-level Edge runs. "
             "These counts need not equal the Cloud-call increase exactly because a "
             "node repair can change later execution and replanning paths.",
+            "",
+            "## Edge role decomposition",
+            "",
+            "| Edge role | Compared variants | Accuracy contribution " "| Cloud calls avoided |",
+            "| --- | --- | ---: | ---: |",
+        ]
+    )
+    for role in report["edge_role_decomposition"]:
+        lines.append(
+            "| {role} | {comparison} | {accuracy_text} | " "{cloud_calls_avoided:+d} |".format_map(
+                {
+                    **role,
+                    "accuracy_text": _format_pp(role["accuracy_contribution_pp"]),
+                }
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "Terminal review contribution compares End-only Review against w/o "
+            "Edge Agent. Node repair contribution compares Full CLOVER against "
+            "End-only Review. These are paired mechanism contrasts, not additive "
+            "causal guarantees when execution paths interact.",
             "",
             "## Calls and cost",
             "",
@@ -351,6 +383,14 @@ def _build_row(
         "terminal_edge_validation_failures": int(
             counters.get("edge_local_review_validation_failures", 0) or 0
         ),
+        "proactive_edge_opportunities": int(
+            counters.get("edge_review_proactive_opportunities", 0) or 0
+        ),
+        "proactive_edge_calls": int(counters.get("edge_review_proactive_calls", 0) or 0),
+        "proactive_edge_hits": int(counters.get("edge_review_proactive_hits", 0) or 0),
+        "proactive_edge_escalations": int(
+            counters.get("edge_review_proactive_escalations", 0) or 0
+        ),
         "remote_tokens": int(remote_usage.get("total_tokens", 0) or 0),
         "local_slm_tokens": int(local_usage.get("total_tokens", 0) or 0),
         "estimated_remote_cost_usd": float(cost) if cost is not None else None,
@@ -438,6 +478,28 @@ def _edge_substitution_summary(
         "full_terminal_edge_hits": full["terminal_edge_hits"],
         "full_node_edge_successes": full["node_edge_successes"],
     }
+
+
+def _edge_role_decomposition(
+    *,
+    full: dict[str, Any],
+    end_review: dict[str, Any],
+    no_edge: dict[str, Any],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "Terminal/proactive semantic review",
+            "comparison": "End-only Review vs w/o Edge Agent",
+            "accuracy_contribution_pp": (end_review["accuracy"] - no_edge["accuracy"]) * 100.0,
+            "cloud_calls_avoided": (no_edge["remote_calls"] - end_review["remote_calls"]),
+        },
+        {
+            "role": "Node-local repair and review",
+            "comparison": "Full CLOVER vs End-only Review",
+            "accuracy_contribution_pp": (full["accuracy"] - end_review["accuracy"]) * 100.0,
+            "cloud_calls_avoided": (end_review["remote_calls"] - full["remote_calls"]),
+        },
+    ]
 
 
 def _case_results(path: Path) -> dict[tuple[str, str], dict[str, Any]]:

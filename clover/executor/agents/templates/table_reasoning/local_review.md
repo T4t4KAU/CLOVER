@@ -17,6 +17,10 @@ Rules:
 - Every answer value must come from cited facts.
 - For boolean answers, `operation` must be one of:
   `identity`, `not`, `and`, `or`, `eq`, `ne`, `gt`, `ge`, `lt`, `le`.
+- For numeric answers, `operation` must be one of:
+  `identity`, `extract_number`, `percent_value`.
+- For text answers, `operation` must be one of:
+  `identity`, `strip_quotes`, `strip_parenthetical`, `strip_label`.
 - Use `accept` when one cited fact already is the answer.
 - Use `normalize` for local field selection, short-list assembly, or a permitted
   boolean operation over cited facts.

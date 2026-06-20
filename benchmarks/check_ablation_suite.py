@@ -144,6 +144,18 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
                 "edge_local_review_escalations": int(
                     summary.get("edge_local_review_escalations", 0) or 0
                 ),
+                "edge_review_proactive_opportunities": int(
+                    counters.get("edge_review_proactive_opportunities", 0) or 0
+                ),
+                "edge_review_proactive_calls": int(
+                    counters.get("edge_review_proactive_calls", 0) or 0
+                ),
+                "edge_review_proactive_hits": int(
+                    counters.get("edge_review_proactive_hits", 0) or 0
+                ),
+                "edge_review_proactive_escalations": int(
+                    counters.get("edge_review_proactive_escalations", 0) or 0
+                ),
             }
             _record_check(
                 checks,

@@ -30,6 +30,17 @@ bash benchmarks/run_tablebench_ablation.sh /path/to/edge-model
 Cloud synthesis 和 Cloud replan，因此与 Full 之间的 Cloud 调用差异可归因于
 Edge 路径是否启用。
 
+Full CLOVER 默认启用主动局部语义复核：
+
+```text
+CLOVER_EDGE_REVIEW_PROACTIVE=true
+```
+
+静态运行时仅在 evidence 闭合且规模受限时触发，包括单行多字段选择、至多五行的
+候选选择、简单布尔组合、短列表整理，以及百分数、单位、引号、标签或尾部括号的
+值归一化。Edge 输出必须引用 fact ID，并通过确定性操作重放；复核失败时继续原有
+静态或 Cloud 路径。
+
 为了减少顺序偏差，默认使用 seed 对七个变体进行可复现打乱，实际顺序记录在
 `variant_order.txt`。可通过以下变量指定固定顺序：
 
@@ -59,10 +70,12 @@ ablation_summary.json
 - 正确率、相对 Full CLOVER 的百分点变化和 Exact McNemar 配对检验；
 - 相对 Full 的退化/恢复 case 数；
 - 节点 Edge 运行/成功/step、节点复核和契约拒绝；
-- 末端 Edge 调用/命中/上报与 Cloud 重规划次数；
+- 末端 Edge 调用/命中/上报、主动语义机会/命中与 Cloud 重规划次数；
 - 最终答案来源、Cloud/本地模型 token、估算成本和耗时。
 - `Full CLOVER` 与 `w/o Edge Agent` 的直接 Edge-to-Cloud 替代效应，包括
   Cloud 调用、synthesis、replan、token、成本和每题调用增量。
+- `End-only Review` 对比 `w/o Edge Agent` 的终局/主动语义复核贡献，以及
+  `Full CLOVER` 对比 `End-only Review` 的节点修复贡献。
 
 如果七组实验已经跑完，只需要补生成汇总而不重跑：
 

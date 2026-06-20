@@ -29,6 +29,8 @@ from clover.executor import (
 from clover.executor.edge_review import (
     EDGE_REVIEW_SAFE,
     EdgeReviewResult,
+    detect_edge_review_opportunity,
+    proactive_edge_review_enabled,
     run_edge_local_review,
 )
 from clover.executor.result import json_ready
@@ -288,9 +290,7 @@ def _build_task_items(
     case_result_callback: Callable[[CaseResult], None] | None = None,
 ) -> dict[str, TaskItem]:
     if any(_builder_payload_from_raw_spec(spec) is not None for spec in case_specs):
-        raise ValueError(
-            "Table builder specs must be materialized by the runtime builder stage"
-        )
+        raise ValueError("Table builder specs must be materialized by the runtime builder stage")
     return build_runtime_task_items(
         case_specs,
         task_type=TABLE_REASONING_QUERY_TASK_TYPE,
@@ -435,9 +435,7 @@ def _table_builder_task_dsl(
     hints = builder.get("hints")
     if isinstance(hints, dict) and hints:
         merged_hints = (
-            copy.deepcopy(updated["hints"])
-            if isinstance(updated.get("hints"), dict)
-            else {}
+            copy.deepcopy(updated["hints"]) if isinstance(updated.get("hints"), dict) else {}
         )
         merged_hints.update(copy.deepcopy(hints))
         updated["hints"] = merged_hints
@@ -493,9 +491,7 @@ def _normalize_validation_mode(value: str) -> str:
     mode = str(value or VALIDATION_NONE).strip().lower()
     if mode not in VALIDATION_MODES:
         available = ", ".join(sorted(VALIDATION_MODES))
-        raise ValueError(
-            f"Unsupported table validation mode: {value!r}. Available: {available}"
-        )
+        raise ValueError(f"Unsupported table validation mode: {value!r}. Available: {available}")
     return mode
 
 
@@ -634,7 +630,7 @@ def _finish_remote_decompose_job(
                 final_results=final_results,
                 finalized=finalized,
                 error=_error_payload(call_result.error),
-        )
+            )
         return
 
     result = call_result.value
@@ -682,10 +678,7 @@ def _parse_remote_decompose_output(
 ) -> tuple[_PlannedSqlCommand, ...]:
     if _is_batch_remote_dsl(job.remote_dsl):
         parsed = parse_sql_list_response(remote_output, job.remote_dsl)
-        return tuple(
-            _PlannedSqlCommand(op="sql", sqls=(sql,))
-            for sql in parsed.sqls
-        )
+        return tuple(_PlannedSqlCommand(op="sql", sqls=(sql,)) for sql in parsed.sqls)
     return (_parse_single_table_command(remote_output, job),)
 
 
@@ -883,10 +876,7 @@ def _is_batch_remote_dsl(remote_dsl: dict[str, Any]) -> bool:
 
 
 def _is_analyze_remote_dsl(remote_dsl: dict[str, Any]) -> bool:
-    return (
-        table_reasoning_profile_from_dsl(remote_dsl)
-        == TABLE_REASONING_ANALYZE_PROFILE
-    )
+    return table_reasoning_profile_from_dsl(remote_dsl) == TABLE_REASONING_ANALYZE_PROFILE
 
 
 def _run_optimizer_parse(
@@ -1008,9 +998,7 @@ def _run_action_groups_batch(
     remote_concurrency: int = 1,
 ) -> bool:
     del validation_mode
-    runnable = [
-        item for item in action_items if item.task.answer_key not in finalized
-    ]
+    runnable = [item for item in action_items if item.task.answer_key not in finalized]
     if not runnable:
         return False
 
@@ -1092,6 +1080,29 @@ def _run_action_groups_batch(
             local_slm_config,
             ENABLE_STATIC_FINALIZATION,
         )
+        public_observation = _public_action_group_observation(observation)
+        proactive_edge_selected = (
+            static_finalization_enabled
+            and _proactive_edge_review_opportunity(
+                question=result.item.task.question,
+                answer_type=result.item.task.answer_type,
+                evidence=public_observation,
+                local_slm_config=local_slm_config,
+                profiler=profiler,
+            )
+        )
+        if proactive_edge_selected and _try_finalize_edge_local_review(
+            task=result.item.task,
+            evidence=public_observation,
+            scope="action_group_answer",
+            local_slm_config=local_slm_config,
+            local_slm_dispatcher=local_slm_dispatcher,
+            final_results=final_results,
+            finalized=finalized,
+            profiler=profiler,
+            proactive=True,
+        ):
+            continue
         if static_finalization_enabled:
             if _try_finalize_static_action_group_answer(
                 item=result.item,
@@ -1101,16 +1112,19 @@ def _run_action_groups_batch(
                 profiler=profiler,
             ):
                 continue
-        public_observation = _public_action_group_observation(observation)
-        if static_finalization_enabled and _try_finalize_edge_local_review(
-            task=result.item.task,
-            evidence=public_observation,
-            scope="action_group_answer",
-            local_slm_config=local_slm_config,
-            local_slm_dispatcher=local_slm_dispatcher,
-            final_results=final_results,
-            finalized=finalized,
-            profiler=profiler,
+        if (
+            static_finalization_enabled
+            and not proactive_edge_selected
+            and _try_finalize_edge_local_review(
+                task=result.item.task,
+                evidence=public_observation,
+                scope="action_group_answer",
+                local_slm_config=local_slm_config,
+                local_slm_dispatcher=local_slm_dispatcher,
+                final_results=final_results,
+                finalized=finalized,
+                profiler=profiler,
+            )
         ):
             continue
         report_items.append((result.item, public_observation))
@@ -1234,9 +1248,7 @@ def _try_finalize_static_action_group_answer(
     elif answer_type in _STATIC_ACTION_TEXT_TYPES:
         profiler.increment("action_group_static_answer_text_hits")
     item.task.metadata[_FINAL_ANSWER_SOURCE_KEY] = (
-        "edge_static_relative_row"
-        if relative_row_hit
-        else "action_static"
+        "edge_static_relative_row" if relative_row_hit else "action_static"
     )
     _record_table_diagnostic(
         item.task,
@@ -1318,9 +1330,7 @@ def _static_relative_row_answer(
     if _is_missing_static_value(value):
         return _STATIC_ACTION_NO_ANSWER
     answer = str(value).strip()
-    if not answer or _normalized_relative_text(answer) == _normalized_relative_text(
-        anchor_literal
-    ):
+    if not answer or _normalized_relative_text(answer) == _normalized_relative_text(anchor_literal):
         return _STATIC_ACTION_NO_ANSWER
     return answer
 
@@ -1372,8 +1382,7 @@ def _relative_row_direction(question: str) -> int | None:
     )
     following = bool(
         re.search(
-            r"\b(next|immediately\s+after|comes?\s+after|"
-            r"came\s+after|following)\b",
+            r"\b(next|immediately\s+after|comes?\s+after|" r"came\s+after|following)\b",
             question,
             flags=re.IGNORECASE,
         )
@@ -1419,10 +1428,7 @@ def _single_selected_source_column(sql: str) -> str | None:
     projection = match.group(1).strip()
     if "," in projection or re.search(r"\b(count|sum|min|max|avg|case)\s*\(", projection, re.I):
         return None
-    identifiers = [
-        item.replace('""', '"')
-        for item in re.findall(r'"((?:""|[^"])*)"', projection)
-    ]
+    identifiers = [item.replace('""', '"') for item in re.findall(r'"((?:""|[^"])*)"', projection)]
     return identifiers[0] if len(identifiers) == 1 else None
 
 
@@ -1451,10 +1457,7 @@ def _unique_anchor_location(
         normalized_literal = _normalized_relative_text(literal)
         positions: set[int] = set()
         for position, (_, row) in enumerate(frame.iterrows()):
-            if any(
-                _cell_contains_anchor(value, normalized_literal)
-                for value in row.tolist()
-            ):
+            if any(_cell_contains_anchor(value, normalized_literal) for value in row.tolist()):
                 positions.add(position)
         if positions:
             matches.append((positions, literal))
@@ -1463,14 +1466,10 @@ def _unique_anchor_location(
     intersection = set.intersection(*(positions for positions, _ in matches))
     if len(intersection) == 1:
         position = next(iter(intersection))
-        literal = next(
-            literal for positions, literal in matches if position in positions
-        )
+        literal = next(literal for positions, literal in matches if position in positions)
         return position, literal
     unique_matches = [
-        (next(iter(positions)), literal)
-        for positions, literal in matches
-        if len(positions) == 1
+        (next(iter(positions)), literal) for positions, literal in matches if len(positions) == 1
     ]
     unique_positions = {position for position, _ in unique_matches}
     if len(unique_positions) != 1:
@@ -1482,12 +1481,8 @@ def _cell_contains_anchor(value: Any, normalized_anchor: str) -> bool:
     if _is_missing_static_value(value):
         return False
     normalized_cell = _normalized_relative_text(value)
-    return (
-        normalized_cell == normalized_anchor
-        or (
-            len(normalized_anchor) >= 5
-            and normalized_anchor in normalized_cell
-        )
+    return normalized_cell == normalized_anchor or (
+        len(normalized_anchor) >= 5 and normalized_anchor in normalized_cell
     )
 
 
@@ -1505,9 +1500,7 @@ def _inline_relative_value(
     parts = [part.strip() for part in re.split(r"[,;\n]+", text) if part.strip()]
     anchor = _normalized_relative_text(anchor_literal)
     matches = [
-        index
-        for index, part in enumerate(parts)
-        if _normalized_relative_text(part) == anchor
+        index for index, part in enumerate(parts) if _normalized_relative_text(part) == anchor
     ]
     if len(matches) != 1:
         return _STATIC_ACTION_NO_ANSWER
@@ -1530,9 +1523,7 @@ def _static_action_group_scalar_answer(
         return _STATIC_ACTION_NO_ANSWER
     answer_type = _answer_type_name(item.task)
     allowed_answer_types = (
-        _STATIC_ACTION_NUMBER_TYPES
-        | _STATIC_ACTION_BOOLEAN_TYPES
-        | _STATIC_ACTION_TEXT_TYPES
+        _STATIC_ACTION_NUMBER_TYPES | _STATIC_ACTION_BOOLEAN_TYPES | _STATIC_ACTION_TEXT_TYPES
     )
     if answer_type not in allowed_answer_types:
         return _STATIC_ACTION_NO_ANSWER
@@ -1675,9 +1666,7 @@ def _compact_runtime_repair_evidence(value: dict[str, Any]) -> dict[str, Any]:
         output["column_values"] = {
             str(column): [
                 {
-                    "value": str(
-                        item.get("value") if isinstance(item, dict) else item
-                    )[:160],
+                    "value": str(item.get("value") if isinstance(item, dict) else item)[:160],
                     **(
                         {"count": item.get("count")}
                         if isinstance(item, dict) and item.get("count") is not None
@@ -1799,14 +1788,9 @@ def _targeted_action_result_answer(
         return _STATIC_ACTION_NO_ANSWER
     if selected_column is None:
         selected_column = columns[0]
-    values = [
-        _row_column_value(row, selected_column, columns)
-        for row in rows
-    ]
+    values = [_row_column_value(row, selected_column, columns) for row in rows]
     text_values = [
-        str(value).strip()
-        for value in values
-        if value is not None and str(value).strip()
+        str(value).strip() for value in values if value is not None and str(value).strip()
     ]
     if len(text_values) != len(rows):
         return _STATIC_ACTION_NO_ANSWER
@@ -1856,11 +1840,7 @@ def _targeted_metric_rank_answer(
         return _STATIC_ACTION_NO_ANSWER
     scores = [score for _, score in scored]
     best_score = max(scores) if direction == "max" else min(scores)
-    best_targets = [
-        target
-        for target, score in scored
-        if score == best_score
-    ]
+    best_targets = [target for target, score in scored if score == best_score]
     if len(best_targets) != 1:
         return _STATIC_ACTION_NO_ANSWER
     target = best_targets[0]
@@ -1931,20 +1911,12 @@ def _metric_column_from_question(
     if re.search(r"\bdivided\s+by\b", question, flags=re.IGNORECASE):
         return None
     if re.search(r"\bper\b", question, flags=re.IGNORECASE):
-        candidates = [
-            column
-            for column in candidates
-            if "per" in _compact_text(column)
-        ]
+        candidates = [column for column in candidates if "per" in _compact_text(column)]
     return _unique_mentioned_column(question, candidates)
 
 
 def _unique_mentioned_column(text: str, columns: list[str]) -> str | None:
-    matches = [
-        column
-        for column in columns
-        if _text_mentions_column(text, column)
-    ]
+    matches = [column for column in columns if _text_mentions_column(text, column)]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -1962,8 +1934,7 @@ def _compact_text(value: str) -> str:
 
 def _numeric_values_available(rows: list[Any], columns: list[str], column: str) -> bool:
     return all(
-        _coerce_static_number(_row_column_value(row, column, columns)) is not None
-        for row in rows
+        _coerce_static_number(_row_column_value(row, column, columns)) is not None for row in rows
     )
 
 
@@ -1993,12 +1964,8 @@ def _score_rows_by_division(
 ) -> list[tuple[Any, float]]:
     scored: list[tuple[Any, float]] = []
     for row in rows:
-        numerator = _coerce_static_number(
-            _row_column_value(row, numerator_column, columns)
-        )
-        denominator = _coerce_static_number(
-            _row_column_value(row, denominator_column, columns)
-        )
+        numerator = _coerce_static_number(_row_column_value(row, numerator_column, columns))
+        denominator = _coerce_static_number(_row_column_value(row, denominator_column, columns))
         if numerator is None or denominator in (None, 0):
             return []
         scored.append((_row_column_value(row, target_column, columns), numerator / denominator))
@@ -2123,10 +2090,11 @@ def _table_rows_and_columns(value: Any) -> tuple[list[Any], list[str]]:
             rows = value.get("data")
         columns = value.get("cols", value.get("columns"))
         if isinstance(rows, list):
-            normalized_columns = [
-                str(column)
-                for column in columns
-            ] if isinstance(columns, list) else _columns_from_rows(rows)
+            normalized_columns = (
+                [str(column) for column in columns]
+                if isinstance(columns, list)
+                else _columns_from_rows(rows)
+            )
             return rows, normalized_columns
     if isinstance(value, list):
         return value, _columns_from_rows(value)
@@ -2163,11 +2131,7 @@ def _matching_column(columns: list[str], target: str | None) -> str | None:
     if target in columns:
         return target
     normalized_target = target.strip().casefold()
-    matches = [
-        column
-        for column in columns
-        if column.strip().casefold() == normalized_target
-    ]
+    matches = [column for column in columns if column.strip().casefold() == normalized_target]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -2359,11 +2323,7 @@ def _extract_filter_evidence_from_traces(
             continue
         if packet.get("route") == "cloud_replan":
             continue
-        steps = [
-            step
-            for step in agent_loop.get("steps", [])
-            if isinstance(step, dict)
-        ]
+        steps = [step for step in agent_loop.get("steps", []) if isinstance(step, dict)]
         local_attempt = {
             "iterations": agent_loop.get("iterations"),
             "accepted": any(bool(step.get("accepted")) for step in steps),
@@ -2398,11 +2358,7 @@ def _compact_verification_evidence(
     output: dict[str, Any] = {}
     node = evidence.get("node")
     if isinstance(node, dict):
-        output["node"] = {
-            key: node.get(key)
-            for key in ("id", "op")
-            if node.get(key) is not None
-        }
+        output["node"] = {key: node.get(key) for key in ("id", "op") if node.get(key) is not None}
     for key in ("input_rows", "output_rows"):
         if isinstance(evidence.get(key), int):
             output[key] = evidence[key]
@@ -2499,9 +2455,7 @@ def _validated_mismatch_candidates(
         if not isinstance(values, list):
             continue
         if any(
-            _normalized_value_matches(literal, sample)
-            for literal in literals
-            for sample in values
+            _normalized_value_matches(literal, sample) for literal in literals for sample in values
         ):
             output.append(candidate)
     return output
@@ -2816,7 +2770,10 @@ def _analyze_action_physical_plan(
     if prior_match is not None:
         prior_evidence_key, prior_frame = prior_match
         physical_plan, cache_key = _physical_plan_from_cached_frame(
-            prior_frame, prior_evidence_key, task, action_index,
+            prior_frame,
+            prior_evidence_key,
+            task,
+            action_index,
         )
         analyze_dependency = prior_evidence_key
     else:
@@ -3107,8 +3064,7 @@ def _enqueue_action_group(
             error={
                 "type": "RepairEvidenceStalled",
                 "message": (
-                    "another cloud repair was rejected because no new "
-                    "failure evidence appeared"
+                    "another cloud repair was rejected because no new " "failure evidence appeared"
                 ),
             },
         )
@@ -3213,9 +3169,7 @@ def _actions_repeat_prior_sql(
     actions: tuple[SupervisorAction, ...],
 ) -> bool:
     proposed = [
-        _normalize_sql_text(action.q)
-        for action in actions
-        if action.op == "sql" and action.q
+        _normalize_sql_text(action.q) for action in actions if action.op == "sql" and action.q
     ]
     if not proposed or any(action.op != "sql" for action in actions):
         return False
@@ -3294,8 +3248,7 @@ def _finish_table_execution_batch(
     unaffected = [
         item
         for item in batch
-        if item.task.answer_key not in affected
-        and item.task.answer_key in execution_result.outputs
+        if item.task.answer_key not in affected and item.task.answer_key in execution_result.outputs
     ]
     interrupted = [
         item
@@ -3435,6 +3388,28 @@ def _run_static_synthesis_review(
                     remaining.append(item)
                 continue
             raw_answer = answer_map[key]
+            proactive_edge_selected = (
+                static_finalization_enabled
+                and _proactive_edge_review_opportunity(
+                    question=item.task.question,
+                    answer_type=item.task.answer_type,
+                    evidence=raw_answer,
+                    local_slm_config=local_slm_config,
+                    profiler=profiler,
+                )
+            )
+            if proactive_edge_selected and _try_finalize_edge_local_review(
+                task=item.task,
+                evidence=raw_answer,
+                scope="format_answer",
+                local_slm_config=local_slm_config,
+                local_slm_dispatcher=local_slm_dispatcher,
+                final_results=final_results,
+                finalized=finalized,
+                profiler=profiler,
+                proactive=True,
+            ):
+                continue
             static_answer = (
                 _static_final_answer_from_value(
                     raw_answer,
@@ -3458,11 +3433,7 @@ def _run_static_synthesis_review(
                             "bypass_synthesis": True,
                             "confidence": "high",
                             "reason": static_answer.reason,
-                            **(
-                                {"column": static_answer.column}
-                                if static_answer.column
-                                else {}
-                            ),
+                            **({"column": static_answer.column} if static_answer.column else {}),
                         },
                     ),
                 )
@@ -3490,17 +3461,21 @@ def _run_static_synthesis_review(
                         "confidence": "invalid",
                         "reason": reason,
                     },
-                    ),
+                ),
+            )
+            if (
+                static_finalization_enabled
+                and not proactive_edge_selected
+                and _try_finalize_edge_local_review(
+                    task=item.task,
+                    evidence=raw_answer,
+                    scope="format_answer",
+                    local_slm_config=local_slm_config,
+                    local_slm_dispatcher=local_slm_dispatcher,
+                    final_results=final_results,
+                    finalized=finalized,
+                    profiler=profiler,
                 )
-            if static_finalization_enabled and _try_finalize_edge_local_review(
-                task=item.task,
-                evidence=raw_answer,
-                scope="format_answer",
-                local_slm_config=local_slm_config,
-                local_slm_dispatcher=local_slm_dispatcher,
-                final_results=final_results,
-                finalized=finalized,
-                profiler=profiler,
             ):
                 continue
             if fail_unfinalized:
@@ -3528,6 +3503,7 @@ def _try_finalize_edge_local_review(
     final_results: list[CaseResult],
     finalized: set[str],
     profiler: PipelineProfiler,
+    proactive: bool = False,
 ) -> bool:
     if not runtime_feature_enabled(
         local_slm_config,
@@ -3567,15 +3543,27 @@ def _try_finalize_edge_local_review(
 
     profiler.increment("edge_local_review_calls")
     _record_edge_local_review_usage(profiler, result)
+    if result.opportunity is not None:
+        kind = _counter_suffix(result.opportunity.kind)
+        profiler.increment(f"edge_review_opportunity_{kind}")
+        if proactive:
+            profiler.increment("edge_review_proactive_calls")
     if result.accepted:
         profiler.increment("edge_local_review_accepted")
+        if result.opportunity is not None:
+            profiler.increment(
+                "edge_review_accepted_" f"{_counter_suffix(result.opportunity.kind)}"
+            )
     elif result.route == "escalate":
         profiler.increment("edge_local_review_escalations")
+        if proactive:
+            profiler.increment("edge_review_proactive_escalations")
     if result.validation_error:
         profiler.increment("edge_local_review_validation_failures")
 
     trace = {
         "scope": scope,
+        "proactive": proactive,
         "prompt": result.prompt,
         "response": result.response,
         **result.to_trace(),
@@ -3588,12 +3576,11 @@ def _try_finalize_edge_local_review(
         {
             "stage": "edge_local_review",
             "scope": scope,
+            "proactive": proactive,
             "review": result.to_trace(),
             "finalization": {
                 "source": "edge_local_review",
-                "bypass_synthesis": bool(
-                    result.mode == EDGE_REVIEW_SAFE and result.accepted
-                ),
+                "bypass_synthesis": bool(result.mode == EDGE_REVIEW_SAFE and result.accepted),
                 "confidence": "validated" if result.accepted else "abstain",
                 "reason": (
                     "validated_local_answer"
@@ -3608,6 +3595,8 @@ def _try_finalize_edge_local_review(
         return False
 
     profiler.increment("edge_local_review_hits")
+    if proactive:
+        profiler.increment("edge_review_proactive_hits")
     task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "edge_local_review"
     _finalize_success(
         task,
@@ -3615,6 +3604,34 @@ def _try_finalize_edge_local_review(
         final_results=final_results,
         finalized=finalized,
     )
+    return True
+
+
+def _proactive_edge_review_opportunity(
+    *,
+    question: str,
+    answer_type: str,
+    evidence: Any,
+    local_slm_config: dict[str, Any] | None,
+    profiler: PipelineProfiler,
+) -> bool:
+    if not runtime_feature_enabled(
+        local_slm_config,
+        ENABLE_TERMINAL_EDGE_REVIEW,
+    ):
+        return False
+    if not proactive_edge_review_enabled(local_slm_config):
+        return False
+    opportunity = detect_edge_review_opportunity(
+        question=question,
+        answer_type=answer_type,
+        evidence=evidence,
+        slm_config=local_slm_config,
+    )
+    if opportunity is None or not opportunity.proactive:
+        return False
+    profiler.increment("edge_review_proactive_opportunities")
+    profiler.increment(f"edge_review_proactive_opportunity_{_counter_suffix(opportunity.kind)}")
     return True
 
 
@@ -3875,12 +3892,9 @@ def _needs_supervisor_review(
     local_slm_config: dict[str, Any] | None = None,
 ) -> bool:
     del batch
-    return (
-        validation_mode == VALIDATION_REMOTE_SUPERVISOR
-        and runtime_feature_enabled(
-            local_slm_config,
-            ENABLE_CLOUD_SYNTHESIS,
-        )
+    return validation_mode == VALIDATION_REMOTE_SUPERVISOR and runtime_feature_enabled(
+        local_slm_config,
+        ENABLE_CLOUD_SYNTHESIS,
     )
 
 
@@ -4002,8 +4016,7 @@ def _run_supervisor_synthesis(
                 observation=observation,
                 current_command=_sql_map(batch),
                 force_final_answer=(
-                    not allow_replan
-                    or all(item.task.retry_count >= max_retries for item in batch)
+                    not allow_replan or all(item.task.retry_count >= max_retries for item in batch)
                 ),
             )
             profiler.increment("supervisor_synthesis_calls")
@@ -4056,9 +4069,7 @@ def _run_supervisor_synthesis(
         trace = item.task.metadata.setdefault(_SYNTHESIS_TRACE_KEY, {})
         if not isinstance(trace.get("rounds"), list):
             trace["rounds"] = []
-            trace["model_config"] = _model_config_from_response(
-                supervisor_result.response_payload
-            )
+            trace["model_config"] = _model_config_from_response(supervisor_result.response_payload)
         trace["rounds"].append(synthesis_round)
     _apply_supervisor_decision(
         batch=batch,
@@ -4142,8 +4153,7 @@ def _run_supervisor_action_reports_batch(
                     observation=result.observation,
                     supervisor_result=result.supervisor_result,
                     error=_error_payload(
-                        result.error
-                        or RuntimeError("Supervisor synthesis returned no result")
+                        result.error or RuntimeError("Supervisor synthesis returned no result")
                     ),
                 ),
             )
@@ -4152,8 +4162,7 @@ def _run_supervisor_action_reports_batch(
                 final_results=final_results,
                 finalized=finalized,
                 error=_error_payload(
-                    result.error
-                    or RuntimeError("Supervisor synthesis returned no result")
+                    result.error or RuntimeError("Supervisor synthesis returned no result")
                 ),
             )
             continue
@@ -4216,12 +4225,8 @@ def _run_one_supervisor_action_report_for_batch(
                 local_dsl=_query_local_dsl(item.task),
                 logic_dag={"task_type": item.task.task_type, "query_plans": []},
                 observation=observation,
-                current_command={
-                    "acts": [_action_to_dict(action) for action in item.actions]
-                },
-                force_final_answer=(
-                    not allow_replan or item.task.retry_count >= max_retries
-                ),
+                current_command={"acts": [_action_to_dict(action) for action in item.actions]},
+                force_final_answer=(not allow_replan or item.task.retry_count >= max_retries),
             )
             local_profiler.increment("supervisor_synthesis_calls")
             _record_remote_token_usage(
@@ -4622,10 +4627,7 @@ def _batch_remote_dsl(batch: list[TaskItem]) -> dict[str, Any]:
         "task_type": first.task_type,
         "questions": [item.question for item in batch],
         "sources": copy.deepcopy(first.remote_dsl.get("sources", [])),
-        "answers": [
-            {"name": item.answer_key, "type": item.answer_type}
-            for item in batch
-        ],
+        "answers": [{"name": item.answer_key, "type": item.answer_type} for item in batch],
     }
     _copy_shared_optional_batch_fields(dsl, [item.remote_dsl for item in batch])
     return dsl
@@ -4638,8 +4640,7 @@ def _batch_local_dsl(batch: list[LogicDagItem]) -> dict[str, Any]:
         "questions": [item.task.question for item in batch],
         "sources": copy.deepcopy(first.local_dsl.get("sources", [])),
         "answers": [
-            {"name": item.task.answer_key, "type": item.task.answer_type}
-            for item in batch
+            {"name": item.task.answer_key, "type": item.task.answer_type} for item in batch
         ],
     }
     _copy_shared_optional_batch_fields(dsl, [item.task.local_dsl for item in batch])
@@ -4778,9 +4779,7 @@ def _record_executor_trace_counters(
                     for step in steps:
                         if not isinstance(step, dict):
                             continue
-                        observation_type = _counter_suffix(
-                            step.get("observation_type") or ""
-                        )
+                        observation_type = _counter_suffix(step.get("observation_type") or "")
                         if observation_type in {
                             "contract_error",
                             "output_validation_error",
@@ -4874,9 +4873,7 @@ def _profile_with_summary(
             profile.get("counters", {}),
             "supervisor_synthesis",
         ),
-        "local_slm_token_usage": _local_slm_token_usage_summary(
-            profile.get("counters", {})
-        ),
+        "local_slm_token_usage": _local_slm_token_usage_summary(profile.get("counters", {})),
     }
     if baseline_seconds:
         summary["local_executor_speedup"] = (
@@ -4884,9 +4881,7 @@ def _profile_with_summary(
         )
     if baseline_optimizer_seconds:
         summary["local_optimizer_speedup"] = (
-            baseline_optimizer_seconds / optimizer_seconds
-            if optimizer_seconds
-            else None
+            baseline_optimizer_seconds / optimizer_seconds if optimizer_seconds else None
         )
     profile["summary"] = summary
     return profile
@@ -4922,9 +4917,7 @@ def _remote_stage_token_usage_summary(
 ) -> dict[str, int]:
     return {
         "input_tokens": int(counters.get(f"{stage_name}_input_tokens", 0) or 0),
-        "cached_input_tokens": int(
-            counters.get(f"{stage_name}_cached_input_tokens", 0) or 0
-        ),
+        "cached_input_tokens": int(counters.get(f"{stage_name}_cached_input_tokens", 0) or 0),
         "output_tokens": int(counters.get(f"{stage_name}_output_tokens", 0) or 0),
         "reasoning_tokens": int(counters.get(f"{stage_name}_reasoning_tokens", 0) or 0),
         "total_tokens": int(counters.get(f"{stage_name}_total_tokens", 0) or 0),
@@ -4942,10 +4935,7 @@ def _local_slm_token_usage_summary(counters: dict[str, int]) -> dict[str, int]:
 
 
 def _is_analyze_task(task: TaskItem) -> bool:
-    return (
-        table_reasoning_profile_from_dsl(task.remote_dsl)
-        == TABLE_REASONING_ANALYZE_PROFILE
-    )
+    return table_reasoning_profile_from_dsl(task.remote_dsl) == TABLE_REASONING_ANALYZE_PROFILE
 
 
 def _dag_group_key(task: TaskItem) -> str:
@@ -5024,9 +5014,7 @@ def _affected_answer_keys(
     failing_output = failing.get("output")
     failing_node_id = failing.get("id") or failing.get("node_id")
     output_to_node = {
-        node.get("output"): node
-        for node in physical_plan.get("nodes", [])
-        if node.get("output")
+        node.get("output"): node for node in physical_plan.get("nodes", []) if node.get("output")
     }
     if not failing_output and failing_node_id:
         for node in physical_plan.get("nodes", []):
@@ -5062,9 +5050,7 @@ def _affected_answer_keys(
         if node and node.get("op") == "FormatAnswer":
             answer_keys.add(output)
     parent_keys = {
-        key.split("__e", 1)[0]
-        for key in answer_keys
-        if isinstance(key, str) and "__e" in key
+        key.split("__e", 1)[0] for key in answer_keys if isinstance(key, str) and "__e" in key
     }
     answer_keys.update(parent_keys)
     return answer_keys

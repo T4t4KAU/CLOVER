@@ -1138,6 +1138,8 @@ def _config_summary(config: dict[str, Any] | None) -> dict[str, Any] | None:
         "agent_loop_max_iterations": config.get("agent_loop_max_iterations"),
         "disable_agent_loop": config.get("disable_agent_loop"),
         "ablation_variant": config.get("ablation_variant", "full"),
+        "edge_review_mode": config.get("edge_review_mode", "off"),
+        "edge_review_proactive": config.get("edge_review_proactive", True),
         "runtime_features": runtime_feature_flags(config),
         "slm_scheduler": config.get("slm_scheduler", "tptt"),
     }

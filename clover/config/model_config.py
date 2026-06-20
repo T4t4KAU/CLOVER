@@ -60,6 +60,7 @@ BOOLEAN_FIELDS = {
     "enable_node_review",
     "enable_static_finalization",
     "enable_terminal_edge_review",
+    "edge_review_proactive",
     "http2",
     "trust_env",
 }

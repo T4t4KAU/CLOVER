@@ -60,6 +60,17 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
                 report["edge_substitution"]["no_edge_local_slm_calls"],
                 0,
             )
+            self.assertEqual(rows["full"]["proactive_edge_opportunities"], 3)
+            self.assertEqual(rows["full"]["proactive_edge_hits"], 2)
+            roles = {row["role"]: row for row in report["edge_role_decomposition"]}
+            self.assertEqual(
+                roles["Terminal/proactive semantic review"]["accuracy_contribution_pp"],
+                25.0,
+            )
+            self.assertEqual(
+                roles["Node-local repair and review"]["accuracy_contribution_pp"],
+                0.0,
+            )
             self.assertTrue((suite_root / "ablation_summary.json").is_file())
             self.assertTrue((suite_root / "ablation_summary.csv").is_file())
             markdown = (suite_root / "ablation_summary.md").read_text(encoding="utf-8")
@@ -70,6 +81,7 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
         self.assertIn("Cloud calls", markdown)
         self.assertIn("Mechanism activity", markdown)
         self.assertIn("Edge-to-Cloud substitution", markdown)
+        self.assertIn("Edge role decomposition", markdown)
         self.assertIn("Observed direction: supported", markdown)
 
 
@@ -110,6 +122,9 @@ def _write_variant(
         contract_rejections = 2
         terminal_escalations = 1
         local_tokens = 100
+        proactive_opportunities = 3
+        proactive_calls = 3
+        proactive_hits = 2
     elif variant == "no_edge":
         remote_calls = 16
         synthesis_calls = 8
@@ -124,6 +139,9 @@ def _write_variant(
         contract_rejections = 0
         terminal_escalations = 0
         local_tokens = 0
+        proactive_opportunities = 0
+        proactive_calls = 0
+        proactive_hits = 0
     else:
         remote_calls = 10 + index
         synthesis_calls = 2 + index
@@ -138,6 +156,9 @@ def _write_variant(
         contract_rejections = index + 5
         terminal_escalations = 1
         local_tokens = 100 + index
+        proactive_opportunities = index
+        proactive_calls = index
+        proactive_hits = max(0, index - 1)
 
     summary = {
         "runtime_successes": len(results),
@@ -161,6 +182,9 @@ def _write_variant(
                 "executor_local_slm_steps": node_steps,
                 "executor_edge_local_reviews": node_reviews,
                 "executor_contract_rejections": contract_rejections,
+                "edge_review_proactive_opportunities": proactive_opportunities,
+                "edge_review_proactive_calls": proactive_calls,
+                "edge_review_proactive_hits": proactive_hits,
             }
         },
     }

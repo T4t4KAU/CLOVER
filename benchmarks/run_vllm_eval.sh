@@ -92,6 +92,7 @@ LOCAL_MAX_TOKENS="${CLOVER_LOCAL_MAX_TOKENS:-512}"
 LOCAL_TIMEOUT_SECONDS="${CLOVER_LOCAL_TIMEOUT_SECONDS:-600}"
 AGENT_LOOP_MAX_ITERATIONS="${CLOVER_AGENT_LOOP_MAX_ITERATIONS:-8}"
 EDGE_REVIEW_MODE="${CLOVER_EDGE_REVIEW_MODE:-safe}"  # off | shadow | safe
+EDGE_REVIEW_PROACTIVE="${CLOVER_EDGE_REVIEW_PROACTIVE:-true}"
 ABLATION_VARIANT="${CLOVER_ABLATION_VARIANT:-full}"
 ENABLE_EDGE_AGENT="${CLOVER_ENABLE_EDGE_AGENT:-true}"
 ENABLE_EDGE_REPAIR="${CLOVER_ENABLE_EDGE_REPAIR:-${ENABLE_EDGE_AGENT}}"
@@ -147,6 +148,7 @@ ENABLE_CLOUD_RECOVERY="$(normalize_bool "${ENABLE_CLOUD_RECOVERY}")"
 ENABLE_CLOUD_REPLAN="$(normalize_bool "${ENABLE_CLOUD_REPLAN}")"
 ENABLE_CLOUD_SYNTHESIS="$(normalize_bool "${ENABLE_CLOUD_SYNTHESIS}")"
 ENABLE_STATIC_FINALIZATION="$(normalize_bool "${ENABLE_STATIC_FINALIZATION}")"
+EDGE_REVIEW_PROACTIVE="$(normalize_bool "${EDGE_REVIEW_PROACTIVE}")"
 PERSIST_SERVER="$(normalize_bool "${PERSIST_SERVER}")"
 WARMUP_SERVER="$(normalize_bool "${WARMUP_SERVER}")"
 
@@ -350,6 +352,7 @@ LOCAL_CONFIG="${TMP_DIR}/vllm_local_slm_config.json"
 "${PYTHON_BIN}" - "${LOCAL_CONFIG}" "${SERVED_MODEL_NAME}" "${BASE_URL}" \
   "${LOCAL_MAX_TOKENS}" "${LOCAL_TIMEOUT_SECONDS}" \
   "${AGENT_LOOP_MAX_ITERATIONS}" "${EDGE_REVIEW_MODE}" \
+  "${EDGE_REVIEW_PROACTIVE}" \
   "${ABLATION_VARIANT}" "${ENABLE_EDGE_AGENT}" "${ENABLE_EDGE_REPAIR}" \
   "${ENABLE_TERMINAL_EDGE_REVIEW}" "${ENABLE_CONTRACT_GATE}" \
   "${ENABLE_NODE_REVIEW}" "${ENABLE_CLOUD_RECOVERY}" \
@@ -376,16 +379,17 @@ payload = {
     "trust_env": False,
     "agent_loop_max_iterations": int(sys.argv[6]),
     "edge_review_mode": sys.argv[7],
-    "ablation_variant": sys.argv[8],
-    "enable_edge_agent": sys.argv[9] == "true",
-    "enable_edge_repair": sys.argv[10] == "true",
-    "enable_terminal_edge_review": sys.argv[11] == "true",
-    "enable_contract_gate": sys.argv[12] == "true",
-    "enable_node_review": sys.argv[13] == "true",
-    "enable_cloud_recovery": sys.argv[14] == "true",
-    "enable_cloud_replan": sys.argv[15] == "true",
-    "enable_cloud_synthesis": sys.argv[16] == "true",
-    "enable_static_finalization": sys.argv[17] == "true",
+    "edge_review_proactive": sys.argv[8] == "true",
+    "ablation_variant": sys.argv[9],
+    "enable_edge_agent": sys.argv[10] == "true",
+    "enable_edge_repair": sys.argv[11] == "true",
+    "enable_terminal_edge_review": sys.argv[12] == "true",
+    "enable_contract_gate": sys.argv[13] == "true",
+    "enable_node_review": sys.argv[14] == "true",
+    "enable_cloud_recovery": sys.argv[15] == "true",
+    "enable_cloud_replan": sys.argv[16] == "true",
+    "enable_cloud_synthesis": sys.argv[17] == "true",
+    "enable_static_finalization": sys.argv[18] == "true",
     "edge_review_max_actions": 4,
     "edge_review_max_rows": 5,
     "edge_review_max_columns": 5,

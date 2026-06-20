@@ -22,6 +22,7 @@ USER_VLLM_MAX_MODEL_LEN=""         # Example: "16384"; empty: model default
 USER_VLLM_GPU_MEMORY_UTILIZATION="0.88"
 USER_VLLM_SERVER_ARGS=""           # Example: "--max-num-seqs 32"
 USER_VLLM_WARMUP="true"            # Warm up before each timed variant
+USER_EDGE_REVIEW_PROACTIVE="true"  # Review bounded semantic risks before static finalization
 
 # Cloud model configs and experiment output.
 USER_REMOTE_LLM_CONFIG="model_config/deepseek_remote_llm_config.json"
@@ -82,6 +83,7 @@ Useful environment variables:
   CLOVER_EDGE_MODEL_PATH=/path/to/model
   CLOVER_ABLATION_VARIANT_ORDER=full,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
   CLOVER_VLLM_WARMUP=true
+  CLOVER_EDGE_REVIEW_PROACTIVE=true
 EOF
 }
 
@@ -145,6 +147,7 @@ export CLOVER_VLLM_PORT="${CLOVER_VLLM_PORT:-${USER_VLLM_PORT}}"
 export CLOVER_VLLM_GPU_MEMORY_UTILIZATION="${CLOVER_VLLM_GPU_MEMORY_UTILIZATION:-${USER_VLLM_GPU_MEMORY_UTILIZATION}}"
 export CLOVER_VLLM_SERVER_ARGS="${CLOVER_VLLM_SERVER_ARGS:-${USER_VLLM_SERVER_ARGS}}"
 export CLOVER_VLLM_WARMUP="${CLOVER_VLLM_WARMUP:-${USER_VLLM_WARMUP}}"
+export CLOVER_EDGE_REVIEW_PROACTIVE="${CLOVER_EDGE_REVIEW_PROACTIVE:-${USER_EDGE_REVIEW_PROACTIVE}}"
 if [[ -n "${USER_VLLM_TENSOR_PARALLEL_SIZE}" \
     && -z "${CLOVER_VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
   export CLOVER_VLLM_TENSOR_PARALLEL_SIZE="${USER_VLLM_TENSOR_PARALLEL_SIZE}"

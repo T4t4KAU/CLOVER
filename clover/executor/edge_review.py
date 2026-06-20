@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,6 +78,29 @@ class EdgeReviewFact:
 
 
 @dataclass(frozen=True)
+class EdgeReviewOpportunity:
+    """A statically detected bounded-semantic answer opportunity."""
+
+    kind: str
+    reason: str
+    proactive: bool
+    row_count: int | None = None
+    column_count: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "kind": self.kind,
+            "reason": self.reason,
+            "proactive": self.proactive,
+        }
+        if self.row_count is not None:
+            payload["row_count"] = self.row_count
+        if self.column_count is not None:
+            payload["column_count"] = self.column_count
+        return payload
+
+
+@dataclass(frozen=True)
 class EdgeReviewResult:
     """Validated result from one local Edge review call."""
 
@@ -92,6 +116,7 @@ class EdgeReviewResult:
     raw: dict[str, Any]
     token_usage: dict[str, int]
     sequence_trace: dict[str, Any]
+    opportunity: EdgeReviewOpportunity | None = None
     validation_error: str | None = None
 
     def to_trace(self) -> dict[str, Any]:
@@ -106,6 +131,7 @@ class EdgeReviewResult:
             "raw": json_ready(self.raw),
             "token_usage": dict(self.token_usage),
             "sequence": dict(self.sequence_trace),
+            "opportunity": (self.opportunity.to_dict() if self.opportunity is not None else None),
             "validation_error": self.validation_error,
         }
 
@@ -118,10 +144,27 @@ def edge_review_mode(slm_config: dict[str, Any] | None) -> str:
     selected = str(slm_config.get("edge_review_mode") or EDGE_REVIEW_OFF).strip().lower()
     if selected not in EDGE_REVIEW_MODES:
         available = ", ".join(sorted(EDGE_REVIEW_MODES))
-        raise ValueError(
-            f"Unsupported edge_review_mode: {selected!r}. Available: {available}"
-        )
+        raise ValueError(f"Unsupported edge_review_mode: {selected!r}. Available: {available}")
     return selected
+
+
+def proactive_edge_review_enabled(slm_config: dict[str, Any] | None) -> bool:
+    """Return whether bounded semantic opportunities may preempt static finalization."""
+
+    if not isinstance(slm_config, dict):
+        return True
+    value = slm_config.get("edge_review_proactive", True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"edge_review_proactive must be a boolean, got {value!r}")
 
 
 def run_edge_local_review(
@@ -150,7 +193,7 @@ def run_edge_local_review(
     )
     if prepared is None:
         return None
-    facts, payload = prepared
+    facts, payload, opportunity = prepared
     prompt = render_table_local_review_prompt(payload=payload)
     sequence_result = dispatcher.generate(
         LocalSlmSequenceRequest(
@@ -182,6 +225,7 @@ def run_edge_local_review(
             raw={},
             token_usage=token_usage,
             sequence_trace=sequence_trace,
+            opportunity=opportunity,
             validation_error=str(exc),
         )
     return _validate_review_response(
@@ -193,7 +237,29 @@ def run_edge_local_review(
         response=response,
         token_usage=token_usage,
         sequence_trace=sequence_trace,
+        opportunity=opportunity,
     )
+
+
+def detect_edge_review_opportunity(
+    *,
+    question: str = "",
+    answer_type: str,
+    evidence: Any,
+    slm_config: dict[str, Any] | None,
+) -> EdgeReviewOpportunity | None:
+    """Detect a closed local ambiguity worth reviewing before static finalization."""
+
+    prepared = _prepare_review_payload(
+        question=question,
+        answer_type=answer_type,
+        evidence=evidence,
+        scope="opportunity_detection",
+        slm_config=slm_config,
+    )
+    if prepared is None:
+        return None
+    return prepared[2]
 
 
 def _prepare_review_payload(
@@ -203,7 +269,14 @@ def _prepare_review_payload(
     evidence: Any,
     scope: str,
     slm_config: dict[str, Any] | None,
-) -> tuple[tuple[EdgeReviewFact, ...], dict[str, Any]] | None:
+) -> (
+    tuple[
+        tuple[EdgeReviewFact, ...],
+        dict[str, Any],
+        EdgeReviewOpportunity,
+    ]
+    | None
+):
     normalized_type = str(answer_type or "").strip().lower()
     if not _supported_answer_type(normalized_type):
         return None
@@ -219,13 +292,20 @@ def _prepare_review_payload(
     facts = _evidence_facts(ready, max_facts=limits["max_facts"])
     if not facts:
         return None
+    opportunity = _classify_review_opportunity(
+        question=question,
+        answer_type=normalized_type,
+        evidence=ready,
+        facts=facts,
+    )
     payload = {
         "scope": scope,
         "question": str(question or ""),
         "answer_type": normalized_type,
+        "opportunity": opportunity.to_dict(),
         "facts": [fact.to_dict() for fact in facts],
     }
-    return facts, payload
+    return facts, payload, opportunity
 
 
 def _validate_review_response(
@@ -238,16 +318,17 @@ def _validate_review_response(
     response: str,
     token_usage: dict[str, int],
     sequence_trace: dict[str, Any],
+    opportunity: EdgeReviewOpportunity | None,
 ) -> EdgeReviewResult:
     route = str(raw.get("route") or "").strip().lower()
     reason = _optional_text(raw.get("reason"))
     operation = _optional_text(raw.get("operation"))
     support_value = raw.get("support")
-    support = tuple(
-        str(item)
-        for item in support_value
-        if isinstance(item, str) and item.strip()
-    ) if isinstance(support_value, list) else ()
+    support = (
+        tuple(str(item) for item in support_value if isinstance(item, str) and item.strip())
+        if isinstance(support_value, list)
+        else ()
+    )
     answer = raw.get("a")
     validation_error: str | None = None
     accepted = False
@@ -280,6 +361,7 @@ def _validate_review_response(
         raw=raw,
         token_usage=token_usage,
         sequence_trace=sequence_trace,
+        opportunity=opportunity,
         validation_error=validation_error,
     )
 
@@ -311,7 +393,16 @@ def _validate_supported_answer(
 
     if normalized_type in _NUMBER_TYPES:
         actual_number = _coerce_number(answer)
-        supported_numbers = [_coerce_number(value) for value in values]
+        selected_operation = str(operation or "identity").strip().lower()
+        if selected_operation not in {"identity", "extract_number", "percent_value"}:
+            return "unsupported numeric normalization operation"
+        supported_numbers = [
+            _coerce_number(
+                value,
+                allow_embedded=selected_operation != "identity",
+            )
+            for value in values
+        ]
         if actual_number is None or not any(
             number is not None and math.isclose(actual_number, number, rel_tol=1e-9, abs_tol=1e-9)
             for number in supported_numbers
@@ -335,7 +426,18 @@ def _validate_supported_answer(
     if normalized_type in _TEXT_TYPES:
         if not isinstance(answer, str) or not answer.strip():
             return "text answer must be a non-empty string"
-        if not any(_same_text(answer, value) for value in values):
+        selected_operation = str(operation or "identity").strip().lower()
+        if selected_operation not in {
+            "identity",
+            "strip_quotes",
+            "strip_parenthetical",
+            "strip_label",
+        }:
+            return "unsupported text normalization operation"
+        candidates = [_normalized_text_candidate(value, selected_operation) for value in values]
+        if not any(
+            candidate is not None and _same_text(answer, candidate) for candidate in candidates
+        ):
             return "text answer is not present in cited evidence"
         return None
 
@@ -402,6 +504,134 @@ def _bounded_evidence(
     ):
         return None
     return ready
+
+
+def _classify_review_opportunity(
+    *,
+    question: str,
+    answer_type: str,
+    evidence: Any,
+    facts: tuple[EdgeReviewFact, ...],
+) -> EdgeReviewOpportunity:
+    tables = _evidence_tables(evidence)
+    table = tables[0] if tables else None
+    row_count = table[0] if table is not None else None
+    column_count = table[1] if table is not None else None
+
+    if answer_type in _BOOLEAN_TYPES and len(facts) >= 2:
+        return EdgeReviewOpportunity(
+            kind="boolean_composition",
+            reason="multiple bounded facts require a simple boolean operation",
+            proactive=True,
+            row_count=row_count,
+            column_count=column_count,
+        )
+    if answer_type.startswith("list") and len(facts) >= 2:
+        return EdgeReviewOpportunity(
+            kind="list_assembly",
+            reason="bounded evidence contains multiple answer candidates",
+            proactive=True,
+            row_count=row_count,
+            column_count=column_count,
+        )
+    if row_count == 1 and column_count is not None and column_count > 1:
+        return EdgeReviewOpportunity(
+            kind="field_selection",
+            reason="one result row exposes multiple possible answer fields",
+            proactive=True,
+            row_count=row_count,
+            column_count=column_count,
+        )
+    if row_count is not None and 1 < row_count <= 5:
+        if _question_requires_deterministic_table_operation(question):
+            return EdgeReviewOpportunity(
+                kind="deterministic_result_review",
+                reason="multi-row evidence still requires a deterministic table operation",
+                proactive=False,
+                row_count=row_count,
+                column_count=column_count,
+            )
+        return EdgeReviewOpportunity(
+            kind="candidate_selection",
+            reason="a small closed result contains multiple candidate rows",
+            proactive=True,
+            row_count=row_count,
+            column_count=column_count,
+        )
+    if len(facts) == 1 and _value_needs_normalization(facts[0].value, answer_type):
+        return EdgeReviewOpportunity(
+            kind="value_normalization",
+            reason="the sole answer fact contains a locally normalizable representation",
+            proactive=False,
+            row_count=row_count,
+            column_count=column_count,
+        )
+    return EdgeReviewOpportunity(
+        kind="bounded_answer_review",
+        reason="bounded evidence can be cited and statically validated",
+        proactive=False,
+        row_count=row_count,
+        column_count=column_count,
+    )
+
+
+def _question_requires_deterministic_table_operation(question: str) -> bool:
+    text = str(question or "").casefold()
+    return bool(
+        re.search(
+            r"\b(how many|number of|count|total|sum|average|mean|difference|"
+            r"most|least|highest|lowest|maximum|minimum|top|bottom|rank|"
+            r"more|less|greater|fewer|before|after|earliest|latest|"
+            r"first|last|sort|order|ratio|percent(?:age)?)\b",
+            text,
+        )
+    )
+
+
+def _evidence_tables(value: Any) -> list[tuple[int, int]]:
+    tables: list[tuple[int, int]] = []
+    if isinstance(value, dict):
+        rows = value.get("rows")
+        columns = value.get("cols", value.get("columns"))
+        if isinstance(rows, list):
+            if isinstance(columns, list):
+                column_count = len(columns)
+            elif rows and isinstance(rows[0], dict):
+                column_count = len(rows[0])
+            else:
+                column_count = 1 if rows else 0
+            tables.append((len(rows), column_count))
+        for item in value.values():
+            tables.extend(_evidence_tables(item))
+    elif isinstance(value, list):
+        for item in value:
+            tables.extend(_evidence_tables(item))
+    return sorted(tables, key=lambda item: (item[0] * item[1], item[0]), reverse=True)
+
+
+def _value_needs_normalization(value: Any, answer_type: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if answer_type in _NUMBER_TYPES:
+        return (
+            _coerce_number(text) is None
+            and _coerce_number(
+                text,
+                allow_embedded=True,
+            )
+            is not None
+        )
+    if answer_type in _TEXT_TYPES:
+        return bool(
+            re.fullmatch(r"""["'“”‘’].+["'“”‘’]""", text)
+            or re.search(r"\s+\([^()]+\)\s*$", text)
+            or re.match(
+                r"^(?=[^:=]{1,40}\s*[:=])[^:=]*[^\W\d_][^:=]*\s*[:=]\s*\S",
+                text,
+            )
+        )
+    return False
 
 
 def _json_evidence(value: Any) -> Any:
@@ -534,7 +764,11 @@ def _positive_config_int(
     return selected
 
 
-def _coerce_number(value: Any) -> float | None:
+def _coerce_number(
+    value: Any,
+    *,
+    allow_embedded: bool = False,
+) -> float | None:
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, (int, float)):
@@ -551,7 +785,18 @@ def _coerce_number(value: Any) -> float | None:
         try:
             return float(stripped)
         except ValueError:
-            return None
+            if not allow_embedded:
+                return None
+            matches = re.findall(
+                r"(?<![\w.])[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?![\w.])",
+                stripped,
+            )
+            if len(matches) != 1:
+                return None
+            try:
+                return float(matches[0])
+            except ValueError:
+                return None
     return None
 
 
@@ -594,7 +839,36 @@ def _same_text(left: Any, right: Any) -> bool:
 
 
 def _normalized_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value).strip()).casefold()
+    normalized = unicodedata.normalize("NFKC", str(value))
+    return re.sub(r"\s+", " ", normalized.strip()).casefold()
+
+
+def _normalized_text_candidate(value: Any, operation: str) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if operation == "identity":
+        return text
+    if operation == "strip_quotes":
+        pairs = {
+            '"': '"',
+            "'": "'",
+            "“": "”",
+            "‘": "’",
+        }
+        if len(text) >= 2 and pairs.get(text[0]) == text[-1]:
+            return text[1:-1].strip()
+        return None
+    if operation == "strip_parenthetical":
+        match = re.fullmatch(r"(.+?)\s*\([^()]+\)\s*", text)
+        return match.group(1).strip() if match else None
+    if operation == "strip_label":
+        match = re.fullmatch(
+            r"(?=[^:=]{1,40}\s*[:=])([^:=]*[^\W\d_][^:=]*)\s*[:=]\s*(.+)",
+            text,
+        )
+        return match.group(2).strip() if match else None
+    return None
 
 
 def _optional_text(value: Any) -> str | None:
