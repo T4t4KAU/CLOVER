@@ -1,0 +1,48 @@
+{
+  "dataset": "tablebench",
+  "selection_policy": "edge_opportunity_outcome_blind",
+  "selection_basis": [
+    "question_text",
+    "answer_type",
+    "dataset_metadata",
+    "table_shape",
+    "cell_representation"
+  ],
+  "uses_model_predictions": false,
+  "uses_answer_correctness": false,
+  "size": 100,
+  "requested_size": 100,
+  "seed": 20260619,
+  "dataset_root": "datasets/tablebench",
+  "manifest": "benchmarks/ablation_cases/tablebench_edge_opportunity_100_seed20260619.jsonl",
+  "eligible_cases": 491,
+  "quotas": {
+    "field_selection": 30,
+    "value_normalization": 10,
+    "candidate_selection": 30,
+    "deterministic_control": 30
+  },
+  "strata": {
+    "candidate_selection": 30,
+    "deterministic_control": 30,
+    "field_selection": 30,
+    "value_normalization": 10
+  },
+  "answer_types": {
+    "number": 61,
+    "string": 39
+  },
+  "mechanism_tags": {
+    "candidate_selection": 30,
+    "cloud_recovery": 30,
+    "contract_gate": 10,
+    "edge_local_review": 70,
+    "field_selection": 30,
+    "negative_control": 30,
+    "node_review": 30,
+    "static_fallback": 30,
+    "static_finalization": 30,
+    "value_normalization": 10
+  },
+  "unique_tables": 100
+}

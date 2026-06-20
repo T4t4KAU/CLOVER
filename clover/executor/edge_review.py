@@ -527,6 +527,14 @@ def _classify_review_opportunity(
             column_count=column_count,
         )
     if answer_type.startswith("list") and len(facts) >= 2:
+        if _question_requires_deterministic_table_operation(question):
+            return EdgeReviewOpportunity(
+                kind="deterministic_result_review",
+                reason="list evidence still requires a deterministic table operation",
+                proactive=False,
+                row_count=row_count,
+                column_count=column_count,
+            )
         return EdgeReviewOpportunity(
             kind="list_assembly",
             reason="bounded evidence contains multiple answer candidates",
@@ -581,7 +589,8 @@ def _question_requires_deterministic_table_operation(question: str) -> bool:
         re.search(
             r"\b(how many|number of|count|total|sum|average|mean|difference|"
             r"most|least|highest|lowest|maximum|minimum|top|bottom|rank|"
-            r"more|less|greater|fewer|before|after|earliest|latest|"
+            r"more|less|greater|fewer|higher|lower|above|below|longer|shorter|"
+            r"older|younger|before|after|earliest|latest|"
             r"first|last|sort|order|ratio|percent(?:age)?)\b",
             text,
         )

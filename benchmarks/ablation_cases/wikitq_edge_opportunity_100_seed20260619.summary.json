@@ -1,0 +1,52 @@
+{
+  "dataset": "wikitq",
+  "selection_policy": "edge_opportunity_outcome_blind",
+  "selection_basis": [
+    "question_text",
+    "answer_type",
+    "dataset_metadata",
+    "table_shape",
+    "cell_representation"
+  ],
+  "uses_model_predictions": false,
+  "uses_answer_correctness": false,
+  "size": 100,
+  "requested_size": 100,
+  "seed": 20260619,
+  "dataset_root": "datasets/wikitq",
+  "manifest": "benchmarks/ablation_cases/wikitq_edge_opportunity_100_seed20260619.jsonl",
+  "eligible_cases": 4344,
+  "quotas": {
+    "field_selection": 30,
+    "value_normalization": 15,
+    "list_assembly": 15,
+    "candidate_selection": 25,
+    "deterministic_control": 15
+  },
+  "strata": {
+    "candidate_selection": 25,
+    "deterministic_control": 15,
+    "field_selection": 30,
+    "list_assembly": 15,
+    "value_normalization": 15
+  },
+  "answer_types": {
+    "list[string]": 15,
+    "number": 27,
+    "string": 58
+  },
+  "mechanism_tags": {
+    "candidate_selection": 25,
+    "cloud_recovery": 15,
+    "contract_gate": 30,
+    "edge_local_review": 85,
+    "field_selection": 30,
+    "list_assembly": 15,
+    "negative_control": 15,
+    "node_review": 25,
+    "static_fallback": 30,
+    "static_finalization": 15,
+    "value_normalization": 15
+  },
+  "unique_tables": 100
+}

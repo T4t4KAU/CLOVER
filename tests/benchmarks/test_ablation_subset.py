@@ -63,6 +63,42 @@ class AblationSubsetTest(unittest.TestCase):
         self.assertIn("multi_answer", strata)
         self.assertIn("direct_lookup", strata)
 
+    def test_edge_opportunity_policy_is_outcome_blind_and_auditable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "wikitq"
+            _write_edge_opportunity_cases(root)
+            manifest = Path(tmpdir) / "edge.jsonl"
+
+            summary = build_ablation_subset(
+                dataset="wikitq",
+                dataset_root=root,
+                output_path=manifest,
+                size=10,
+                seed=13,
+                selection_policy="edge_opportunity",
+            )
+            records = _read_jsonl(manifest)
+
+        self.assertEqual(summary["selection_policy"], "edge_opportunity_outcome_blind")
+        self.assertFalse(summary["uses_model_predictions"])
+        self.assertFalse(summary["uses_answer_correctness"])
+        self.assertEqual(len(records), 10)
+        self.assertTrue(
+            {
+                "field_selection",
+                "value_normalization",
+                "list_assembly",
+                "candidate_selection",
+                "deterministic_control",
+            }.issubset({record["stratum"] for record in records})
+        )
+        self.assertTrue(
+            all(record["selection_policy"] == "edge_opportunity" for record in records)
+        )
+        self.assertTrue(
+            all("selection_features" in record for record in records)
+        )
+
 
 def _write_tablebench_cases(root: Path) -> None:
     strata = [
@@ -93,6 +129,11 @@ def _write_tablebench_cases(root: Path) -> None:
             json.dumps(record) + "\n",
             encoding="utf-8",
         )
+        (dataset_dir / "table.csv").write_text(
+            "entity,value\n"
+            f"item-{index},{index}\n",
+            encoding="utf-8",
+        )
     excluded = root / "table_analysis"
     excluded.mkdir(parents=True)
     (excluded / "cases.jsonl").write_text(
@@ -108,6 +149,10 @@ def _write_tablebench_cases(root: Path) -> None:
             }
         )
         + "\n",
+        encoding="utf-8",
+    )
+    (excluded / "table.csv").write_text(
+        "entity,value\ntrend,up\n",
         encoding="utf-8",
     )
 
@@ -139,6 +184,59 @@ def _write_wikitq_cases(root: Path) -> None:
                 json.dumps(record) + "\n",
                 encoding="utf-8",
             )
+            (dataset_dir / "table.csv").write_text(
+                "name,value\nAlice,10\nBob,20\n",
+                encoding="utf-8",
+            )
+
+
+def _write_edge_opportunity_cases(root: Path) -> None:
+    templates = [
+        (
+            "What city is listed for Alice?",
+            "string",
+            "name,city,score\nAlice,Paris,10\nBob,Rome,12\n",
+        ),
+        (
+            "What result is listed for Team (A)?",
+            "string",
+            "team,result\nTeam (A),Winner\nTeam B,Runner-up\n",
+        ),
+        (
+            "Which teams qualified?",
+            "list[string]",
+            "team,status\nA,qualified\nB,qualified\nC,out\n",
+        ),
+        (
+            "Which is the domestic route?",
+            "string",
+            "route,airline\nHouston,Delta\nAustin,United\n",
+        ),
+        (
+            "How many teams qualified?",
+            "number",
+            "team,status\nA,qualified\nB,qualified\nC,out\n",
+        ),
+    ]
+    case_index = 0
+    for repeat in range(2):
+        for question, answer_type, table in templates:
+            dataset_dir = root / f"edge_{case_index:02d}"
+            dataset_dir.mkdir(parents=True)
+            record = {
+                "case_id": f"edge-{case_index}",
+                "dataset_id": dataset_dir.name,
+                "question": question,
+                "answer": ["placeholder"],
+                "type": answer_type,
+                "split": "test",
+            }
+            (dataset_dir / "cases.jsonl").write_text(
+                json.dumps(record) + "\n",
+                encoding="utf-8",
+            )
+            (dataset_dir / "table.csv").write_text(table, encoding="utf-8")
+            case_index += 1
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:

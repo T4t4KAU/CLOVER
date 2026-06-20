@@ -15,6 +15,17 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
     def test_writes_tables_and_compares_each_variant_with_full(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             suite_root = Path(tmpdir)
+            (suite_root / "cases.summary.json").write_text(
+                json.dumps(
+                    {
+                        "selection_policy": "edge_opportunity_outcome_blind",
+                        "size": 4,
+                        "uses_model_predictions": False,
+                        "uses_answer_correctness": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
             full_results = [True, True, False, False]
             variant_results = {
                 "full": full_results,
@@ -40,6 +51,10 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
             )
 
             rows = {row["variant"]: row for row in report["variants"]}
+            self.assertEqual(
+                report["case_selection"]["selection_policy"],
+                "edge_opportunity_outcome_blind",
+            )
             self.assertEqual(rows["static"]["regressions_vs_full"], 1)
             self.assertEqual(rows["static"]["recoveries_vs_full"], 0)
             self.assertEqual(rows["static"]["delta_vs_full_pp"], -25.0)
@@ -62,6 +77,9 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
             )
             self.assertEqual(rows["full"]["proactive_edge_opportunities"], 3)
             self.assertEqual(rows["full"]["proactive_edge_hits"], 2)
+            self.assertEqual(rows["full"]["retry_cases"], 1)
+            self.assertEqual(rows["full"]["retry_correct"], 1)
+            self.assertEqual(rows["no_edge"]["regression_case_ids"], ["case-1"])
             roles = {row["role"]: row for row in report["edge_role_decomposition"]}
             self.assertEqual(
                 roles["Terminal/proactive semantic review"]["accuracy_contribution_pp"],
@@ -73,15 +91,24 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
             )
             self.assertTrue((suite_root / "ablation_summary.json").is_file())
             self.assertTrue((suite_root / "ablation_summary.csv").is_file())
+            self.assertTrue(
+                (suite_root / "ablation_case_diagnostics.jsonl").is_file()
+            )
+            self.assertTrue(
+                (suite_root / "ablation_discordant_cases.csv").is_file()
+            )
             markdown = (suite_root / "ablation_summary.md").read_text(encoding="utf-8")
 
         self.assertIn("| Full CLOVER | 2/4 | 50.0% | +0.0 pp |", markdown)
+        self.assertIn("edge_opportunity_outcome_blind", markdown)
         self.assertIn("| w/o Edge Agent | 1/4 | 25.0% | -25.0 pp |", markdown)
         self.assertIn("| w/o Edge Repair | 1/4 | 25.0% | -25.0 pp |", markdown)
         self.assertIn("Cloud calls", markdown)
         self.assertIn("Mechanism activity", markdown)
         self.assertIn("Edge-to-Cloud substitution", markdown)
         self.assertIn("Edge role decomposition", markdown)
+        self.assertIn("Paired case diagnostics", markdown)
+        self.assertIn("`case-1`", markdown)
         self.assertIn("Observed direction: supported", markdown)
 
 
@@ -99,7 +126,11 @@ def _write_variant(
         {
             "dataset_id": f"table-{case_index}",
             "case_id": f"case-{case_index}",
+            "question": f"Question {case_index}?",
             "answer_correct": correct,
+            "runtime_ok": True,
+            "retry_count": 1 if variant == "full" and case_index == 0 else 0,
+            "error": None,
             "final_answer_source": "synthesis" if case_index % 2 else "format_answer",
         }
         for case_index, correct in enumerate(results)

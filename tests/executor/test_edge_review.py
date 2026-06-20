@@ -109,6 +109,27 @@ class EdgeLocalReviewTest(unittest.TestCase):
         self.assertEqual(opportunity.kind, "deterministic_result_review")
         self.assertFalse(opportunity.proactive)
 
+    def test_does_not_delegate_deterministic_list_ranking_to_edge_review(self) -> None:
+        opportunity = detect_edge_review_opportunity(
+            question="What are the two highest scoring countries?",
+            answer_type="list[string]",
+            evidence={
+                "n": 3,
+                "cols": ["country", "score"],
+                "rows": [
+                    {"country": "France", "score": 5},
+                    {"country": "Spain", "score": 8},
+                    {"country": "Italy", "score": 6},
+                ],
+            },
+            slm_config=_safe_config(),
+        )
+
+        self.assertIsNotNone(opportunity)
+        assert opportunity is not None
+        self.assertEqual(opportunity.kind, "deterministic_result_review")
+        self.assertFalse(opportunity.proactive)
+
     def test_extracts_one_numeric_value_from_percent_or_unit_text(self) -> None:
         client = _FakeChatClient(
             '{"route":"normalize","a":47.5,"support":["e0"],' '"operation":"percent_value"}'

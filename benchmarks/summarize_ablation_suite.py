@@ -84,15 +84,31 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
         end_review=row_by_variant["end_review"],
         no_edge=row_by_variant["no_edge"],
     )
+    case_diagnostics, discordant_cases = _build_case_diagnostics(
+        variant_data=variant_data,
+        full_cases=full_cases,
+    )
+    selection_summary_path = suite_root / "cases.summary.json"
+    selection_summary = (
+        _read_json(selection_summary_path)
+        if selection_summary_path.is_file()
+        else {}
+    )
 
     report = {
         "dataset": dataset,
         "suite_root": suite_root.as_posix(),
+        "case_selection": selection_summary,
         "reference_variant": "full",
         "total_cases": rows[0]["total_cases"],
         "variants": rows,
         "edge_substitution": edge_substitution,
         "edge_role_decomposition": edge_role_decomposition,
+        "paired_case_diagnostics": {
+            "all_cases_file": "ablation_case_diagnostics.jsonl",
+            "discordant_cases_file": "ablation_discordant_cases.csv",
+            "discordant_comparisons": len(discordant_cases),
+        },
     }
     markdown = render_markdown(report)
 
@@ -101,6 +117,14 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
         encoding="utf-8",
     )
     _write_csv(suite_root / "ablation_summary.csv", rows)
+    _write_jsonl(
+        suite_root / "ablation_case_diagnostics.jsonl",
+        case_diagnostics,
+    )
+    _write_csv_records(
+        suite_root / "ablation_discordant_cases.csv",
+        discordant_cases,
+    )
     (suite_root / "ablation_summary.md").write_text(markdown, encoding="utf-8")
     return report
 
@@ -110,6 +134,8 @@ def render_markdown(report: dict[str, Any]) -> str:
 
     lines = [
         f"# {report['dataset']} ablation summary",
+        "",
+        _selection_description(report.get("case_selection") or {}),
         "",
         "## Effectiveness",
         "",
@@ -155,6 +181,38 @@ def render_markdown(report: dict[str, Any]) -> str:
             "| {proactive_edge_opportunities} | {proactive_edge_hits} "
             "| {terminal_edge_escalations} | {cloud_replan_calls} |".format_map(row)
         )
+
+    lines.extend(
+        [
+            "",
+            "## Paired case diagnostics",
+            "",
+            "| Experiment | Full-only correct case IDs | Variant-only correct case IDs "
+            "| Retry cases correct/total | Runtime error types |",
+            "| --- | --- | --- | ---: | --- |",
+        ]
+    )
+    for row in report["variants"]:
+        lines.append(
+            "| {display_name} | {regression_ids} | {recovery_ids} "
+            "| {retry_correct}/{retry_cases} | {error_types_text} |".format_map(
+                {
+                    **row,
+                    "regression_ids": _format_case_ids(row["regression_case_ids"]),
+                    "recovery_ids": _format_case_ids(row["recovery_case_ids"]),
+                    "error_types_text": _format_counter(row["runtime_error_types"]),
+                }
+            )
+        )
+    diagnostics = report["paired_case_diagnostics"]
+    lines.extend(
+        [
+            "",
+            f"Full per-case records are written to `{diagnostics['all_cases_file']}`; "
+            f"{diagnostics['discordant_comparisons']} Full/variant correctness "
+            f"transitions are written to `{diagnostics['discordant_cases_file']}`.",
+        ]
+    )
 
     lines.extend(
         [
@@ -337,6 +395,28 @@ def _build_row(
         not bool(full_record.get("answer_correct")) and bool(cases[key].get("answer_correct"))
         for key, full_record in full_cases.items()
     )
+    regression_case_ids = [
+        key[1]
+        for key, full_record in full_cases.items()
+        if bool(full_record.get("answer_correct"))
+        and not bool(cases[key].get("answer_correct"))
+    ]
+    recovery_case_ids = [
+        key[1]
+        for key, full_record in full_cases.items()
+        if not bool(full_record.get("answer_correct"))
+        and bool(cases[key].get("answer_correct"))
+    ]
+    retry_records = [
+        record
+        for record in cases.values()
+        if int(record.get("retry_count", 0) or 0) > 0
+    ]
+    runtime_error_types = Counter(
+        str(error.get("type") or "UnknownError")
+        for record in cases.values()
+        if isinstance((error := record.get("error")), dict) and error
+    )
     source_counts = Counter(
         str(record.get("final_answer_source") or "other") for record in cases.values()
     )
@@ -364,7 +444,14 @@ def _build_row(
         "mismatches": int(summary.get("mismatches", 0) or 0),
         "regressions_vs_full": regressions,
         "recoveries_vs_full": recoveries,
+        "regression_case_ids": sorted(regression_case_ids),
+        "recovery_case_ids": sorted(recovery_case_ids),
         "mcnemar_exact_p": _mcnemar_exact_p(regressions, recoveries),
+        "retry_cases": len(retry_records),
+        "retry_correct": sum(
+            bool(record.get("answer_correct")) for record in retry_records
+        ),
+        "runtime_error_types": dict(sorted(runtime_error_types.items())),
         "remote_calls": int(summary.get("remote_calls", 0) or 0),
         "cloud_synthesis_calls": int(counters.get("supervisor_synthesis_calls", 0) or 0),
         "cloud_replan_calls": int(counters.get("cloud_replan_calls", 0) or 0),
@@ -401,6 +488,74 @@ def _build_row(
         "other_final_answers": total - static_answers - terminal_answers - cloud_answers,
         "final_answer_sources": dict(sorted(source_counts.items())),
     }
+
+
+def _build_case_diagnostics(
+    *,
+    variant_data: dict[str, dict[str, Any]],
+    full_cases: dict[tuple[str, str], dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    all_records: list[dict[str, Any]] = []
+    discordant: list[dict[str, Any]] = []
+    for key in sorted(full_cases):
+        full_record = full_cases[key]
+        case_record = {
+            "dataset_id": key[0],
+            "case_id": key[1],
+            "question": full_record.get("question"),
+            "variants": {},
+        }
+        full_correct = bool(full_record.get("answer_correct"))
+        for variant, display_name in VARIANTS:
+            record = variant_data[variant]["cases"][key]
+            correct = bool(record.get("answer_correct"))
+            error = record.get("error")
+            error_type = (
+                str(error.get("type") or "UnknownError")
+                if isinstance(error, dict) and error
+                else None
+            )
+            case_record["variants"][variant] = {
+                "display_name": display_name,
+                "correct": correct,
+                "runtime_ok": bool(record.get("runtime_ok")),
+                "final_answer_source": record.get("final_answer_source"),
+                "final_answer": record.get(
+                    "final_answer_standard_text",
+                    record.get("final_answer"),
+                ),
+                "retry_count": int(record.get("retry_count", 0) or 0),
+                "error_type": error_type,
+            }
+            if variant != "full" and correct != full_correct:
+                discordant.append(
+                    {
+                        "variant": variant,
+                        "experiment": display_name,
+                        "transition": (
+                            "regression" if full_correct else "recovery"
+                        ),
+                        "dataset_id": key[0],
+                        "case_id": key[1],
+                        "question": full_record.get("question"),
+                        "full_source": full_record.get("final_answer_source"),
+                        "variant_source": record.get("final_answer_source"),
+                        "full_answer": full_record.get(
+                            "final_answer_standard_text",
+                            full_record.get("final_answer"),
+                        ),
+                        "variant_answer": record.get(
+                            "final_answer_standard_text",
+                            record.get("final_answer"),
+                        ),
+                        "variant_retry_count": int(
+                            record.get("retry_count", 0) or 0
+                        ),
+                        "variant_error_type": error_type,
+                    }
+                )
+        all_records.append(case_record)
+    return all_records, discordant
 
 
 def _edge_substitution_summary(
@@ -528,6 +683,33 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _write_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
+    fieldnames = list(rows[0]) if rows else [
+        "variant",
+        "experiment",
+        "transition",
+        "dataset_id",
+        "case_id",
+        "question",
+        "full_source",
+        "variant_source",
+        "full_answer",
+        "variant_answer",
+        "variant_retry_count",
+        "variant_error_type",
+    ]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -574,6 +756,36 @@ def _format_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
     return f"{seconds / 60:.1f}m"
+
+
+def _format_case_ids(case_ids: list[str], *, limit: int = 8) -> str:
+    if not case_ids:
+        return "---"
+    visible = case_ids[:limit]
+    text = ", ".join(f"`{case_id}`" for case_id in visible)
+    if len(case_ids) > limit:
+        text += f", +{len(case_ids) - limit} more"
+    return text
+
+
+def _format_counter(values: dict[str, int]) -> str:
+    if not values:
+        return "---"
+    return ", ".join(f"{key}: {value}" for key, value in values.items())
+
+
+def _selection_description(summary: dict[str, Any]) -> str:
+    policy = str(summary.get("selection_policy") or "unspecified")
+    size = summary.get("size")
+    if size is None:
+        return f"Case selection policy: `{policy}`."
+    prediction_flag = bool(summary.get("uses_model_predictions", False))
+    correctness_flag = bool(summary.get("uses_answer_correctness", False))
+    return (
+        f"Case selection policy: `{policy}` ({size} cases; "
+        f"uses model predictions: {str(prediction_flag).lower()}; "
+        f"uses answer correctness: {str(correctness_flag).lower()})."
+    )
 
 
 def _optional_delta(

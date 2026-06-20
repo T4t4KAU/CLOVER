@@ -30,6 +30,7 @@ USER_SYNTHESIZE_LLM_CONFIG="model_config/deepseek_remote_llm_config.json"
 USER_OUTPUT_ROOT=""                # Empty: benchmark/runs/<dataset>_ablation_<time>
 USER_ABLATION_SIZE="100"
 USER_ABLATION_SEED="20260619"
+USER_ABLATION_SELECTION_POLICY="edge_opportunity"  # representative | edge_opportunity
 USER_MAX_RETRIES="1"
 USER_VALIDATE_ONLY="false"         # true: validate settings/cases without running
 USER_VARIANT_ORDER=""              # Empty: deterministic shuffle using the seed
@@ -78,6 +79,7 @@ Examples:
 Useful environment variables:
   CLOVER_ABLATION_SIZE=100
   CLOVER_ABLATION_SEED=20260619
+  CLOVER_ABLATION_SELECTION_POLICY=edge_opportunity
   CLOVER_ABLATION_REGENERATE_MANIFEST=1
   CLOVER_ABLATION_OUTPUT_ROOT=/path/to/output
   CLOVER_EDGE_MODEL_PATH=/path/to/model
@@ -170,8 +172,17 @@ DATASETS_ROOT="${CLOVER_DATASETS_ROOT:-${REPO_ROOT}/datasets}"
 DATASET_ROOT="${DATASETS_ROOT}/${DATASET}"
 SIZE="${CLOVER_ABLATION_SIZE:-${USER_ABLATION_SIZE}}"
 SEED="${CLOVER_ABLATION_SEED:-${USER_ABLATION_SEED}}"
+SELECTION_POLICY="${CLOVER_ABLATION_SELECTION_POLICY:-${USER_ABLATION_SELECTION_POLICY}}"
+SELECTION_POLICY="$(printf '%s' "${SELECTION_POLICY}" | tr '[:upper:]-' '[:lower:]_')"
+case "${SELECTION_POLICY}" in
+  representative|edge_opportunity) ;;
+  *)
+    echo "Unsupported ablation selection policy: ${SELECTION_POLICY}" >&2
+    exit 2
+    ;;
+esac
 MANIFEST_ROOT="${CLOVER_ABLATION_MANIFEST_ROOT:-${SCRIPT_DIR}/ablation_cases}"
-MANIFEST="${CLOVER_ABLATION_MANIFEST:-${MANIFEST_ROOT}/${DATASET}_${SIZE}_seed${SEED}.jsonl}"
+MANIFEST="${CLOVER_ABLATION_MANIFEST:-${MANIFEST_ROOT}/${DATASET}_${SELECTION_POLICY}_${SIZE}_seed${SEED}.jsonl}"
 REGENERATE_MANIFEST="${CLOVER_ABLATION_REGENERATE_MANIFEST:-0}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 DEFAULT_OUTPUT_ROOT="${REPO_ROOT}/benchmark/runs/${DATASET}_ablation_${TIMESTAMP}"
@@ -237,6 +248,7 @@ elif [[ ! -f "${MANIFEST}" || "${REGENERATE_MANIFEST}" == "1" ]]; then
     --output "${MANIFEST}" \
     --size "${SIZE}" \
     --seed "${SEED}" \
+    --selection-policy "${SELECTION_POLICY}" \
     >"${SUITE_ROOT}/manifest_generation.json"
 fi
 
@@ -262,6 +274,7 @@ if ! load_manifest_case_ids; then
     --output "${MANIFEST}" \
     --size "${SIZE}" \
     --seed "${SEED}" \
+    --selection-policy "${SELECTION_POLICY}" \
     >"${SUITE_ROOT}/manifest_generation.json"
   load_manifest_case_ids
 fi
@@ -279,6 +292,7 @@ if [[ "${#SELECTED_CASE_IDS[@]}" -ne "${SIZE}" ]]; then
       --output "${MANIFEST}" \
       --size "${SIZE}" \
       --seed "${SEED}" \
+      --selection-policy "${SELECTION_POLICY}" \
       >"${SUITE_ROOT}/manifest_generation.json"
     load_manifest_case_ids
     SELECTED_CASE_IDS=()
@@ -311,6 +325,7 @@ case "$(printf '%s' "${VALIDATE_ONLY}" | tr '[:upper:]' '[:lower:]')" in
     echo "  GPUs: ${CLOVER_VLLM_GPUS}" >&2
     echo "  vLLM endpoint: ${CLOVER_VLLM_HOST}:${CLOVER_VLLM_PORT}" >&2
     echo "  cases: ${#SELECTED_CASE_IDS[@]}" >&2
+    echo "  selection policy: ${SELECTION_POLICY}" >&2
     echo "  manifest: ${ACTIVE_MANIFEST}" >&2
     echo "  output: ${SUITE_ROOT}" >&2
     exit 0
