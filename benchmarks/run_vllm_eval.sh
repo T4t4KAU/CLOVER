@@ -33,11 +33,16 @@ Examples:
   # Temporarily override dataset/model:
   bash benchmarks/run_vllm_eval.sh tablebench /models/Qwen2.5-3B-Instruct --max-cases 10
   bash benchmarks/run_vllm_eval.sh wikitq Qwen/Qwen2.5-3B-Instruct --sample-size 100
-  TABLEFACT_SUBSET=simple bash benchmarks/run_vllm_eval.sh tablefact /models/Qwen2.5-3B-Instruct
+  bash benchmarks/run_vllm_eval.sh tablefact /models/Qwen2.5-3B-Instruct
 
 The script starts a vLLM OpenAI-compatible server for CLOVER's local edge
 model, creates a temporary local model config, and launches the selected eval.
 Cloud planning/synthesis uses CLOVER_REMOTE_LLM_CONFIG (DeepSeek by default).
+
+Official experiment scopes:
+  TableBench: FactChecking + NumericalReasoning (493 cases)
+  WikiTQ: pristine-unseen-tables (4344 cases)
+  TableFact: TabFact small-test (1998 cases)
 EOF
 }
 
@@ -69,6 +74,17 @@ case "${DATASET}" in
     ;;
 esac
 EXTRA_EVAL_ARGS=("$@")
+for arg in "${EXTRA_EVAL_ARGS[@]}"; do
+  case "${arg}" in
+    --qtype|--qtype=*|--qsubtype|--qsubtype=*|--include-visualization|\
+    --wikitq-split|--wikitq-split=*|--tablefact-split|--tablefact-split=*|\
+    --tabfact-split|--tabfact-split=*|--tablefact-subset|--tablefact-subset=*|\
+    --tabfact-subset|--tabfact-subset=*)
+      echo "Dataset scope is fixed by run_vllm_eval.sh; remove: ${arg}" >&2
+      exit 2
+      ;;
+  esac
+done
 
 HOST="${CLOVER_VLLM_HOST:-${CLOVER_LOCAL_HOST:-127.0.0.1}}"
 PORT="${CLOVER_VLLM_PORT:-${CLOVER_LOCAL_PORT:-8000}}"
@@ -84,7 +100,19 @@ WIKITQ_ROOT="${WIKITQ_ROOT:-${DATASETS_ROOT}/wikitq}"
 TABLEFACT_ROOT="${TABLEFACT_ROOT:-${DATASETS_ROOT}/tablefact}"
 WIKITQ_SPLIT="${WIKITQ_SPLIT:-pristine-unseen-tables}"
 TABLEFACT_SPLIT="${TABLEFACT_SPLIT:-test}"
-TABLEFACT_SUBSET="${TABLEFACT_SUBSET:-}"
+TABLEFACT_SUBSET="${TABLEFACT_SUBSET:-small}"
+
+if [[ "${DATASET}" == "tablefact" ]]; then
+  if [[ "${TABLEFACT_SPLIT}" != "test" ]]; then
+    echo "TableFact evaluation is fixed to split=test, got: ${TABLEFACT_SPLIT}" >&2
+    exit 2
+  fi
+  if [[ "${TABLEFACT_SUBSET}" != "small" ]]; then
+    echo "TableFact evaluation is fixed to subset=small (TabFact-small-test)." >&2
+    echo "Got TABLEFACT_SUBSET=${TABLEFACT_SUBSET}" >&2
+    exit 2
+  fi
+fi
 
 REMOTE_LLM_CONFIG="${CLOVER_REMOTE_LLM_CONFIG:-${REPO_ROOT}/model_config/deepseek_remote_llm_config.json}"
 SYNTHESIZE_LLM_CONFIG="${CLOVER_SYNTHESIZE_LLM_CONFIG:-${REMOTE_LLM_CONFIG}}"
@@ -220,6 +248,71 @@ if ! find "${DATASET_ROOT}" -mindepth 2 -maxdepth 2 -name cases.jsonl \
   echo "Run: bash benchmarks/download_datasets.sh --dataset ${DATASET}" >&2
   exit 1
 fi
+
+SELECTED_COUNT="$(
+  "${PYTHON_BIN}" - "${DATASET}" "${TABLEBENCH_ROOT}" "${WIKITQ_ROOT}" \
+    "${TABLEFACT_ROOT}" "${WIKITQ_SPLIT}" "${TABLEFACT_SPLIT}" \
+    "${TABLEFACT_SUBSET}" <<'PY'
+import sys
+from pathlib import Path
+
+dataset, tablebench_root, wikitq_root, tablefact_root = sys.argv[1:5]
+wikitq_split, tablefact_split, tablefact_subset = sys.argv[5:8]
+
+if dataset == "tablebench":
+    from benchmarks.tablebench.eval import select_tablebench_cases
+
+    selected = select_tablebench_cases(
+        tablebench_root=Path(tablebench_root),
+        max_cases=None,
+        case_ids=set(),
+        dataset_id=None,
+        qtypes={"FactChecking", "NumericalReasoning"},
+        qsubtypes=set(),
+        include_visualization=False,
+        sample_size=None,
+        seed=20260528,
+    )
+elif dataset == "wikitq":
+    from benchmarks.wikitq.eval import select_wikitq_cases
+
+    selected = select_wikitq_cases(
+        wikitq_root=Path(wikitq_root),
+        max_cases=None,
+        case_ids=set(),
+        dataset_id=None,
+        split=wikitq_split,
+        sample_size=None,
+        seed=20260528,
+    )
+else:
+    from benchmarks.tablefact.eval import select_tablefact_cases
+
+    selected = select_tablefact_cases(
+        tablefact_root=Path(tablefact_root),
+        max_cases=None,
+        case_ids=set(),
+        dataset_id=None,
+        split=tablefact_split,
+        subset=tablefact_subset,
+        sample_size=None,
+        seed=20260528,
+    )
+
+print(len(selected))
+PY
+)"
+case "${DATASET}" in
+  tablebench) EXPECTED_COUNT=493 ;;
+  wikitq) EXPECTED_COUNT=4344 ;;
+  tablefact) EXPECTED_COUNT=1998 ;;
+esac
+if [[ "${SELECTED_COUNT}" != "${EXPECTED_COUNT}" ]]; then
+  echo "Unexpected ${DATASET} evaluation scope." >&2
+  echo "Expected ${EXPECTED_COUNT} cases, selected ${SELECTED_COUNT}." >&2
+  exit 1
+fi
+echo "Validated ${DATASET} evaluation scope: ${SELECTED_COUNT} cases" >&2
 
 "${PYTHON_BIN}" - <<'PY'
 import importlib.util
@@ -422,7 +515,12 @@ EVAL_CMD=(
 )
 case "${DATASET}" in
   tablebench)
-    EVAL_CMD+=(--tablebench-eval --tablebench-root "${TABLEBENCH_ROOT}")
+    EVAL_CMD+=(
+      --tablebench-eval
+      --tablebench-root "${TABLEBENCH_ROOT}"
+      --qtype FactChecking
+      --qtype NumericalReasoning
+    )
     ;;
   wikitq)
     EVAL_CMD+=(
@@ -436,14 +534,13 @@ case "${DATASET}" in
       --tablefact-eval
       --tablefact-root "${TABLEFACT_ROOT}"
       --tablefact-split "${TABLEFACT_SPLIT}"
+      --tablefact-subset "${TABLEFACT_SUBSET}"
     )
-    [[ -n "${TABLEFACT_SUBSET}" ]] \
-      && EVAL_CMD+=(--tablefact-subset "${TABLEFACT_SUBSET}")
     ;;
 esac
 [[ "${#EXTRA_EVAL_ARGS[@]}" -gt 0 ]] && EVAL_CMD+=("${EXTRA_EVAL_ARGS[@]}")
 
-echo "Running ${DATASET} evaluation" >&2
+echo "Running ${DATASET} evaluation (${SELECTED_COUNT} cases)" >&2
 PYTHONWARNINGS="ignore" \
 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
 "${EVAL_CMD[@]}"
