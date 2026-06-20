@@ -19,6 +19,17 @@ VARIANT_FLAGS = {
         "enable_cloud_synthesis": True,
         "enable_static_finalization": True,
     },
+    "no_edge": {
+        "enable_edge_agent": False,
+        "enable_edge_repair": False,
+        "enable_terminal_edge_review": False,
+        "enable_contract_gate": True,
+        "enable_node_review": False,
+        "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
+        "enable_static_finalization": True,
+    },
     "static": {
         "enable_edge_agent": True,
         "enable_edge_repair": False,
@@ -100,10 +111,7 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
             actual_cases == expected_cases,
             {"expected": len(expected_cases), "actual": len(actual_cases)},
         )
-        features = (
-            summary.get("local_slm", {})
-            .get("runtime_features", {})
-        )
+        features = summary.get("local_slm", {}).get("runtime_features", {})
         _record_check(
             checks,
             failures,
@@ -113,6 +121,38 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
             {"expected": expected_flags, "actual": features},
         )
         counters = summary.get("system_profile", {}).get("counters", {})
+        if variant == "no_edge":
+            no_edge_activity = {
+                "local_slm_calls": int(summary.get("local_slm_calls", 0) or 0),
+                "local_slm_tokens": int(
+                    (summary.get("local_slm_token_usage") or {}).get(
+                        "total_tokens",
+                        0,
+                    )
+                    or 0
+                ),
+                "executor_edge_agent_calls": int(counters.get("executor_edge_agent_calls", 0) or 0),
+                "executor_local_slm_steps": int(counters.get("executor_local_slm_steps", 0) or 0),
+                "executor_edge_local_reviews": int(
+                    counters.get("executor_edge_local_reviews", 0) or 0
+                ),
+                "executor_contract_rejections": int(
+                    counters.get("executor_contract_rejections", 0) or 0
+                ),
+                "edge_local_review_calls": int(summary.get("edge_local_review_calls", 0) or 0),
+                "edge_local_review_hits": int(summary.get("edge_local_review_hits", 0) or 0),
+                "edge_local_review_escalations": int(
+                    summary.get("edge_local_review_escalations", 0) or 0
+                ),
+            }
+            _record_check(
+                checks,
+                failures,
+                variant,
+                "all_edge_paths_disabled",
+                all(value == 0 for value in no_edge_activity.values()),
+                no_edge_activity,
+            )
         if variant in {"static", "end_review"}:
             edge_steps = int(counters.get("executor_local_slm_steps", 0) or 0)
             _record_check(
@@ -151,17 +191,13 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
         if variant == "cloud_finalize":
             static_hits = int(counters.get("static_final_answer_hits", 0) or 0)
             action_hits = int(counters.get("action_group_static_answer_hits", 0) or 0)
-            terminal_edge_calls = int(
-                counters.get("edge_local_review_calls", 0) or 0
-            )
+            terminal_edge_calls = int(counters.get("edge_local_review_calls", 0) or 0)
             _record_check(
                 checks,
                 failures,
                 variant,
                 "static_finalization_disabled",
-                static_hits == 0
-                and action_hits == 0
-                and terminal_edge_calls == 0,
+                static_hits == 0 and action_hits == 0 and terminal_edge_calls == 0,
                 {
                     "static_final_answer_hits": static_hits,
                     "action_group_static_answer_hits": action_hits,
@@ -205,17 +241,11 @@ def _record_check(
 
 
 def _manifest_case_keys(path: Path) -> set[tuple[str, str]]:
-    return {
-        (str(record["dataset_id"]), str(record["case_id"]))
-        for record in _read_jsonl(path)
-    }
+    return {(str(record["dataset_id"]), str(record["case_id"])) for record in _read_jsonl(path)}
 
 
 def _run_case_keys(path: Path) -> set[tuple[str, str]]:
-    return {
-        (str(record["dataset_id"]), str(record["case_id"]))
-        for record in _read_jsonl(path)
-    }
+    return {(str(record["dataset_id"]), str(record["case_id"])) for record in _read_jsonl(path)}
 
 
 def _read_json(path: Path) -> dict[str, Any]:

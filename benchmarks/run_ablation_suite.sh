@@ -32,7 +32,7 @@ USER_ABLATION_SEED="20260619"
 USER_MAX_RETRIES="1"
 USER_VALIDATE_ONLY="false"         # true: validate settings/cases without running
 USER_VARIANT_ORDER=""              # Empty: deterministic shuffle using the seed
-                                    # Or: full,static,no_contract,end_review,one_shot,cloud_finalize
+                                    # Or: full,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
 
 # Optional explicit case IDs. Leave this empty to use the bundled fixed
 # 100-case manifest in benchmarks/ablation_cases.
@@ -56,10 +56,11 @@ Usage:
 DATASET:
   tablebench | wikitq
 
-This runs six variants on one fixed 100-case manifest:
-  full, static, no_contract, end_review, one_shot, cloud_finalize
+This runs seven variants on one fixed 100-case manifest:
+  full, no_edge, static, no_contract, end_review, one_shot, cloud_finalize
 
 The internal names map to:
+  no_edge        = w/o Edge Agent (all local Edge paths disabled)
   static         = w/o Edge Repair (terminal Edge review remains enabled)
   end_review     = end-only Edge review
   one_shot       = w/o Cloud Replan (Cloud final synthesis remains enabled)
@@ -79,7 +80,7 @@ Useful environment variables:
   CLOVER_ABLATION_REGENERATE_MANIFEST=1
   CLOVER_ABLATION_OUTPUT_ROOT=/path/to/output
   CLOVER_EDGE_MODEL_PATH=/path/to/model
-  CLOVER_ABLATION_VARIANT_ORDER=full,static,no_contract,end_review,one_shot,cloud_finalize
+  CLOVER_ABLATION_VARIANT_ORDER=full,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
   CLOVER_VLLM_WARMUP=true
 EOF
 }
@@ -332,16 +333,16 @@ trap cleanup EXIT
 
 run_variant() {
   local variant="$1"
-  local edge_repair="$2"
-  local terminal_edge_review="$3"
-  local contract_gate="$4"
-  local node_review="$5"
-  local cloud_replan="$6"
-  local cloud_synthesis="$7"
-  local static_finalization="$8"
-  local edge_agent="true"
+  local edge_agent="$2"
+  local edge_repair="$3"
+  local terminal_edge_review="$4"
+  local contract_gate="$5"
+  local node_review="$6"
+  local cloud_replan="$7"
+  local cloud_synthesis="$8"
+  local static_finalization="$9"
   local edge_review_mode="safe"
-  if [[ "${terminal_edge_review}" != "true" ]]; then
+  if [[ "${edge_agent}" != "true" || "${terminal_edge_review}" != "true" ]]; then
     edge_review_mode="off"
   fi
 
@@ -377,22 +378,25 @@ run_variant() {
 run_named_variant() {
   case "$1" in
     full)
-      run_variant full true true true true true true true
+      run_variant full true true true true true true true true
+      ;;
+    no_edge)
+      run_variant no_edge false false false true false true true true
       ;;
     static)
-      run_variant static false true true true true true true
+      run_variant static true false true true true true true true
       ;;
     no_contract)
-      run_variant no_contract true true false true true true true
+      run_variant no_contract true true true false true true true true
       ;;
     end_review)
-      run_variant end_review false true true false true true true
+      run_variant end_review true false true true false true true true
       ;;
     one_shot)
-      run_variant one_shot true true true true false true true
+      run_variant one_shot true true true true true false true true
       ;;
     cloud_finalize)
-      run_variant cloud_finalize true false true true true true false
+      run_variant cloud_finalize true true false true true true true false
       ;;
     *)
       echo "Unknown ablation variant: $1" >&2
@@ -421,6 +425,7 @@ import sys
 
 variants = [
     "full",
+    "no_edge",
     "static",
     "no_contract",
     "end_review",
@@ -438,6 +443,7 @@ import sys
 
 expected = {
     "full",
+    "no_edge",
     "static",
     "no_contract",
     "end_review",
