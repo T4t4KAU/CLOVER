@@ -42,6 +42,7 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
             self.assertEqual(rows["static"]["regressions_vs_full"], 1)
             self.assertEqual(rows["static"]["recoveries_vs_full"], 0)
             self.assertEqual(rows["static"]["delta_vs_full_pp"], -25.0)
+            self.assertEqual(rows["static"]["mcnemar_exact_p"], 1.0)
             self.assertEqual(rows["no_contract"]["recoveries_vs_full"], 1)
             self.assertEqual(rows["no_contract"]["delta_vs_full_pp"], 25.0)
             self.assertTrue((suite_root / "ablation_summary.json").is_file())
@@ -51,8 +52,9 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
             )
 
         self.assertIn("| Full CLOVER | 2/4 | 50.0% | +0.0 pp |", markdown)
-        self.assertIn("| w/o Edge Repair/Review | 1/4 | 25.0% | -25.0 pp |", markdown)
+        self.assertIn("| w/o Edge Repair | 1/4 | 25.0% | -25.0 pp |", markdown)
         self.assertIn("Cloud calls", markdown)
+        self.assertIn("Mechanism activity", markdown)
 
 
 def _write_variant(
@@ -70,6 +72,7 @@ def _write_variant(
             "dataset_id": f"table-{case_index}",
             "case_id": f"case-{case_index}",
             "answer_correct": correct,
+            "final_answer_source": "synthesis" if case_index % 2 else "format_answer",
         }
         for case_index, correct in enumerate(results)
     ]
@@ -84,12 +87,22 @@ def _write_variant(
         "remote_calls": 10 + index,
         "edge_local_review_calls": index,
         "edge_local_review_hits": max(0, index - 1),
+        "edge_local_review_escalations": 1,
+        "local_slm_calls": index + 2,
         "remote_token_usage": {"total_tokens": 1000 + index},
         "local_slm_token_usage": {"total_tokens": 100 + index},
         "remote_cost_estimate": {"cost_usd": {"total": 0.01 + index / 100}},
         "elapsed_seconds": 60 + index,
         "system_profile": {
-            "counters": {"supervisor_synthesis_calls": 2 + index}
+            "counters": {
+                "supervisor_synthesis_calls": 2 + index,
+                "cloud_replan_calls": index,
+                "executor_edge_agent_calls": index + 1,
+                "executor_edge_agent_successes": index,
+                "executor_local_slm_steps": index + 3,
+                "executor_edge_local_reviews": index + 4,
+                "executor_contract_rejections": index + 5,
+            }
         },
     }
     (run_dir / "run_summary.json").write_text(

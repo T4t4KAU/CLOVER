@@ -21,6 +21,7 @@ USER_VLLM_TENSOR_PARALLEL_SIZE=""  # Empty: infer from USER_VLLM_GPUS
 USER_VLLM_MAX_MODEL_LEN=""         # Example: "16384"; empty: model default
 USER_VLLM_GPU_MEMORY_UTILIZATION="0.88"
 USER_VLLM_SERVER_ARGS=""           # Example: "--max-num-seqs 32"
+USER_VLLM_WARMUP="true"            # Warm up before each timed variant
 
 # Cloud model configs and experiment output.
 USER_REMOTE_LLM_CONFIG="model_config/deepseek_remote_llm_config.json"
@@ -30,6 +31,8 @@ USER_ABLATION_SIZE="100"
 USER_ABLATION_SEED="20260619"
 USER_MAX_RETRIES="1"
 USER_VALIDATE_ONLY="false"         # true: validate settings/cases without running
+USER_VARIANT_ORDER=""              # Empty: deterministic shuffle using the seed
+                                    # Or: full,static,no_contract,end_review,one_shot,cloud_finalize
 
 # Optional explicit case IDs. Leave this empty to use the bundled fixed
 # 100-case manifest in benchmarks/ablation_cases.
@@ -56,6 +59,12 @@ DATASET:
 This runs six variants on one fixed 100-case manifest:
   full, static, no_contract, end_review, one_shot, cloud_finalize
 
+The internal names map to:
+  static         = w/o Edge Repair (terminal Edge review remains enabled)
+  end_review     = end-only Edge review
+  one_shot       = w/o Cloud Replan (Cloud final synthesis remains enabled)
+  cloud_finalize = force final synthesis through Cloud
+
 Examples:
   # Use the User settings block at the top of this script:
   bash benchmarks/run_ablation_suite.sh
@@ -70,6 +79,8 @@ Useful environment variables:
   CLOVER_ABLATION_REGENERATE_MANIFEST=1
   CLOVER_ABLATION_OUTPUT_ROOT=/path/to/output
   CLOVER_EDGE_MODEL_PATH=/path/to/model
+  CLOVER_ABLATION_VARIANT_ORDER=full,static,no_contract,end_review,one_shot,cloud_finalize
+  CLOVER_VLLM_WARMUP=true
 EOF
 }
 
@@ -132,6 +143,7 @@ export CLOVER_VLLM_HOST="${CLOVER_VLLM_HOST:-${USER_VLLM_HOST}}"
 export CLOVER_VLLM_PORT="${CLOVER_VLLM_PORT:-${USER_VLLM_PORT}}"
 export CLOVER_VLLM_GPU_MEMORY_UTILIZATION="${CLOVER_VLLM_GPU_MEMORY_UTILIZATION:-${USER_VLLM_GPU_MEMORY_UTILIZATION}}"
 export CLOVER_VLLM_SERVER_ARGS="${CLOVER_VLLM_SERVER_ARGS:-${USER_VLLM_SERVER_ARGS}}"
+export CLOVER_VLLM_WARMUP="${CLOVER_VLLM_WARMUP:-${USER_VLLM_WARMUP}}"
 if [[ -n "${USER_VLLM_TENSOR_PARALLEL_SIZE}" \
     && -z "${CLOVER_VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
   export CLOVER_VLLM_TENSOR_PARALLEL_SIZE="${USER_VLLM_TENSOR_PARALLEL_SIZE}"
@@ -320,22 +332,29 @@ trap cleanup EXIT
 
 run_variant() {
   local variant="$1"
-  local edge_agent="$2"
-  local contract_gate="$3"
-  local node_review="$4"
-  local cloud_recovery="$5"
-  local static_finalization="$6"
+  local edge_repair="$2"
+  local terminal_edge_review="$3"
+  local contract_gate="$4"
+  local node_review="$5"
+  local cloud_replan="$6"
+  local cloud_synthesis="$7"
+  local static_finalization="$8"
+  local edge_agent="true"
   local edge_review_mode="safe"
-  if [[ "${edge_agent}" != "true" ]]; then
+  if [[ "${terminal_edge_review}" != "true" ]]; then
     edge_review_mode="off"
   fi
 
   echo "Running ${DATASET} ablation variant: ${variant}" >&2
   CLOVER_ABLATION_VARIANT="${variant}" \
   CLOVER_ENABLE_EDGE_AGENT="${edge_agent}" \
+  CLOVER_ENABLE_EDGE_REPAIR="${edge_repair}" \
+  CLOVER_ENABLE_TERMINAL_EDGE_REVIEW="${terminal_edge_review}" \
   CLOVER_ENABLE_CONTRACT_GATE="${contract_gate}" \
   CLOVER_ENABLE_NODE_REVIEW="${node_review}" \
-  CLOVER_ENABLE_CLOUD_RECOVERY="${cloud_recovery}" \
+  CLOVER_ENABLE_CLOUD_RECOVERY=true \
+  CLOVER_ENABLE_CLOUD_REPLAN="${cloud_replan}" \
+  CLOVER_ENABLE_CLOUD_SYNTHESIS="${cloud_synthesis}" \
   CLOVER_ENABLE_STATIC_FINALIZATION="${static_finalization}" \
   CLOVER_EDGE_REVIEW_MODE="${edge_review_mode}" \
   CLOVER_VLLM_PERSIST_SERVER=true \
@@ -355,12 +374,89 @@ run_variant() {
     "${SUITE_ROOT}/${DATASET}_${variant}/ablation_cases.jsonl"
 }
 
-run_variant full true true true true true
-run_variant static false true true true true
-run_variant no_contract true false true true true
-run_variant end_review false true false true true
-run_variant one_shot true true true false true
-run_variant cloud_finalize true true true true false
+run_named_variant() {
+  case "$1" in
+    full)
+      run_variant full true true true true true true true
+      ;;
+    static)
+      run_variant static false true true true true true true
+      ;;
+    no_contract)
+      run_variant no_contract true true false true true true true
+      ;;
+    end_review)
+      run_variant end_review false true true false true true true
+      ;;
+    one_shot)
+      run_variant one_shot true true true true false true true
+      ;;
+    cloud_finalize)
+      run_variant cloud_finalize true false true true true true false
+      ;;
+    *)
+      echo "Unknown ablation variant: $1" >&2
+      exit 2
+      ;;
+  esac
+}
+
+VARIANT_ORDER_RAW="${CLOVER_ABLATION_VARIANT_ORDER:-${USER_VARIANT_ORDER}}"
+VARIANT_ORDER=()
+if [[ -n "${VARIANT_ORDER_RAW}" ]]; then
+  while IFS= read -r variant; do
+    [[ -n "${variant}" ]] && VARIANT_ORDER+=("${variant}")
+  done < <(
+    printf '%s' "${VARIANT_ORDER_RAW}" \
+      | tr ',' '\n' \
+      | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  )
+else
+  while IFS= read -r variant; do
+    [[ -n "${variant}" ]] && VARIANT_ORDER+=("${variant}")
+  done < <(
+    "${PYTHON_BIN}" - "${SEED}" <<'PY'
+import random
+import sys
+
+variants = [
+    "full",
+    "static",
+    "no_contract",
+    "end_review",
+    "one_shot",
+    "cloud_finalize",
+]
+random.Random(int(sys.argv[1])).shuffle(variants)
+print("\n".join(variants))
+PY
+  )
+fi
+
+"${PYTHON_BIN}" - "${VARIANT_ORDER[@]}" <<'PY'
+import sys
+
+expected = {
+    "full",
+    "static",
+    "no_contract",
+    "end_review",
+    "one_shot",
+    "cloud_finalize",
+}
+actual = sys.argv[1:]
+if len(actual) != len(expected) or set(actual) != expected:
+    raise SystemExit(
+        "Variant order must contain each variant exactly once: "
+        + ",".join(sorted(expected))
+    )
+PY
+
+printf '%s\n' "${VARIANT_ORDER[@]}" >"${SUITE_ROOT}/variant_order.txt"
+echo "Ablation variant order: ${VARIANT_ORDER[*]}" >&2
+for variant in "${VARIANT_ORDER[@]}"; do
+  run_named_variant "${variant}"
+done
 
 "${PYTHON_BIN}" -m benchmarks.check_ablation_suite \
   --suite-root "${SUITE_ROOT}" \

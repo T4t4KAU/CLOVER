@@ -99,6 +99,8 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                 "api_type": "chat_completions",
                 "model": "edge-model",
                 "edge_review_mode": "safe",
+                "enable_edge_repair": False,
+                "enable_terminal_edge_review": True,
             }
             local_client = _StatefulChatClient(
                 [
@@ -653,6 +655,101 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertFalse(result.case_results[0].ok)
         self.assertEqual(result.case_results[0].retry_count, 0)
         self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
+
+    def test_cloud_replan_ablation_keeps_cloud_final_synthesis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        [
+                            'SELECT "missing" AS "answer_1" FROM "table_1";',
+                        ]
+                    ),
+                    json.dumps({"a": 2}),
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        Path(tmpdir),
+                        table_path,
+                        "How many rows?",
+                        "number",
+                    ),
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                local_slm_config={
+                    "enable_cloud_recovery": True,
+                    "enable_cloud_replan": False,
+                    "enable_cloud_synthesis": True,
+                    "edge_review_mode": "off",
+                },
+                remote_batch_size=1,
+                max_retries=1,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(len(client.chat.completions.requests), 2)
+        self.assertTrue(result.case_results[0].ok)
+        self.assertEqual(result.case_results[0].answer, 2)
+        self.assertEqual(result.case_results[0].retry_count, 0)
+        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
+        self.assertNotIn("cloud_replan_calls", result.profile["counters"])
+
+    def test_cloud_replan_ablation_rejects_followup_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        [
+                            'SELECT "missing" AS "answer_1" FROM "table_1";',
+                        ]
+                    ),
+                    json.dumps(
+                        {
+                            "op": "sql",
+                            "q": 'SELECT COUNT(*) AS "answer_1" FROM "table_1";',
+                        }
+                    ),
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        Path(tmpdir),
+                        table_path,
+                        "How many rows?",
+                        "number",
+                    ),
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                local_slm_config={
+                    "enable_cloud_replan": False,
+                    "enable_cloud_synthesis": True,
+                    "edge_review_mode": "off",
+                },
+                remote_batch_size=1,
+                max_retries=1,
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(len(client.chat.completions.requests), 2)
+        self.assertFalse(result.case_results[0].ok)
+        self.assertEqual(result.case_results[0].retry_count, 0)
+        self.assertEqual(
+            result.case_results[0].error["type"],
+            "CloudReplanDisabled",
+        )
+        self.assertEqual(result.profile["counters"]["cloud_replan_blocked"], 1)
+        self.assertNotIn("cloud_replan_calls", result.profile["counters"])
 
     def test_analyze_profile_runs_evidence_sql_then_supervisor_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

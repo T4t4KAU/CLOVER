@@ -10,44 +10,68 @@ from typing import Any, Sequence
 VARIANT_FLAGS = {
     "full": {
         "enable_edge_agent": True,
+        "enable_edge_repair": True,
+        "enable_terminal_edge_review": True,
         "enable_contract_gate": True,
         "enable_node_review": True,
         "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
         "enable_static_finalization": True,
     },
     "static": {
-        "enable_edge_agent": False,
+        "enable_edge_agent": True,
+        "enable_edge_repair": False,
+        "enable_terminal_edge_review": True,
         "enable_contract_gate": True,
         "enable_node_review": True,
         "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
         "enable_static_finalization": True,
     },
     "no_contract": {
         "enable_edge_agent": True,
+        "enable_edge_repair": True,
+        "enable_terminal_edge_review": True,
         "enable_contract_gate": False,
         "enable_node_review": True,
         "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
         "enable_static_finalization": True,
     },
     "end_review": {
-        "enable_edge_agent": False,
+        "enable_edge_agent": True,
+        "enable_edge_repair": False,
+        "enable_terminal_edge_review": True,
         "enable_contract_gate": True,
         "enable_node_review": False,
         "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
         "enable_static_finalization": True,
     },
     "one_shot": {
         "enable_edge_agent": True,
+        "enable_edge_repair": True,
+        "enable_terminal_edge_review": True,
         "enable_contract_gate": True,
         "enable_node_review": True,
-        "enable_cloud_recovery": False,
+        "enable_cloud_recovery": True,
+        "enable_cloud_replan": False,
+        "enable_cloud_synthesis": True,
         "enable_static_finalization": True,
     },
     "cloud_finalize": {
         "enable_edge_agent": True,
+        "enable_edge_repair": True,
+        "enable_terminal_edge_review": False,
         "enable_contract_gate": True,
         "enable_node_review": True,
         "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
         "enable_static_finalization": False,
     },
 }
@@ -90,38 +114,58 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
         )
         counters = summary.get("system_profile", {}).get("counters", {})
         if variant in {"static", "end_review"}:
-            edge_calls = int(counters.get("edge_local_review_calls", 0) or 0)
             edge_steps = int(counters.get("executor_local_slm_steps", 0) or 0)
             _record_check(
                 checks,
                 failures,
                 variant,
-                "edge_disabled",
-                edge_calls == 0 and edge_steps == 0,
-                {"edge_review_calls": edge_calls, "executor_local_slm_steps": edge_steps},
+                "edge_repair_disabled",
+                edge_steps == 0,
+                {"executor_local_slm_steps": edge_steps},
             )
-        if variant == "one_shot":
-            synthesis_calls = int(counters.get("supervisor_synthesis_calls", 0) or 0)
+        if variant == "end_review":
+            node_reviews = int(counters.get("executor_edge_local_reviews", 0) or 0)
             _record_check(
                 checks,
                 failures,
                 variant,
-                "no_followup_cloud_calls",
-                synthesis_calls == 0,
-                {"supervisor_synthesis_calls": synthesis_calls},
+                "node_review_disabled",
+                node_reviews == 0,
+                {"executor_edge_local_reviews": node_reviews},
+            )
+        if variant == "one_shot":
+            replan_calls = int(counters.get("cloud_replan_calls", 0) or 0)
+            _record_check(
+                checks,
+                failures,
+                variant,
+                "cloud_replan_disabled",
+                replan_calls == 0,
+                {
+                    "cloud_replan_calls": replan_calls,
+                    "supervisor_synthesis_calls": int(
+                        counters.get("supervisor_synthesis_calls", 0) or 0
+                    ),
+                },
             )
         if variant == "cloud_finalize":
             static_hits = int(counters.get("static_final_answer_hits", 0) or 0)
             action_hits = int(counters.get("action_group_static_answer_hits", 0) or 0)
+            terminal_edge_calls = int(
+                counters.get("edge_local_review_calls", 0) or 0
+            )
             _record_check(
                 checks,
                 failures,
                 variant,
                 "static_finalization_disabled",
-                static_hits == 0 and action_hits == 0,
+                static_hits == 0
+                and action_hits == 0
+                and terminal_edge_calls == 0,
                 {
                     "static_final_answer_hits": static_hits,
                     "action_group_static_answer_hits": action_hits,
+                    "edge_local_review_calls": terminal_edge_calls,
                 },
             )
 

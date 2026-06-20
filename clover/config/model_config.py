@@ -51,11 +51,15 @@ FLOAT_FIELDS = {
 }
 BOOLEAN_FIELDS = {
     "disable_agent_loop",
+    "enable_cloud_replan",
     "enable_cloud_recovery",
+    "enable_cloud_synthesis",
     "enable_contract_gate",
     "enable_edge_agent",
+    "enable_edge_repair",
     "enable_node_review",
     "enable_static_finalization",
+    "enable_terminal_edge_review",
     "http2",
     "trust_env",
 }

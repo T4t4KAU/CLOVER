@@ -94,9 +94,13 @@ AGENT_LOOP_MAX_ITERATIONS="${CLOVER_AGENT_LOOP_MAX_ITERATIONS:-8}"
 EDGE_REVIEW_MODE="${CLOVER_EDGE_REVIEW_MODE:-safe}"  # off | shadow | safe
 ABLATION_VARIANT="${CLOVER_ABLATION_VARIANT:-full}"
 ENABLE_EDGE_AGENT="${CLOVER_ENABLE_EDGE_AGENT:-true}"
+ENABLE_EDGE_REPAIR="${CLOVER_ENABLE_EDGE_REPAIR:-${ENABLE_EDGE_AGENT}}"
+ENABLE_TERMINAL_EDGE_REVIEW="${CLOVER_ENABLE_TERMINAL_EDGE_REVIEW:-${ENABLE_EDGE_AGENT}}"
 ENABLE_CONTRACT_GATE="${CLOVER_ENABLE_CONTRACT_GATE:-true}"
 ENABLE_NODE_REVIEW="${CLOVER_ENABLE_NODE_REVIEW:-true}"
 ENABLE_CLOUD_RECOVERY="${CLOVER_ENABLE_CLOUD_RECOVERY:-true}"
+ENABLE_CLOUD_REPLAN="${CLOVER_ENABLE_CLOUD_REPLAN:-${ENABLE_CLOUD_RECOVERY}}"
+ENABLE_CLOUD_SYNTHESIS="${CLOVER_ENABLE_CLOUD_SYNTHESIS:-${ENABLE_CLOUD_RECOVERY}}"
 ENABLE_STATIC_FINALIZATION="${CLOVER_ENABLE_STATIC_FINALIZATION:-true}"
 
 DTYPE="${CLOVER_VLLM_DTYPE:-auto}"
@@ -107,6 +111,7 @@ VLLM_SERVER_ARGS="${CLOVER_VLLM_SERVER_ARGS:-}"
 SERVER_READY_TIMEOUT="${CLOVER_VLLM_READY_TIMEOUT:-600}"
 PERSIST_SERVER="${CLOVER_VLLM_PERSIST_SERVER:-false}"
 SERVER_PID_FILE="${CLOVER_VLLM_PID_FILE:-}"
+WARMUP_SERVER="${CLOVER_VLLM_WARMUP:-true}"
 
 REMOTE_BATCH_SIZE="${CLOVER_REMOTE_BATCH_SIZE:-16}"
 REMOTE_CONCURRENCY="${CLOVER_REMOTE_CONCURRENCY:-8}"
@@ -134,11 +139,16 @@ normalize_bool() {
 }
 
 ENABLE_EDGE_AGENT="$(normalize_bool "${ENABLE_EDGE_AGENT}")"
+ENABLE_EDGE_REPAIR="$(normalize_bool "${ENABLE_EDGE_REPAIR}")"
+ENABLE_TERMINAL_EDGE_REVIEW="$(normalize_bool "${ENABLE_TERMINAL_EDGE_REVIEW}")"
 ENABLE_CONTRACT_GATE="$(normalize_bool "${ENABLE_CONTRACT_GATE}")"
 ENABLE_NODE_REVIEW="$(normalize_bool "${ENABLE_NODE_REVIEW}")"
 ENABLE_CLOUD_RECOVERY="$(normalize_bool "${ENABLE_CLOUD_RECOVERY}")"
+ENABLE_CLOUD_REPLAN="$(normalize_bool "${ENABLE_CLOUD_REPLAN}")"
+ENABLE_CLOUD_SYNTHESIS="$(normalize_bool "${ENABLE_CLOUD_SYNTHESIS}")"
 ENABLE_STATIC_FINALIZATION="$(normalize_bool "${ENABLE_STATIC_FINALIZATION}")"
 PERSIST_SERVER="$(normalize_bool "${PERSIST_SERVER}")"
+WARMUP_SERVER="$(normalize_bool "${WARMUP_SERVER}")"
 
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   echo "The current shell has no executable 'python' command." >&2
@@ -308,12 +318,42 @@ else
   fi
 fi
 
+if [[ "${WARMUP_SERVER}" == "true" ]]; then
+  echo "Warming up local vLLM model before timed evaluation" >&2
+  "${PYTHON_BIN}" - "${BASE_URL}" "${SERVED_MODEL_NAME}" <<'PY' >/dev/null
+import json
+import sys
+import urllib.request
+
+base_url, model = sys.argv[1:3]
+payload = json.dumps(
+    {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with OK."}],
+        "temperature": 0,
+        "max_tokens": 2,
+        "stream": False,
+    }
+).encode("utf-8")
+request = urllib.request.Request(
+    base_url.rstrip("/") + "/chat/completions",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=180) as response:
+    json.loads(response.read().decode("utf-8"))
+PY
+fi
+
 LOCAL_CONFIG="${TMP_DIR}/vllm_local_slm_config.json"
 "${PYTHON_BIN}" - "${LOCAL_CONFIG}" "${SERVED_MODEL_NAME}" "${BASE_URL}" \
   "${LOCAL_MAX_TOKENS}" "${LOCAL_TIMEOUT_SECONDS}" \
   "${AGENT_LOOP_MAX_ITERATIONS}" "${EDGE_REVIEW_MODE}" \
-  "${ABLATION_VARIANT}" "${ENABLE_EDGE_AGENT}" "${ENABLE_CONTRACT_GATE}" \
+  "${ABLATION_VARIANT}" "${ENABLE_EDGE_AGENT}" "${ENABLE_EDGE_REPAIR}" \
+  "${ENABLE_TERMINAL_EDGE_REVIEW}" "${ENABLE_CONTRACT_GATE}" \
   "${ENABLE_NODE_REVIEW}" "${ENABLE_CLOUD_RECOVERY}" \
+  "${ENABLE_CLOUD_REPLAN}" "${ENABLE_CLOUD_SYNTHESIS}" \
   "${ENABLE_STATIC_FINALIZATION}" <<'PY'
 import json
 import sys
@@ -338,10 +378,14 @@ payload = {
     "edge_review_mode": sys.argv[7],
     "ablation_variant": sys.argv[8],
     "enable_edge_agent": sys.argv[9] == "true",
-    "enable_contract_gate": sys.argv[10] == "true",
-    "enable_node_review": sys.argv[11] == "true",
-    "enable_cloud_recovery": sys.argv[12] == "true",
-    "enable_static_finalization": sys.argv[13] == "true",
+    "enable_edge_repair": sys.argv[10] == "true",
+    "enable_terminal_edge_review": sys.argv[11] == "true",
+    "enable_contract_gate": sys.argv[12] == "true",
+    "enable_node_review": sys.argv[13] == "true",
+    "enable_cloud_recovery": sys.argv[14] == "true",
+    "enable_cloud_replan": sys.argv[15] == "true",
+    "enable_cloud_synthesis": sys.argv[16] == "true",
+    "enable_static_finalization": sys.argv[17] == "true",
     "edge_review_max_actions": 4,
     "edge_review_max_rows": 5,
     "edge_review_max_columns": 5,

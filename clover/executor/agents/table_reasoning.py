@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from clover.config import (
-    ENABLE_EDGE_AGENT,
+    ENABLE_EDGE_REPAIR,
     ENABLE_NODE_REVIEW,
     runtime_feature_enabled,
 )
@@ -565,7 +565,7 @@ def _agent_loop_disabled(slm_config: dict[str, Any] | None) -> bool:
         return True
     return bool(slm_config.get("disable_agent_loop")) or not runtime_feature_enabled(
         slm_config,
-        ENABLE_EDGE_AGENT,
+        ENABLE_EDGE_REPAIR,
     )
 
 

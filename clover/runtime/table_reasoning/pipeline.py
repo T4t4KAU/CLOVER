@@ -15,9 +15,10 @@ from typing import Any, Callable
 import pandas as pd
 
 from clover.config import (
-    ENABLE_CLOUD_RECOVERY,
-    ENABLE_EDGE_AGENT,
+    ENABLE_CLOUD_REPLAN,
+    ENABLE_CLOUD_SYNTHESIS,
     ENABLE_STATIC_FINALIZATION,
+    ENABLE_TERMINAL_EDGE_REVIEW,
     runtime_feature_enabled,
 )
 from clover.executor import (
@@ -1114,7 +1115,7 @@ def _run_action_groups_batch(
             continue
         report_items.append((result.item, public_observation))
     if report_items:
-        if runtime_feature_enabled(local_slm_config, ENABLE_CLOUD_RECOVERY):
+        if runtime_feature_enabled(local_slm_config, ENABLE_CLOUD_SYNTHESIS):
             _run_supervisor_action_reports_batch(
                 report_items=report_items,
                 action_items=followup_action_items,
@@ -1124,6 +1125,7 @@ def _run_action_groups_batch(
                 max_retries=max_retries,
                 remote_concurrency=remote_concurrency,
                 profiler=profiler,
+                local_slm_config=local_slm_config,
             )
         else:
             _finalize_action_reports_without_cloud(
@@ -3025,6 +3027,8 @@ def _apply_action_group_decision(
     final_results: list[CaseResult],
     finalized: set[str],
     max_retries: int,
+    allow_replan: bool,
+    profiler: PipelineProfiler,
 ) -> None:
     if decision.done:
         task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "synthesis"
@@ -3039,6 +3043,22 @@ def _apply_action_group_decision(
     if not actions and decision.sqls:
         actions = tuple(SupervisorAction(op="sql", q=sql) for sql in decision.sqls)
     if actions:
+        if not allow_replan:
+            profiler.increment("cloud_replan_blocked")
+            _finalize_failed(
+                task,
+                final_results=final_results,
+                finalized=finalized,
+                error={
+                    "type": "CloudReplanDisabled",
+                    "message": (
+                        "Cloud synthesis was retained, but this ablation "
+                        "disables follow-up Cloud actions."
+                    ),
+                },
+            )
+            return
+        profiler.increment("cloud_replan_calls")
         _enqueue_action_group(
             task,
             actions=actions,
@@ -3264,6 +3284,7 @@ def _finish_table_execution_batch(
                 supervisor=supervisor,
                 max_retries=max_retries,
                 profiler=profiler,
+                local_slm_config=local_slm_config,
             )
         return True
 
@@ -3325,6 +3346,7 @@ def _finish_table_execution_batch(
                 supervisor=supervisor,
                 max_retries=max_retries,
                 profiler=profiler,
+                local_slm_config=local_slm_config,
             )
 
     failed_items = [item for item in batch if item.task.answer_key in affected]
@@ -3345,6 +3367,7 @@ def _finish_table_execution_batch(
                     supervisor=supervisor,
                     max_retries=max_retries,
                     profiler=profiler,
+                    local_slm_config=local_slm_config,
                 )
         else:
             _run_static_synthesis_failure(
@@ -3506,7 +3529,10 @@ def _try_finalize_edge_local_review(
     finalized: set[str],
     profiler: PipelineProfiler,
 ) -> bool:
-    if not runtime_feature_enabled(local_slm_config, ENABLE_EDGE_AGENT):
+    if not runtime_feature_enabled(
+        local_slm_config,
+        ENABLE_TERMINAL_EDGE_REVIEW,
+    ):
         return False
     try:
         with profiler.measure("edge_local_review", items=1):
@@ -3853,7 +3879,7 @@ def _needs_supervisor_review(
         validation_mode == VALIDATION_REMOTE_SUPERVISOR
         and runtime_feature_enabled(
             local_slm_config,
-            ENABLE_CLOUD_RECOVERY,
+            ENABLE_CLOUD_SYNTHESIS,
         )
     )
 
@@ -3962,7 +3988,9 @@ def _run_supervisor_synthesis(
     supervisor: SupervisorAgent,
     max_retries: int,
     profiler: PipelineProfiler,
+    local_slm_config: dict[str, Any] | None,
 ) -> None:
+    allow_replan = runtime_feature_enabled(local_slm_config, ENABLE_CLOUD_REPLAN)
     for item in batch:
         item.task.status = TASK_SUPERVISOR_REVIEW
     try:
@@ -3973,9 +4001,9 @@ def _run_supervisor_synthesis(
                 logic_dag=logic_dag,
                 observation=observation,
                 current_command=_sql_map(batch),
-                force_final_answer=all(
-                    item.task.retry_count >= max_retries
-                    for item in batch
+                force_final_answer=(
+                    not allow_replan
+                    or all(item.task.retry_count >= max_retries for item in batch)
                 ),
             )
             profiler.increment("supervisor_synthesis_calls")
@@ -4039,6 +4067,8 @@ def _run_supervisor_synthesis(
         final_results=final_results,
         finalized=finalized,
         max_retries=max_retries,
+        allow_replan=allow_replan,
+        profiler=profiler,
     )
 
 
@@ -4052,7 +4082,9 @@ def _run_supervisor_action_reports_batch(
     max_retries: int,
     remote_concurrency: int,
     profiler: PipelineProfiler,
+    local_slm_config: dict[str, Any] | None,
 ) -> None:
+    allow_replan = runtime_feature_enabled(local_slm_config, ENABLE_CLOUD_REPLAN)
     runnable = [
         (index, item, observation)
         for index, (item, observation) in enumerate(report_items)
@@ -4073,6 +4105,7 @@ def _run_supervisor_action_reports_batch(
                 observation=observation,
                 supervisor=supervisor,
                 max_retries=max_retries,
+                allow_replan=allow_replan,
             )
             for index, item, observation in runnable
         ]
@@ -4087,6 +4120,7 @@ def _run_supervisor_action_reports_batch(
                     observation=observation,
                     supervisor=supervisor,
                     max_retries=max_retries,
+                    allow_replan=allow_replan,
                 )
                 for index, item, observation in runnable
             ]
@@ -4161,6 +4195,8 @@ def _run_supervisor_action_reports_batch(
             final_results=final_results,
             finalized=finalized,
             max_retries=max_retries,
+            allow_replan=allow_replan,
+            profiler=profiler,
         )
 
 
@@ -4171,6 +4207,7 @@ def _run_one_supervisor_action_report_for_batch(
     observation: dict[str, Any],
     supervisor: SupervisorAgent,
     max_retries: int,
+    allow_replan: bool,
 ) -> _ActionReportRunResult:
     local_profiler = PipelineProfiler()
     try:
@@ -4182,7 +4219,9 @@ def _run_one_supervisor_action_report_for_batch(
                 current_command={
                     "acts": [_action_to_dict(action) for action in item.actions]
                 },
-                force_final_answer=item.task.retry_count >= max_retries,
+                force_final_answer=(
+                    not allow_replan or item.task.retry_count >= max_retries
+                ),
             )
             local_profiler.increment("supervisor_synthesis_calls")
             _record_remote_token_usage(
@@ -4221,6 +4260,7 @@ def _run_supervisor_action_report(
     supervisor: SupervisorAgent,
     max_retries: int,
     profiler: PipelineProfiler,
+    local_slm_config: dict[str, Any] | None,
 ) -> None:
     _run_supervisor_action_reports_batch(
         report_items=[(item, observation)],
@@ -4231,6 +4271,7 @@ def _run_supervisor_action_report(
         max_retries=max_retries,
         remote_concurrency=1,
         profiler=profiler,
+        local_slm_config=local_slm_config,
     )
 
 
@@ -4242,6 +4283,8 @@ def _apply_supervisor_decision(
     final_results: list[CaseResult],
     finalized: set[str],
     max_retries: int,
+    allow_replan: bool,
+    profiler: PipelineProfiler,
 ) -> None:
     if decision.done is True:
         _finalize_batch_from_answer(
@@ -4256,6 +4299,23 @@ def _apply_supervisor_decision(
     if not actions and decision.sqls:
         actions = tuple(SupervisorAction(op="sql", q=sql) for sql in decision.sqls)
     if actions:
+        if not allow_replan:
+            profiler.increment("cloud_replan_blocked")
+            for item in batch:
+                _finalize_failed(
+                    item.task,
+                    final_results=final_results,
+                    finalized=finalized,
+                    error={
+                        "type": "CloudReplanDisabled",
+                        "message": (
+                            "Cloud synthesis was retained, but this ablation "
+                            "disables follow-up Cloud actions."
+                        ),
+                    },
+                )
+            return
+        profiler.increment("cloud_replan_calls")
         if len(batch) != 1:
             for item in batch:
                 _finalize_failed(
@@ -4710,10 +4770,28 @@ def _record_executor_trace_counters(
             profiler.increment(f"executor_agent_loop_trigger_{trigger_suffix}")
             agent_loop = trace.get("agent_loop")
             if isinstance(agent_loop, dict):
+                profiler.increment("executor_edge_agent_calls")
                 steps = agent_loop.get("steps")
                 if isinstance(steps, list):
                     profiler.increment("executor_local_slm_steps", len(steps))
                     _record_local_slm_trace_usage(profiler, steps)
+                    for step in steps:
+                        if not isinstance(step, dict):
+                            continue
+                        observation_type = _counter_suffix(
+                            step.get("observation_type") or ""
+                        )
+                        if observation_type in {
+                            "contract_error",
+                            "output_validation_error",
+                        }:
+                            profiler.increment("executor_contract_rejections")
+                if trace.get("agent_loop_fallback") == "fast_path_output":
+                    profiler.increment("executor_edge_agent_fallbacks")
+                elif trace.get("status") == "ok":
+                    profiler.increment("executor_edge_agent_successes")
+                else:
+                    profiler.increment("executor_edge_agent_failures")
         local_review = trace.get("local_review")
         if isinstance(local_review, dict):
             profiler.increment("executor_edge_local_reviews")

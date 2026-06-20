@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+from collections import Counter
 from pathlib import Path
 from typing import Any, Sequence
 
 VARIANTS = (
     ("full", "Full CLOVER"),
-    ("static", "w/o Edge Repair/Review"),
+    ("static", "w/o Edge Repair"),
     ("no_contract", "w/o Contract Verification"),
     ("end_review", "End-only Review"),
     ("one_shot", "w/o Cloud Replan"),
@@ -76,7 +78,7 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
 
 
 def render_markdown(report: dict[str, Any]) -> str:
-    """Render the two compact tables printed after an ablation suite."""
+    """Render the compact tables printed after an ablation suite."""
 
     lines = [
         f"# {report['dataset']} ablation summary",
@@ -84,8 +86,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## Effectiveness",
         "",
         "| Experiment | Correct | Accuracy | Δ vs Full | Runtime failures "
-        "| Regressions | Recoveries |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| Regressions | Recoveries | McNemar p |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in report["variants"]:
         values = {
@@ -95,8 +97,33 @@ def render_markdown(report: dict[str, Any]) -> str:
         }
         lines.append(
             "| {display_name} | {correct}/{total_cases} | {accuracy_text} | {delta_text} "
-            "| {runtime_failures} | {regressions_vs_full} | {recoveries_vs_full} |".format_map(
-                values
+            "| {runtime_failures} | {regressions_vs_full} | {recoveries_vs_full} "
+            "| {mcnemar_text} |".format_map(
+                {
+                    **values,
+                    "mcnemar_text": _format_p_value(row["mcnemar_exact_p"]),
+                }
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Mechanism activity",
+            "",
+            "| Experiment | Node Edge runs | Node Edge successes | Node Edge steps "
+            "| Node reviews | Contract rejects | Terminal Edge calls "
+            "| Terminal hits | Terminal escalations | Cloud replans |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in report["variants"]:
+        lines.append(
+            "| {display_name} | {node_edge_calls} | {node_edge_successes} "
+            "| {node_edge_steps} | {node_review_calls} | {contract_rejections} "
+            "| {terminal_edge_calls} | {terminal_edge_hits} "
+            "| {terminal_edge_escalations} | {cloud_replan_calls} |".format_map(
+                row
             )
         )
 
@@ -105,9 +132,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Calls and cost",
             "",
-            "| Experiment | Cloud calls | Cloud synthesis | Edge calls | Edge hits "
-            "| Cloud tokens | Edge tokens | Est. cost | Time |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| Experiment | Cloud calls | Cloud synthesis | Local SLM calls "
+            "| Cloud tokens | Local tokens | Est. cost | Time |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for row in report["variants"]:
@@ -120,7 +147,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         }
         lines.append(
             "| {display_name} | {remote_calls} | {cloud_synthesis_calls} "
-            "| {edge_review_calls} | {edge_review_hits} | {remote_tokens_text} "
+            "| {local_slm_calls} | {remote_tokens_text} "
             "| {local_slm_tokens_text} | {cost_text} | {time_text} |".format_map(
                 values
             )
@@ -129,8 +156,26 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Final answer sources",
+            "",
+            "| Experiment | Static | Terminal Edge | Cloud synthesis | Other/failed |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in report["variants"]:
+        lines.append(
+            "| {display_name} | {static_final_answers} | {terminal_final_answers} "
+            "| {cloud_final_answers} | {other_final_answers} |".format_map(row)
+        )
+
+    lines.extend(
+        [
+            "",
             "Δ vs Full uses percentage points. Regressions are cases that Full answered "
-            "correctly but the variant did not; recoveries are the reverse.",
+            "correctly but the variant did not; recoveries are the reverse. McNemar p is "
+            "the two-sided exact paired-test value. Contract rejects refer to the local "
+            "Edge Agent output contract; terminal Edge calls are reported separately "
+            "from node-level Edge runs.",
             "",
         ]
     )
@@ -142,22 +187,36 @@ def _build_row(
     variant: str,
     display_name: str,
     summary: dict[str, Any],
-    cases: dict[tuple[str, str], bool],
-    full_cases: dict[tuple[str, str], bool],
+    cases: dict[tuple[str, str], dict[str, Any]],
+    full_cases: dict[tuple[str, str], dict[str, Any]],
 ) -> dict[str, Any]:
     if set(cases) != set(full_cases):
         raise ValueError(f"{variant} does not contain the same case set as Full CLOVER")
 
     total = len(cases)
-    correct = sum(cases.values())
+    correct = sum(bool(record.get("answer_correct")) for record in cases.values())
     regressions = sum(
-        full_correct and not cases[key]
-        for key, full_correct in full_cases.items()
+        bool(full_record.get("answer_correct"))
+        and not bool(cases[key].get("answer_correct"))
+        for key, full_record in full_cases.items()
     )
     recoveries = sum(
-        not full_correct and cases[key]
-        for key, full_correct in full_cases.items()
+        not bool(full_record.get("answer_correct"))
+        and bool(cases[key].get("answer_correct"))
+        for key, full_record in full_cases.items()
     )
+    source_counts = Counter(
+        str(record.get("final_answer_source") or "other")
+        for record in cases.values()
+    )
+    static_sources = {
+        "action_static",
+        "edge_static_relative_row",
+        "format_answer",
+    }
+    static_answers = sum(source_counts[source] for source in static_sources)
+    terminal_answers = source_counts["edge_local_review"]
+    cloud_answers = source_counts["synthesis"]
     counters = summary.get("system_profile", {}).get("counters", {})
     remote_usage = summary.get("remote_token_usage") or {}
     local_usage = summary.get("local_slm_token_usage") or {}
@@ -178,27 +237,74 @@ def _build_row(
         "mismatches": int(summary.get("mismatches", 0) or 0),
         "regressions_vs_full": regressions,
         "recoveries_vs_full": recoveries,
+        "mcnemar_exact_p": _mcnemar_exact_p(regressions, recoveries),
         "remote_calls": int(summary.get("remote_calls", 0) or 0),
         "cloud_synthesis_calls": int(
             counters.get("supervisor_synthesis_calls", 0) or 0
         ),
-        "edge_review_calls": int(summary.get("edge_local_review_calls", 0) or 0),
-        "edge_review_hits": int(summary.get("edge_local_review_hits", 0) or 0),
+        "cloud_replan_calls": int(counters.get("cloud_replan_calls", 0) or 0),
+        "cloud_replan_blocked": int(counters.get("cloud_replan_blocked", 0) or 0),
+        "local_slm_calls": int(summary.get("local_slm_calls", 0) or 0),
+        "node_edge_calls": int(counters.get("executor_edge_agent_calls", 0) or 0),
+        "node_edge_successes": int(
+            counters.get("executor_edge_agent_successes", 0) or 0
+        ),
+        "node_edge_failures": int(
+            counters.get("executor_edge_agent_failures", 0) or 0
+        ),
+        "node_edge_fallbacks": int(
+            counters.get("executor_edge_agent_fallbacks", 0) or 0
+        ),
+        "node_edge_steps": int(counters.get("executor_local_slm_steps", 0) or 0),
+        "node_review_calls": int(
+            counters.get("executor_edge_local_reviews", 0) or 0
+        ),
+        "contract_rejections": int(
+            counters.get("executor_contract_rejections", 0) or 0
+        ),
+        "terminal_edge_calls": int(
+            summary.get("edge_local_review_calls", 0) or 0
+        ),
+        "terminal_edge_hits": int(
+            summary.get("edge_local_review_hits", 0) or 0
+        ),
+        "terminal_edge_escalations": int(
+            summary.get("edge_local_review_escalations", 0) or 0
+        ),
+        "terminal_edge_validation_failures": int(
+            counters.get("edge_local_review_validation_failures", 0) or 0
+        ),
         "remote_tokens": int(remote_usage.get("total_tokens", 0) or 0),
         "local_slm_tokens": int(local_usage.get("total_tokens", 0) or 0),
         "estimated_remote_cost_usd": float(cost) if cost is not None else None,
         "elapsed_seconds": float(summary.get("elapsed_seconds", 0.0) or 0.0),
+        "static_final_answers": static_answers,
+        "terminal_final_answers": terminal_answers,
+        "cloud_final_answers": cloud_answers,
+        "other_final_answers": total - static_answers - terminal_answers - cloud_answers,
+        "final_answer_sources": dict(sorted(source_counts.items())),
     }
 
 
-def _case_results(path: Path) -> dict[tuple[str, str], bool]:
-    results: dict[tuple[str, str], bool] = {}
+def _case_results(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    results: dict[tuple[str, str], dict[str, Any]] = {}
     for record in _read_jsonl(path):
         key = (str(record["dataset_id"]), str(record["case_id"]))
         if key in results:
             raise ValueError(f"Duplicate case in {path}: {key}")
-        results[key] = bool(record.get("answer_correct"))
+        results[key] = record
     return results
+
+
+def _mcnemar_exact_p(regressions: int, recoveries: int) -> float:
+    discordant = regressions + recoveries
+    if discordant == 0:
+        return 1.0
+    tail = sum(
+        math.comb(discordant, index)
+        for index in range(min(regressions, recoveries) + 1)
+    )
+    return min(1.0, 2.0 * tail / (2**discordant))
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -233,6 +339,10 @@ def _format_integer(value: int) -> str:
 
 def _format_cost(value: float | None) -> str:
     return "n/a" if value is None else f"${value:.4f}"
+
+
+def _format_p_value(value: float) -> str:
+    return f"{value:.4f}"
 
 
 def _format_duration(seconds: float) -> str:
