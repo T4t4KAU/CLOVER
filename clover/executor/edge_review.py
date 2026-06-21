@@ -37,6 +37,23 @@ EDGE_REVIEW_MODES = frozenset(
 _NUMBER_TYPES = frozenset({"number", "float", "integer", "int"})
 _BOOLEAN_TYPES = frozenset({"boolean", "bool"})
 _TEXT_TYPES = frozenset({"string", "entity", "category"})
+# Numeric operations that aggregate multiple cited values into one answer.
+_NUMERIC_AGGREGATE_OPERATIONS = frozenset(
+    {"sum", "average", "difference", "count", "ratio"}
+)
+# All numeric operations accepted by the edge reviewer.
+_NUMERIC_OPERATIONS = frozenset(
+    {"identity", "extract_number", "percent_value"}
+) | _NUMERIC_AGGREGATE_OPERATIONS
+# Tolerance used when comparing numeric answers against cited evidence. 1e-6
+# tolerates floating-point aggregation error (e.g. 0.1 + 0.2) while still
+# rejecting clearly wrong values.
+_NUMERIC_TOLERANCE = {"rel_tol": 1e-6, "abs_tol": 1e-6}
+# Upper bounds for cited support and list answers. Raised from 12 to 20 so
+# longer bounded result sets (e.g. "list all countries") can be reviewed
+# locally instead of escalating to the cloud.
+_SUPPORT_LIMIT = 20
+_LIST_ANSWER_LIMIT = 20
 _IGNORED_EVIDENCE_KEYS = frozenset(
     {
         "_clover_full_res",
@@ -333,6 +350,15 @@ def _validate_review_response(
     validation_error: str | None = None
     accepted = False
 
+    # Tolerate the literal "accept|normalize" that some models copy verbatim from
+    # the prompt schema. If the model also supplied an answer and support, treat
+    # it as "accept"; otherwise escalate.
+    if route == "accept|normalize":
+        if answer is not None and support:
+            route = "accept"
+        else:
+            route = "escalate"
+
     if route not in {"accept", "normalize", "escalate"}:
         validation_error = "route must be accept, normalize, or escalate"
         route = "escalate"
@@ -375,9 +401,22 @@ def _validate_supported_answer(
     facts: tuple[EdgeReviewFact, ...],
 ) -> str | None:
     facts_by_id = {fact.fact_id: fact for fact in facts}
+    # Auto-infer support only for numeric and boolean answers where the
+    # validation is deterministic. Text answers are NOT auto-inferred because
+    # the edge model frequently returns a partial text answer (e.g. just a
+    # name) that matches one fact but omits required context (e.g. a year)
+    # from other facts in the same row.
     if not support:
-        return "support must cite at least one evidence fact"
-    if len(support) > 12 or len(set(support)) != len(support):
+        inferred = _infer_support_from_answer(
+            answer=answer,
+            answer_type=answer_type,
+            operation=operation,
+            facts=facts,
+        )
+        if inferred is None:
+            return "support must cite at least one evidence fact"
+        support = inferred
+    if len(support) > _SUPPORT_LIMIT or len(set(support)) != len(support):
         return "support must contain unique bounded fact ids"
     if any(fact_id not in facts_by_id for fact_id in support):
         return "support references an unknown evidence fact"
@@ -394,8 +433,17 @@ def _validate_supported_answer(
     if normalized_type in _NUMBER_TYPES:
         actual_number = _coerce_number(answer)
         selected_operation = str(operation or "identity").strip().lower()
-        if selected_operation not in {"identity", "extract_number", "percent_value"}:
+        if selected_operation not in _NUMERIC_OPERATIONS:
             return "unsupported numeric normalization operation"
+        if selected_operation in _NUMERIC_AGGREGATE_OPERATIONS:
+            expected = _number_operation_value(selected_operation, values)
+            if (
+                expected is None
+                or actual_number is None
+                or not math.isclose(actual_number, expected, **_NUMERIC_TOLERANCE)
+            ):
+                return "number answer is not reproducible from cited evidence"
+            return None
         supported_numbers = [
             _coerce_number(
                 value,
@@ -404,7 +452,8 @@ def _validate_supported_answer(
             for value in values
         ]
         if actual_number is None or not any(
-            number is not None and math.isclose(actual_number, number, rel_tol=1e-9, abs_tol=1e-9)
+            number is not None
+            and math.isclose(actual_number, number, **_NUMERIC_TOLERANCE)
             for number in supported_numbers
         ):
             return "number answer is not present in cited evidence"
@@ -413,7 +462,7 @@ def _validate_supported_answer(
     if normalized_type.startswith("list"):
         if not isinstance(answer, list) or not answer:
             return "list answer must be a non-empty array"
-        if len(answer) > 12:
+        if len(answer) > _LIST_ANSWER_LIMIT:
             return "list answer exceeds the local review limit"
         unmatched = list(values)
         for item in answer:
@@ -435,6 +484,19 @@ def _validate_supported_answer(
         }:
             return "unsupported text normalization operation"
         candidates = [_normalized_text_candidate(value, selected_operation) for value in values]
+        # When multiple facts are cited, the answer must be a combination of
+        # ALL cited values (e.g. "novak djokovic, 2000" from facts "novak
+        # djokovic" and "2000"). Accepting an answer that matches only one of
+        # several cited facts lets incomplete answers through (e.g. just
+        # "novak djokovic" when the expected answer also needs the year).
+        if len(candidates) > 1:
+            normalized_answer = _normalized_text(answer)
+            for candidate in candidates:
+                if candidate is None:
+                    return "text answer cites a non-text fact"
+                if _normalized_text(candidate) not in normalized_answer:
+                    return "text answer does not combine all cited evidence"
+            return None
         if not any(
             candidate is not None and _same_text(answer, candidate) for candidate in candidates
         ):
@@ -442,6 +504,100 @@ def _validate_supported_answer(
         return None
 
     return "unsupported answer type"
+
+
+def _infer_support_from_answer(
+    *,
+    answer: Any,
+    answer_type: str,
+    operation: str | None,
+    facts: tuple[EdgeReviewFact, ...],
+) -> tuple[str, ...] | None:
+    """Infer which evidence facts back an answer when the model omitted support.
+
+    Only handles numeric, boolean, and list answers where the citation is
+    unambiguous. Text answers are deliberately NOT inferred because the edge
+    model frequently returns a partial text answer that matches one fact but
+    omits required context from other facts in the same row.
+    """
+    normalized_type = str(answer_type or "").strip().lower()
+    selected_op = str(operation or "identity").strip().lower()
+
+    if normalized_type in _NUMBER_TYPES:
+        actual = _coerce_number(answer)
+        if actual is None or selected_op in _NUMERIC_AGGREGATE_OPERATIONS:
+            return None
+        allow_embedded = selected_op != "identity"
+        for fact in facts:
+            fact_number = _coerce_number(fact.value, allow_embedded=allow_embedded)
+            if fact_number is not None and math.isclose(
+                actual, fact_number, **_NUMERIC_TOLERANCE
+            ):
+                return (fact.fact_id,)
+        return None
+
+    if normalized_type.startswith("list"):
+        if not isinstance(answer, list) or not answer:
+            return None
+        support: list[str] = []
+        used: set[str] = set()
+        for item in answer:
+            found: str | None = None
+            for fact in facts:
+                if fact.fact_id in used:
+                    continue
+                if _same_scalar(item, fact.value):
+                    found = fact.fact_id
+                    break
+            if found is None:
+                return None
+            support.append(found)
+            used.add(found)
+        return tuple(support)
+
+    if normalized_type in _BOOLEAN_TYPES:
+        # Only infer for identity: the answer directly matches a boolean fact.
+        if selected_op != "identity":
+            return None
+        actual = _coerce_boolean(answer)
+        if actual is None:
+            return None
+        for fact in facts:
+            if _coerce_boolean(fact.value) is actual:
+                return (fact.fact_id,)
+        return None
+
+    return None
+
+
+def _number_operation_value(
+    operation: str,
+    values: list[Any],
+) -> float | None:
+    """Compute the expected numeric answer by applying an aggregate operation
+    over cited evidence values."""
+    selected = str(operation or "identity").strip().lower()
+    numbers = [
+        n for n in (_coerce_number(v, allow_embedded=True) for v in values) if n is not None
+    ]
+    if selected == "sum":
+        return float(sum(numbers)) if numbers else None
+    if selected == "average":
+        return float(sum(numbers) / len(numbers)) if numbers else None
+    if selected == "count":
+        # Count the number of cited facts, not just the numeric ones. The
+        # edge model cites one fact per matching row, so len(values) is the
+        # correct count regardless of whether the fact values are numeric.
+        return float(len(values))
+    if selected == "difference":
+        if len(numbers) != 2:
+            return None
+        return float(numbers[0] - numbers[1])
+    if selected == "ratio":
+        if len(numbers) != 2 or numbers[1] == 0:
+            return None
+        return float(numbers[0] / numbers[1])
+    return None
 
 
 def _boolean_operation_value(operation: str | None, values: list[Any]) -> bool | None:
@@ -837,7 +993,7 @@ def _same_scalar(left: Any, right: Any) -> bool:
     left_number = _coerce_number(left)
     right_number = _coerce_number(right)
     if left_number is not None and right_number is not None:
-        return math.isclose(left_number, right_number, rel_tol=1e-9, abs_tol=1e-9)
+        return math.isclose(left_number, right_number, **_NUMERIC_TOLERANCE)
     return _same_text(left, right)
 
 
