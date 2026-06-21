@@ -54,11 +54,12 @@ class EvalProgressBar:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run CLOVER on TableBench, WikiTableQuestions, or TableFact."
+        description="Run CLOVER on TableBench, WikiTableQuestions, MMQA, or TableFact."
     )
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--tablebench-eval", action="store_true")
     modes.add_argument("--wikitq-eval", action="store_true")
+    modes.add_argument("--mmqa-eval", action="store_true")
     modes.add_argument("--tablefact-eval", "--tabfact-eval", action="store_true")
 
     parser.add_argument(
@@ -78,8 +79,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=REPO_ROOT / "datasets" / "tablefact",
     )
+    parser.add_argument(
+        "--mmqa-root",
+        type=Path,
+        default=REPO_ROOT / "datasets" / "mmqa",
+    )
     parser.add_argument("--wikitq-split", default=None)
     parser.add_argument("--tablefact-split", "--tabfact-split", default="test")
+    parser.add_argument("--mmqa-split", default=None)
     parser.add_argument(
         "--tablefact-subset",
         "--tabfact-subset",
@@ -222,6 +229,14 @@ def main(argv: list[str] | None = None) -> int:
                 split=args.wikitq_split,
                 **common,
             )
+        elif dataset == "mmqa":
+            from benchmarks.mmqa.eval import run_mmqa_eval
+
+            summary = run_mmqa_eval(
+                mmqa_root=args.mmqa_root.expanduser().resolve(),
+                split=args.mmqa_split,
+                **common,
+            )
         else:
             from benchmarks.tablefact.eval import run_tablefact_eval
 
@@ -242,6 +257,8 @@ def _selected_dataset(args: argparse.Namespace) -> str:
         return "tablebench"
     if args.wikitq_eval:
         return "wikitq"
+    if args.mmqa_eval:
+        return "mmqa"
     return "tablefact"
 
 

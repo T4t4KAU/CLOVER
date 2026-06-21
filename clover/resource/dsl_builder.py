@@ -1159,13 +1159,235 @@ def _dedupe(items: list[str]) -> list[str]:
     return result
 
 
+BUILD_MULTITABLE_DSL_TOOL_NAME = "build_multitable_dsl"
+MULTITABLE_BUILDER_AGENT_MODE = "build_multitable_dsl_tool"
+
+
+class BuildMultiTableDSLTool:
+    """Resource-level static tool for multi-table question to CLOVER task DSL.
+
+    Unlike :class:`BuildTableDSLTool`, this tool accepts multiple table sources
+    and is designed for benchmarks like MMQA where questions require JOINs
+    across 2-5 tables. Source ids use ``table_1``/``table_2``/... strings so
+    they align naturally with SQL ``FROM "table_1" JOIN "table_2"``.
+    """
+
+    name = BUILD_MULTITABLE_DSL_TOOL_NAME
+
+    def build_call(
+        self,
+        *,
+        question: str,
+        source_files: list[str],
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "question": question,
+            "source_files": list(source_files),
+        }
+        return {
+            "tool": self.name,
+            "arguments": arguments,
+        }
+
+    def run(
+        self,
+        *,
+        question: str,
+        table_paths: list[str | Path],
+        source_files: list[str],
+        answer_type: str | None = None,
+        task_type: str = "table_reasoning.query",
+        table_names: dict[str, str] | None = None,
+        foreign_keys: list[str] | None = None,
+        primary_keys: list[str] | None = None,
+        max_preview_rows: int = 2,
+        max_columns: int = 48,
+    ) -> TableDslBuilderResult:
+        if not table_paths:
+            raise ValueError("BuildMultiTableDSLTool requires at least one table")
+        if len(table_paths) != len(source_files):
+            raise ValueError(
+                "table_paths and source_files must have the same length: "
+                f"{len(table_paths)} vs {len(source_files)}"
+            )
+
+        profiles: list[dict[str, Any]] = []
+        sources: list[dict[str, Any]] = []
+        normalized_table_names = _normalize_multitable_names(
+            table_names, count=len(table_paths)
+        )
+        for index, (table_path, source_file) in enumerate(
+            zip(table_paths, source_files), start=1
+        ):
+            source_id = normalized_table_names[index - 1] or f"table_{index}"
+            profile = table_profile_for_dsl_builder(
+                table_path,
+                max_preview_rows=max_preview_rows,
+                max_columns=max_columns,
+            )
+            profiles.append(profile)
+            sources.append(
+                {
+                    "id": source_id,
+                    "type": "table",
+                    "file": source_file,
+                }
+            )
+
+        selected_answer_type = _normalize_answer_type(
+            answer_type,
+            fallback="string",
+        )
+
+        hints = _build_multitable_hints(
+            table_names=table_names,
+            foreign_keys=foreign_keys,
+            primary_keys=primary_keys,
+        )
+
+        task_dsl: dict[str, Any] = {
+            "task_type": task_type,
+            "question": question,
+            "sources": sources,
+            "answer": {
+                "name": "answer",
+                "type": selected_answer_type,
+            },
+        }
+        if hints:
+            task_dsl["hints"] = hints
+
+        tool_call = self.build_call(
+            question=question,
+            source_files=source_files,
+        )
+        diagnostics: dict[str, Any] = {
+            "table_count": len(profiles),
+            "profiles": profiles,
+            "answer_type": selected_answer_type,
+            "tool": BUILD_MULTITABLE_DSL_TOOL_NAME,
+        }
+        return TableDslBuilderResult(
+            task_dsl=task_dsl,
+            prompt="",
+            raw_output="",
+            parsed_output={},
+            response_payload={},
+            table_profile=profiles[0],
+            fallback_used=False,
+            builder_mode=MULTITABLE_BUILDER_AGENT_MODE,
+            tool_call=tool_call,
+            diagnostics=diagnostics,
+        )
+
+
+def build_multitable_task_dsl_with_builder_agent(
+    *,
+    question: str,
+    table_paths: list[str | Path],
+    source_files: list[str],
+    answer_type: str | None = None,
+    task_type: str = "table_reasoning.query",
+    table_names: dict[str, str] | None = None,
+    foreign_keys: list[str] | None = None,
+    primary_keys: list[str] | None = None,
+    slm_config: dict[str, Any] | None = None,
+    client: Any | None = None,
+    max_preview_rows: int = 2,
+    max_columns: int = 48,
+) -> TableDslBuilderResult:
+    """Build a multi-table task DSL through the BuilderAgent-compatible entry.
+
+    Mirrors :func:`build_table_task_dsl_with_builder_agent` for the multi-table
+    case. The builder is static (no SLM call) and assembles the DSL from the
+    provided table paths and relational metadata.
+    """
+    del slm_config, client
+    return BuildMultiTableDSLTool().run(
+        question=question,
+        table_paths=table_paths,
+        source_files=source_files,
+        answer_type=answer_type,
+        task_type=task_type,
+        table_names=table_names,
+        foreign_keys=foreign_keys,
+        primary_keys=primary_keys,
+        max_preview_rows=max_preview_rows,
+        max_columns=max_columns,
+    )
+
+
+def _normalize_multitable_names(
+    table_names: dict[str, str] | list[str] | None,
+    *,
+    count: int,
+) -> list[str]:
+    """Return a length-``count`` list of table names ordered by source index.
+
+    Accepts either a dict keyed by ``table_<index>`` (1-based) or a list of
+    names. Missing entries become empty strings so the caller can fall back to
+    ``table_<index>``. Names are stripped and empties are dropped to empty
+    string so they never become source ids.
+    """
+
+    result: list[str] = [""] * count
+    if not table_names:
+        return result
+    if isinstance(table_names, dict):
+        for key, value in table_names.items():
+            index = _parse_table_index(key)
+            if index is None or not 1 <= index <= count:
+                continue
+            result[index - 1] = str(value).strip()
+    else:
+        names = list(table_names)
+        for index, name in enumerate(names[:count], start=1):
+            result[index - 1] = str(name).strip()
+    return result
+
+
+def _parse_table_index(key: Any) -> int | None:
+    if isinstance(key, int):
+        return key
+    if not isinstance(key, str):
+        return None
+    text = key.strip()
+    if text.isdigit():
+        return int(text)
+    if text.startswith("table_"):
+        suffix = text[len("table_"):]
+        if suffix.isdigit():
+            return int(suffix)
+    return None
+
+
+def _build_multitable_hints(
+    *,
+    table_names: dict[str, str] | None,
+    foreign_keys: list[str] | None,
+    primary_keys: list[str] | None,
+) -> dict[str, Any]:
+    hints: dict[str, Any] = {}
+    if table_names:
+        hints["table_names"] = dict(table_names)
+    if foreign_keys:
+        hints["foreign_keys"] = list(foreign_keys)
+    if primary_keys:
+        hints["primary_keys"] = list(primary_keys)
+    return hints
+
+
 __all__ = [
     "BUILD_TABLE_DSL_TOOL_NAME",
+    "BUILD_MULTITABLE_DSL_TOOL_NAME",
     "BUILDER_AGENT_MODE",
+    "MULTITABLE_BUILDER_AGENT_MODE",
     "BuildTableDSLTool",
+    "BuildMultiTableDSLTool",
     "TableDSLBuilderAgentError",
     "TableDslBuilderResult",
     "build_table_task_dsl_with_builder_agent",
+    "build_multitable_task_dsl_with_builder_agent",
     "parse_builder_agent_tool_call",
     "parse_table_dsl_builder_output",
     "render_table_dsl_builder_agent_prompt",

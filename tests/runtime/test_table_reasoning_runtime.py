@@ -2108,6 +2108,102 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
             },
         )
 
+    def test_extract_join_evidence_for_zero_row_join(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_join_evidence_from_traces,
+        )
+
+        traces = [
+            {
+                "node_id": "N0",
+                "op": "Scan",
+                "output": "T0",
+                "status": "ok",
+                "output_summary": {"type": "table", "rows": 3},
+            },
+            {
+                "node_id": "N1",
+                "op": "Join",
+                "dependency": ["T0"],
+                "input": ["election"],
+                "output": "T1",
+                "status": "ok",
+                "output_summary": {"type": "table", "rows": 0},
+            },
+        ]
+
+        result = _extract_join_evidence_from_traces(traces)
+
+        self.assertEqual(result["route"], "cloud_replan")
+        self.assertEqual(result["reason"], "join_zero_rows")
+        self.assertEqual(result["fault"], "join_semantic_error")
+        self.assertEqual(result["node"], {"id": "N1", "op": "Join"})
+        self.assertEqual(result["input_rows"], 3)
+        self.assertEqual(result["output_rows"], 0)
+        self.assertEqual(result["join"]["right_sources"], ["election"])
+
+    def test_extract_join_evidence_for_cross_join(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_cross_join_evidence_from_logic_dag,
+        )
+
+        logic_dag = {
+            "nodes": [
+                {
+                    "id": "N0",
+                    "op": "Scan",
+                    "output": "T0",
+                    "params": {"source": "host"},
+                },
+                {
+                    "id": "N1",
+                    "op": "Join",
+                    "dependency": ["T0"],
+                    "output": "T1",
+                    "params": {
+                        "joins": [
+                            {
+                                "kind": "CROSS",
+                                "source": "party",
+                            }
+                        ]
+                    },
+                },
+            ]
+        }
+
+        result = _extract_cross_join_evidence_from_logic_dag(logic_dag)
+
+        self.assertEqual(result["route"], "cloud_replan")
+        self.assertEqual(result["reason"], "join_cross_product")
+        self.assertEqual(result["fault"], "join_semantic_error")
+        self.assertEqual(result["node"], {"id": "N1", "op": "Join"})
+        self.assertEqual(result["join"]["right_sources"], ["party"])
+
+    def test_cloud_replan_evidence_blocks_static_finalization(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _observation_requests_cloud_replan,
+        )
+
+        observation = {
+            "ok": True,
+            "answer": None,
+            "obs": [
+                {
+                    "i": 0,
+                    "op": "sql",
+                    "ok": True,
+                    "res": {"n": 1, "cols": ["answer"], "rows": [[999]]},
+                    "ev": {
+                        "route": "cloud_replan",
+                        "reason": "join_cross_product",
+                    },
+                }
+            ],
+        }
+
+        self.assertTrue(_observation_requests_cloud_replan(observation))
+
     def test_extract_caps_to_top_8_values_per_column(self) -> None:
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,

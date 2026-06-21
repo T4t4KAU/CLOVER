@@ -146,6 +146,122 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(payload["repair"]["failure"]["kind"], "zero_rows")
         self.assertNotIn("ctx", payload)
 
+    def test_table_join_repair_packet_includes_join_candidates(self) -> None:
+        sql = (
+            'SELECT AVG("host"."Age") AS "answer" '
+            'FROM "host" JOIN "party" ON "host"."Host_ID" = "party"."Party_ID" '
+            'WHERE "party"."Location" LIKE "%Amsterdam%"'
+        )
+        observation = {
+            "ok": True,
+            "answer": None,
+            "obs": [
+                {
+                    "i": 0,
+                    "op": "sql",
+                    "ok": True,
+                    "q": sql,
+                    "res": {"n": 0, "cols": ["answer"], "rows": []},
+                    "ev": {
+                        "route": "cloud_replan",
+                        "reason": "join_zero_rows",
+                        "fault": "join_semantic_error",
+                        "input_rows": 10,
+                        "output_rows": 0,
+                        "node": {"id": "Join_1", "op": "Join"},
+                        "join": {
+                            "dependencies": ["Scan_host", "Scan_party"],
+                            "right_sources": ["party"],
+                        },
+                    },
+                }
+            ],
+        }
+        local_dsl = {
+            **_local_dsl(),
+            "question": "What is the average age of hosts for parties in Amsterdam?",
+            "sources": [
+                {
+                    "id": "party",
+                    "type": "table",
+                    "schema": {"columns": ["Party_ID", "Location"]},
+                },
+                {
+                    "id": "host",
+                    "type": "table",
+                    "schema": {"columns": ["Host_ID", "Age"]},
+                },
+                {
+                    "id": "party_host",
+                    "type": "table",
+                    "schema": {"columns": ["Party_ID", "Host_ID"]},
+                },
+            ],
+            "hints": {
+                "join_candidates": [
+                    {
+                        "left_table": "party",
+                        "left_column": "Party_ID",
+                        "right_table": "party_host",
+                        "right_column": "Party_ID",
+                        "score": 0.835,
+                        "overlap": 5,
+                        "sample_matches": ["1", "2"],
+                    },
+                    {
+                        "left_table": "host",
+                        "left_column": "Host_ID",
+                        "right_table": "party_host",
+                        "right_column": "Host_ID",
+                        "score": 0.825,
+                        "overlap": 6,
+                        "sample_matches": ["1", "2"],
+                    },
+                ],
+                "join_paths": [
+                    {
+                        "tables": ["host", "party_host", "party"],
+                        "joins": [
+                            {
+                                "left_table": "host",
+                                "left_column": "Host_ID",
+                                "right_table": "party_host",
+                                "right_column": "Host_ID",
+                            },
+                            {
+                                "left_table": "party_host",
+                                "left_column": "Party_ID",
+                                "right_table": "party",
+                                "right_column": "Party_ID",
+                            },
+                        ],
+                        "length": 2,
+                        "score": 0.83,
+                    }
+                ],
+            },
+        }
+
+        payload = synthesis_payload(
+            local_dsl=local_dsl,
+            observation=observation,
+            current_command={"acts": [{"op": "sql", "q": sql}]},
+        )
+
+        repair = payload["repair"]
+        self.assertEqual(repair["fault"], "join_semantic_error")
+        self.assertEqual(len(repair["join_candidates"]), 2)
+        self.assertEqual(
+            repair["join_candidates"][0]["right_table"],
+            "party_host",
+        )
+        self.assertEqual(
+            repair["join_paths"][0]["tables"],
+            ["host", "party_host", "party"],
+        )
+        self.assertEqual(repair["evidence"]["join"]["right_sources"], ["party"])
+        self.assertIn("bridge table", json.dumps(repair["requirements"]))
+
     def test_table_repair_packet_removes_unverified_candidate_column(self) -> None:
         observation = {
             "ok": True,

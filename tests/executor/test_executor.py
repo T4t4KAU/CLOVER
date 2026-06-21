@@ -12,6 +12,7 @@ from clover.executor import ExecutionPlanBuilder, execute_execution_plan
 from clover.executor.agents.base import FastPathDecision
 from clover.executor.agents.table_reasoning import TableReasoningNodeAgent
 from clover.executor.result import json_ready
+from clover.optimizer import parse_remote_sql_to_logic_dag
 
 
 class ExecutorTest(unittest.TestCase):
@@ -46,6 +47,177 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(result.answer, 4)
         self.assertEqual(result.fast_path_hits, 5)
         self.assertEqual([trace["node_id"] for trace in result.traces], ["N0", "N1", "N2", "N3", "N4"])
+
+    def test_executes_multitable_sql_join_with_right_table_resource(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            county_path = Path(tmpdir) / "county.csv"
+            election_path = Path(tmpdir) / "election.csv"
+            county_path.write_text(
+                "County_Id,County_name\n"
+                "1,Howard\n"
+                "2,Mansfield\n",
+                encoding="utf-8",
+            )
+            election_path.write_text(
+                "District,Committee\n"
+                "2,Appropriations\n",
+                encoding="utf-8",
+            )
+            remote_dsl = {
+                "task_type": "table_reasoning.query",
+                "question": "Which county has an appropriations delegate?",
+                "sources": [
+                    {
+                        "id": "county",
+                        "type": "table",
+                        "format": "csv",
+                        "schema": {
+                            "format": "csv",
+                            "columns": ["County_Id", "County_name"],
+                        },
+                    },
+                    {
+                        "id": "election",
+                        "type": "table",
+                        "format": "csv",
+                        "schema": {
+                            "format": "csv",
+                            "columns": ["District", "Committee"],
+                        },
+                    },
+                ],
+                "answer": {"name": "answer", "type": "string"},
+            }
+            logic_dag = parse_remote_sql_to_logic_dag(
+                """
+                SELECT "county"."County_name" AS "answer"
+                FROM "county"
+                JOIN "election"
+                  ON "county"."County_Id" = "election"."District"
+                WHERE "election"."Committee" = 'Appropriations';
+                """,
+                remote_dsl,
+            )
+            query_plan = logic_dag["query_plans"][0]
+
+            result = _execute_plan(
+                {
+                    "task_type": "table_reasoning.query",
+                    "resources": [
+                        _table_resource(
+                            "county",
+                            county_path,
+                            ["County_Id", "County_name"],
+                        ),
+                        _table_resource(
+                            "election",
+                            election_path,
+                            ["District", "Committee"],
+                        ),
+                    ],
+                    "nodes": query_plan["nodes"],
+                    "edges": query_plan["edges"],
+                }
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.answer, "Mansfield")
+        join_trace = next(trace for trace in result.traces if trace["op"] == "Join")
+        self.assertEqual(join_trace["input"], ["election"])
+
+    def test_executes_multitable_bridge_join_with_aliases_and_average(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            party_path = Path(tmpdir) / "party.csv"
+            host_path = Path(tmpdir) / "host.csv"
+            party_host_path = Path(tmpdir) / "party_host.csv"
+            party_path.write_text(
+                "Party_ID,Location\n"
+                "1,Heineken Music Hall Amsterdam\n"
+                "2,Rotterdam\n",
+                encoding="utf-8",
+            )
+            host_path.write_text(
+                "Host_ID,Age\n"
+                "10,34\n"
+                "11,41\n",
+                encoding="utf-8",
+            )
+            party_host_path.write_text(
+                "Party_ID,Host_ID,Is_Main_in_Charge\n"
+                "1,10,T\n"
+                "2,11,T\n",
+                encoding="utf-8",
+            )
+            remote_dsl = {
+                "task_type": "table_reasoning.query",
+                "question": (
+                    "What is the average age of main hosts who have hosted "
+                    "parties located at Heineken Music Hall Amsterdam?"
+                ),
+                "sources": [
+                    {
+                        "id": "party",
+                        "type": "table",
+                        "format": "csv",
+                        "schema": {"format": "csv", "columns": ["Party_ID", "Location"]},
+                    },
+                    {
+                        "id": "host",
+                        "type": "table",
+                        "format": "csv",
+                        "schema": {"format": "csv", "columns": ["Host_ID", "Age"]},
+                    },
+                    {
+                        "id": "party_host",
+                        "type": "table",
+                        "format": "csv",
+                        "schema": {
+                            "format": "csv",
+                            "columns": ["Party_ID", "Host_ID", "Is_Main_in_Charge"],
+                        },
+                    },
+                ],
+                "answer": {"name": "answer", "type": "number"},
+            }
+            logic_dag = parse_remote_sql_to_logic_dag(
+                """
+                SELECT AVG("h"."Age") AS "answer"
+                FROM "host" AS "h"
+                JOIN "party_host" AS "ph"
+                  ON "h"."Host_ID" = "ph"."Host_ID"
+                JOIN "party" AS "p"
+                  ON "ph"."Party_ID" = "p"."Party_ID"
+                WHERE "p"."Location" LIKE '%Heineken Music Hall Amsterdam%'
+                  AND "ph"."Is_Main_in_Charge" = 'T';
+                """,
+                remote_dsl,
+            )
+            query_plan = logic_dag["query_plans"][0]
+
+            result = _execute_plan(
+                {
+                    "task_type": "table_reasoning.query",
+                    "resources": [
+                        _table_resource("party", party_path, ["Party_ID", "Location"]),
+                        _table_resource("host", host_path, ["Host_ID", "Age"]),
+                        _table_resource(
+                            "party_host",
+                            party_host_path,
+                            ["Party_ID", "Host_ID", "Is_Main_in_Charge"],
+                        ),
+                    ],
+                    "nodes": query_plan["nodes"],
+                    "edges": query_plan["edges"],
+                }
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(float(result.answer), 34.0)
+        join_traces = [trace for trace in result.traces if trace["op"] == "Join"]
+        self.assertEqual(
+            [trace["input"] for trace in join_traces],
+            [["party_host"], ["party"]],
+        )
 
     def test_executes_merged_batch_plan_with_shared_nodes_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

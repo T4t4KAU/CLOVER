@@ -1081,6 +1081,9 @@ def _run_action_groups_batch(
             ENABLE_STATIC_FINALIZATION,
         )
         public_observation = _public_action_group_observation(observation)
+        if _observation_requests_cloud_replan(public_observation):
+            report_items.append((result.item, public_observation))
+            continue
         proactive_edge_selected = (
             static_finalization_enabled
             and _proactive_edge_review_opportunity(
@@ -2296,6 +2299,19 @@ def _execute_table_action_group(
     return {"ok": True, "answer": None, "obs": observations}
 
 
+def _observation_requests_cloud_replan(observation: dict[str, Any]) -> bool:
+    obs = observation.get("obs")
+    if not isinstance(obs, list):
+        return False
+    for item in obs:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("ev")
+        if isinstance(evidence, dict) and evidence.get("route") == "cloud_replan":
+            return True
+    return False
+
+
 def _extract_filter_evidence_from_traces(
     execution_traces: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
@@ -2352,6 +2368,145 @@ def _extract_filter_evidence_from_traces(
     return packet or None
 
 
+def _extract_join_evidence_from_traces(
+    execution_traces: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Extract compact evidence when a JOIN likely caused an empty SQL result."""
+
+    if not execution_traces:
+        return None
+    rows_by_output: dict[str, int] = {}
+    for trace in execution_traces:
+        if not isinstance(trace, dict):
+            continue
+        output = trace.get("output")
+        rows = _trace_output_rows(trace)
+        if isinstance(output, str) and isinstance(rows, int):
+            rows_by_output[output] = rows
+
+    for trace in execution_traces:
+        if not isinstance(trace, dict) or trace.get("op") != "Join":
+            continue
+        if trace.get("status") != "ok":
+            continue
+        output_rows = _trace_output_rows(trace)
+        if output_rows != 0:
+            continue
+        dependencies = trace.get("dependency")
+        if not isinstance(dependencies, list):
+            dependencies = []
+        left_rows = (
+            rows_by_output.get(dependencies[0])
+            if dependencies and isinstance(dependencies[0], str)
+            else None
+        )
+        if isinstance(left_rows, int) and left_rows <= 0:
+            continue
+        right_sources = [
+            item for item in trace.get("input", []) if isinstance(item, str)
+        ]
+        return {
+            "route": "cloud_replan",
+            "reason": "join_zero_rows",
+            "fault": "join_semantic_error",
+            "dialect": "sqlite",
+            "node": {
+                "id": trace.get("node_id"),
+                "op": trace.get("op"),
+            },
+            "input_rows": left_rows,
+            "output_rows": output_rows,
+            "join": {
+                "dependencies": dependencies[:2],
+                "right_sources": right_sources,
+            },
+            "requirements": [
+                "revise the join path or join keys",
+                "prefer hints.join_candidates when available",
+                "preserve answer type",
+            ],
+        }
+    return None
+
+
+def _extract_cross_join_evidence_from_logic_dag(
+    logic_dag: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Detect unconditional multi-table joins that should be replanned."""
+
+    for node in _logic_dag_nodes(logic_dag):
+        if node.get("op") != "Join":
+            continue
+        params = node.get("params")
+        if not isinstance(params, dict):
+            continue
+        joins = params.get("joins")
+        if not isinstance(joins, list):
+            continue
+        for join in joins:
+            if not isinstance(join, dict):
+                continue
+            source = join.get("source")
+            if isinstance(source, dict) and source.get("type") == "table_function":
+                continue
+            kind = str(join.get("kind") or "JOIN").upper()
+            if kind != "CROSS" and join.get("on") is not None:
+                continue
+            right_sources = []
+            if isinstance(source, str):
+                right_sources.append(source)
+            source_ref = join.get("source_ref")
+            if isinstance(source_ref, str):
+                right_sources.append(source_ref)
+            return {
+                "route": "cloud_replan",
+                "reason": "join_cross_product",
+                "fault": "join_semantic_error",
+                "dialect": "sqlite",
+                "node": {
+                    "id": node.get("id"),
+                    "op": node.get("op"),
+                },
+                "join": {
+                    "dependencies": list(node.get("dependency", []))[:2],
+                    "right_sources": right_sources,
+                },
+                "requirements": [
+                    "replace the cross join with explicit join keys",
+                    "prefer hints.join_candidates and hints.join_paths when available",
+                    "preserve answer type",
+                ],
+            }
+    return None
+
+
+def _logic_dag_nodes(logic_dag: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(logic_dag, dict):
+        return []
+    output = [
+        node
+        for node in logic_dag.get("nodes", [])
+        if isinstance(node, dict)
+    ]
+    for plan in logic_dag.get("query_plans", []):
+        if not isinstance(plan, dict):
+            continue
+        output.extend(
+            node
+            for node in plan.get("nodes", [])
+            if isinstance(node, dict)
+        )
+    return output
+
+
+def _trace_output_rows(trace: dict[str, Any]) -> int | None:
+    summary = trace.get("output_summary")
+    if not isinstance(summary, dict):
+        return None
+    rows = summary.get("rows")
+    return rows if isinstance(rows, int) else None
+
+
 def _compact_verification_evidence(
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
@@ -2362,6 +2517,21 @@ def _compact_verification_evidence(
     for key in ("input_rows", "output_rows"):
         if isinstance(evidence.get(key), int):
             output[key] = evidence[key]
+    join = evidence.get("join")
+    if isinstance(join, dict):
+        compact_join: dict[str, Any] = {}
+        dependencies = join.get("dependencies")
+        if isinstance(dependencies, list):
+            compact_join["dependencies"] = [
+                _short_evidence_value(item) for item in dependencies[:3]
+            ]
+        right_sources = join.get("right_sources")
+        if isinstance(right_sources, list):
+            compact_join["right_sources"] = [
+                _short_evidence_value(item) for item in right_sources[:3]
+            ]
+        if compact_join:
+            output["join"] = compact_join
     mismatch = evidence.get("mismatch")
     if isinstance(mismatch, dict):
         compact_mismatch: dict[str, Any] = {}
@@ -2490,6 +2660,8 @@ def _fault_from_verification_packet(packet: dict[str, Any]) -> str:
         return "predicate_mismatch"
     if reason == "predicate_system_bug":
         return "local_execution_error"
+    if reason.startswith("join_"):
+        return "join_semantic_error"
     return "predicate_semantic_error"
 
 
@@ -2562,10 +2734,16 @@ def _execute_sql_action_observation(
         observation["logic_dag"] = result.logic_dag
     if result.execution_traces is not None:
         observation["execution_traces"] = result.execution_traces
+    if result.ok and result.logic_dag is not None:
+        evidence = _extract_cross_join_evidence_from_logic_dag(result.logic_dag)
+        if evidence is not None:
+            observation["ev"] = evidence
     # For an empty result, expose one bounded Edge verification packet instead
     # of forwarding the full logic DAG, prompts, and execution trace.
     if _sql_result_is_empty(result):
-        evidence = _extract_filter_evidence_from_traces(result.execution_traces)
+        evidence = _extract_join_evidence_from_traces(result.execution_traces)
+        if evidence is None:
+            evidence = _extract_filter_evidence_from_traces(result.execution_traces)
         if evidence is not None:
             observation["ev"] = evidence
     return observation, result

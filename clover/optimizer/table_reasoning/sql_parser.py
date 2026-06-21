@@ -707,7 +707,7 @@ def _append_join_nodes(
     for join in select.args.get("joins") or []:
         if previous_output is None:
             raise SqlParseError("JOIN requires a left table input")
-        join_payload, extra_dependency = _join_param(
+        join_payload, extra_dependency, resource_inputs = _join_param(
             nodes=nodes,
             join=join,
             remote_dsl=remote_dsl,
@@ -720,6 +720,7 @@ def _append_join_nodes(
             nodes,
             op="Join",
             input_ref=None,
+            input_values=resource_inputs,
             dependency_refs=dependencies,
             params={"joins": [join_payload]},
         )
@@ -1930,12 +1931,13 @@ def _join_param(
     join: exp.Join,
     remote_dsl: dict[str, Any],
     relation_outputs: dict[str, str],
-) -> tuple[dict[str, Any], str | None]:
+) -> tuple[dict[str, Any], str | None, list[str]]:
     source = join.this
     join_payload: dict[str, Any] = {
         "kind": (join.args.get("kind") or "JOIN").upper(),
     }
     dependency_ref: str | None = None
+    resource_inputs: list[str] = []
     if isinstance(source, exp.Table):
         source_name = _table_name(source)
         if source_name in relation_outputs:
@@ -1944,6 +1946,7 @@ def _join_param(
             join_payload["alias"] = _table_alias(source) or source_name
         else:
             join_payload["source"] = source_name
+            resource_inputs.append(source_name)
             alias = _table_alias(source)
             if alias:
                 join_payload["alias"] = alias
@@ -1977,7 +1980,7 @@ def _join_param(
         join_payload["kind"] = "CROSS"
     if join.args.get("on") is not None:
         join_payload["on"] = _expr_ast(join.args["on"])
-    return join_payload, dependency_ref
+    return join_payload, dependency_ref, resource_inputs
 
 
 def _table_function_output_column(expression: exp.Expression) -> str | None:

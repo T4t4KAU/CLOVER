@@ -55,6 +55,34 @@ BATCH_REMOTE_DSL = {
     ],
 }
 
+MULTI_TABLE_REMOTE_DSL = {
+    "task_type": "table_reasoning.query",
+    "question": "Which county has an appropriations delegate?",
+    "sources": [
+        {
+            "id": "county",
+            "type": "table",
+            "format": "csv",
+            "schema": {
+                "format": "csv",
+                "shape": {"rows": 5, "columns": 2},
+                "columns": ["County_Id", "County_name"],
+            },
+        },
+        {
+            "id": "election",
+            "type": "table",
+            "format": "csv",
+            "schema": {
+                "format": "csv",
+                "shape": {"rows": 8, "columns": 3},
+                "columns": ["District", "Committee", "Delegate"],
+            },
+        },
+    ],
+    "answer": {"name": "answer", "type": "string"},
+}
+
 
 def parse_remote_sql_to_logic_dag(
     remote_response: str,
@@ -543,6 +571,24 @@ class SqlParserTest(unittest.TestCase):
         self.assertIn("Join", [node["op"] for node in logic_dag["nodes"]])
         self.assert_logic_dag_io_contract(logic_dag)
 
+    def test_multitable_join_declares_right_table_input(self) -> None:
+        logic_dag = parse_remote_sql_to_logic_dag(
+            """
+            SELECT "county"."County_name" AS "answer"
+            FROM "county"
+            JOIN "election"
+              ON "county"."County_Id" = "election"."District"
+            WHERE "election"."Committee" = 'Appropriations';
+            """,
+            MULTI_TABLE_REMOTE_DSL,
+        )
+
+        join_node = next(node for node in logic_dag["nodes"] if node["op"] == "Join")
+        self.assertEqual(join_node["dependency"], ["T0"])
+        self.assertEqual(join_node["input"], ["election"])
+        self.assertEqual(join_node["params"]["joins"][0]["source"], "election")
+        self.assert_logic_dag_io_contract(logic_dag, MULTI_TABLE_REMOTE_DSL)
+
     def test_compiles_derived_table_subquery_with_group(self) -> None:
         logic_dag = parse_remote_sql_to_logic_dag(
             """
@@ -941,8 +987,13 @@ class SqlParserTest(unittest.TestCase):
         )
         self.assertEqual(logic_dag["nodes"][1]["dependency"], ["T0"])
 
-    def assert_logic_dag_io_contract(self, logic_dag: dict) -> None:
-        external_sources = {source["id"] for source in REMOTE_DSL["sources"]}
+    def assert_logic_dag_io_contract(
+        self,
+        logic_dag: dict,
+        remote_dsl: dict | None = None,
+    ) -> None:
+        remote_dsl = remote_dsl or REMOTE_DSL
+        external_sources = {source["id"] for source in remote_dsl["sources"]}
         produced_outputs = set()
         for node in logic_dag["nodes"]:
             self.assertTrue(set(node["input"]).issubset(external_sources))

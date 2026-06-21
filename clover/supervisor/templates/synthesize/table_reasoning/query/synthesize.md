@@ -22,11 +22,13 @@ When `repair` is present, treat it as the complete compact failure report:
 - `sql` is the failed SQL.
 - `failure` identifies the first useful failure.
 - `schema` contains only relevant columns.
+- `join_candidates` and `join_paths`, when present, contain locally supported join edges and bridge-table paths.
 - `evidence` contains locally verified values and Edge repair results.
 - `prior` contains compact previous attempts.
 - `requirements` are mandatory.
 Generate one materially corrected SQL action. Never repeat `repair.sql` or SQL in `repair.prior`.
 Do not change columns based on a guessed candidate. A candidate column is usable only when `repair.evidence` shows the predicate literal in its `matches` or samples.
+For `join_semantic_error`, change the join path or join keys using `repair.join_candidates` and `repair.join_paths`; include an intermediate bridge table when the candidates connect the needed tables only through that table.
 For `relative_row_semantic_error`, implement the previous/next relation; do not return the anchor row.
 For `sql_execution_error`, replace unsupported syntax with SQLite-compatible SQL.
 For `predicate_mismatch`, make the smallest predicate change supported by actual values.

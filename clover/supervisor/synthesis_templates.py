@@ -603,6 +603,22 @@ def _table_repair_packet(
     schema = _relevant_table_schema(source=source, sql=sql, evidence=evidence)
     if schema:
         packet["schema"] = schema
+    join_candidates = _relevant_join_candidates(
+        source=source,
+        sql=sql,
+        evidence=evidence,
+        fault=fault,
+    )
+    if join_candidates:
+        packet["join_candidates"] = join_candidates
+    join_paths = _relevant_join_paths(
+        source=source,
+        sql=sql,
+        evidence=evidence,
+        fault=fault,
+    )
+    if join_paths:
+        packet["join_paths"] = join_paths
     if evidence:
         packet["evidence"] = evidence
     history = _compact_repair_history(source.get("mem"))
@@ -644,6 +660,8 @@ def _repair_fault(
         if suffix == "system_bug":
             return "local_execution_error"
         return "predicate_semantic_error"
+    if reason.startswith("join_"):
+        return "join_semantic_error"
     if isinstance(failed, dict) and (
         failed.get("ok") is False or failed.get("err") is not None
     ):
@@ -718,7 +736,212 @@ def _repair_requirements(
         requirements.append(
             "parse the ordering key using its actual numeric/date/time format"
         )
+    elif fault == "join_semantic_error":
+        requirements.append(
+            "revise the join path or join keys using join candidates, schema, and value evidence; include a bridge table when candidates require one"
+        )
     return requirements
+
+
+def _relevant_join_candidates(
+    *,
+    source: dict[str, Any],
+    sql: str,
+    evidence: dict[str, Any],
+    fault: str,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    if fault != "join_semantic_error":
+        return []
+    hints = table_reasoning_hints_from_dsl(source)
+    candidates = hints.get("join_candidates") if isinstance(hints, dict) else None
+    if not isinstance(candidates, list):
+        return []
+    mentioned = _mentioned_sql_identifiers(sql)
+    join_evidence = evidence.get("join")
+    if isinstance(join_evidence, dict):
+        for item in join_evidence.get("right_sources", []):
+            if isinstance(item, str):
+                mentioned.add(item)
+    relevant: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    for candidate in candidates:
+        compact = _compact_join_candidate(candidate)
+        if not compact:
+            continue
+        fallback.append(compact)
+        candidate_keys = {
+            str(compact.get(key) or "")
+            for key in ("left_table", "left_column", "right_table", "right_column")
+        }
+        if not mentioned or any(key in mentioned for key in candidate_keys):
+            relevant.append(compact)
+    selected = relevant[:limit]
+    if len(selected) < min(limit, len(fallback)):
+        seen = {
+            (
+                item.get("left_table"),
+                item.get("left_column"),
+                item.get("right_table"),
+                item.get("right_column"),
+            )
+            for item in selected
+        }
+        for item in fallback:
+            key = (
+                item.get("left_table"),
+                item.get("left_column"),
+                item.get("right_table"),
+                item.get("right_column"),
+            )
+            if key in seen:
+                continue
+            selected.append(item)
+            seen.add(key)
+            if len(selected) >= limit:
+                break
+    return selected
+
+
+def _mentioned_sql_identifiers(sql: str) -> set[str]:
+    mentioned = {
+        match.group(1).replace('""', '"')
+        for match in re.finditer(r'"((?:""|[^"])*)"', sql)
+    }
+    for token in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", sql):
+        if token.upper() not in {
+            "SELECT",
+            "FROM",
+            "JOIN",
+            "LEFT",
+            "RIGHT",
+            "INNER",
+            "OUTER",
+            "ON",
+            "WHERE",
+            "GROUP",
+            "BY",
+            "ORDER",
+            "LIMIT",
+            "AS",
+            "AND",
+            "OR",
+            "NOT",
+            "IN",
+            "IS",
+            "NULL",
+            "LIKE",
+            "AVG",
+            "SUM",
+            "COUNT",
+            "MIN",
+            "MAX",
+        }:
+            mentioned.add(token)
+    return mentioned
+
+
+def _compact_join_candidate(candidate: Any) -> dict[str, Any]:
+    if not isinstance(candidate, dict):
+        return {}
+    output: dict[str, Any] = {}
+    for key in ("left_table", "left_column", "right_table", "right_column"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            output[key] = _short_repair_value(value)
+    if len(output) < 4:
+        return {}
+    for key in ("score", "overlap", "left_coverage", "right_coverage"):
+        value = candidate.get(key)
+        if value is not None:
+            output[key] = json_ready(value)
+    evidence = candidate.get("evidence")
+    if isinstance(evidence, list) and evidence:
+        output["evidence"] = [
+            _short_repair_value(item)
+            for item in evidence[:4]
+            if item is not None
+        ]
+    sample_matches = candidate.get("sample_matches")
+    if isinstance(sample_matches, list) and sample_matches:
+        output["sample_matches"] = [
+            _short_repair_value(item)
+            for item in sample_matches[:4]
+            if item is not None
+        ]
+    return output
+
+
+def _relevant_join_paths(
+    *,
+    source: dict[str, Any],
+    sql: str,
+    evidence: dict[str, Any],
+    fault: str,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    if fault != "join_semantic_error":
+        return []
+    hints = table_reasoning_hints_from_dsl(source)
+    paths = hints.get("join_paths") if isinstance(hints, dict) else None
+    if not isinstance(paths, list):
+        return []
+    mentioned = _mentioned_sql_identifiers(sql)
+    join_evidence = evidence.get("join")
+    if isinstance(join_evidence, dict):
+        for item in join_evidence.get("right_sources", []):
+            if isinstance(item, str):
+                mentioned.add(item)
+    relevant: list[dict[str, Any]] = []
+    fallback: list[dict[str, Any]] = []
+    for path in paths:
+        compact = _compact_join_path(path)
+        if not compact:
+            continue
+        fallback.append(compact)
+        tables = compact.get("tables")
+        if (
+            not mentioned
+            or isinstance(tables, list)
+            and any(str(table) in mentioned for table in tables)
+        ):
+            relevant.append(compact)
+    selected = relevant[:limit]
+    if len(selected) < min(limit, len(fallback)):
+        seen = {tuple(item.get("tables", [])) for item in selected}
+        for item in fallback:
+            key = tuple(item.get("tables", []))
+            if key in seen:
+                continue
+            selected.append(item)
+            seen.add(key)
+            if len(selected) >= limit:
+                break
+    return selected
+
+
+def _compact_join_path(path: Any) -> dict[str, Any]:
+    if not isinstance(path, dict):
+        return {}
+    tables = path.get("tables")
+    joins = path.get("joins")
+    if not isinstance(tables, list) or not isinstance(joins, list) or not joins:
+        return {}
+    output: dict[str, Any] = {
+        "tables": [_short_repair_value(item) for item in tables[:6]],
+        "joins": [],
+    }
+    for join in joins[:5]:
+        compact_join = _compact_join_candidate(join)
+        if compact_join:
+            output["joins"].append(compact_join)
+    if not output["joins"]:
+        return {}
+    for key in ("length", "score"):
+        value = path.get(key)
+        if value is not None:
+            output[key] = json_ready(value)
+    return output
 
 
 def _relevant_table_schema(
@@ -801,6 +1024,21 @@ def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     error = evidence.get("error")
     if error is not None:
         output["error"] = _compact_error(error)
+    join = evidence.get("join")
+    if isinstance(join, dict):
+        compact_join: dict[str, Any] = {}
+        dependencies = join.get("dependencies")
+        if isinstance(dependencies, list):
+            compact_join["dependencies"] = [
+                _short_repair_value(item) for item in dependencies[:4]
+            ]
+        right_sources = join.get("right_sources")
+        if isinstance(right_sources, list):
+            compact_join["right_sources"] = [
+                _short_repair_value(item) for item in right_sources[:4]
+            ]
+        if compact_join:
+            output["join"] = compact_join
     mismatch = evidence.get("mismatch")
     if isinstance(mismatch, dict):
         compact_mismatch: dict[str, Any] = {}
@@ -1003,6 +1241,21 @@ def _compact_history_evidence(value: Any) -> dict[str, Any]:
             for key in ("id", "op")
             if node.get(key) is not None
         }
+    join = value.get("join")
+    if isinstance(join, dict):
+        compact_join: dict[str, Any] = {}
+        dependencies = join.get("dependencies")
+        if isinstance(dependencies, list):
+            compact_join["dependencies"] = [
+                _short_repair_value(item) for item in dependencies[:4]
+            ]
+        right_sources = join.get("right_sources")
+        if isinstance(right_sources, list):
+            compact_join["right_sources"] = [
+                _short_repair_value(item) for item in right_sources[:4]
+            ]
+        if compact_join:
+            output["join"] = compact_join
     local_attempt = value.get("local_attempt")
     if isinstance(local_attempt, dict):
         output["local_attempt"] = {
@@ -1027,6 +1280,9 @@ def _action_observation_needs_repair(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
     if value.get("ok") is False or value.get("err") is not None:
+        return True
+    evidence = value.get("ev")
+    if isinstance(evidence, dict) and evidence.get("route") == "cloud_replan":
         return True
     result = value.get("res")
     if isinstance(result, dict):
