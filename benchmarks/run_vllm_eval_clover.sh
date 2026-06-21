@@ -13,17 +13,31 @@ set -euo pipefail
 #   EDGE1  -> local slm  (edge agent, table reasoning)
 #   EDGE2  -> remote + synthesize (cloud agent, repair)
 #
+# Demo: run the main experiment with two edge models / two vLLM services:
+#   PYTHON_BIN=/Users/huangwenxuan/Documents/codes/CLOVER/.venv/bin/python \
+#   CLOVER_EDGE1_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-3B-Instruct \
+#   CLOVER_EDGE2_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-7B-Instruct \
+#   CLOVER_EDGE1_GPUS=0 \
+#   CLOVER_EDGE2_GPUS=1 \
+#   CLOVER_EDGE1_PORT=8000 \
+#   CLOVER_EDGE2_PORT=8001 \
+#   CLOVER_EDGE1_MAX_MODEL_LEN=4096 \
+#   CLOVER_EDGE2_MAX_MODEL_LEN=8192 \
+#   CLOVER_EVAL_CONCURRENCY=16 \
+#   CLOVER_EDGE2_CONCURRENCY=8 \
+#   /Users/huangwenxuan/Documents/codes/CLOVER/benchmarks/run_vllm_eval_clover.sh tablebench --max-cases 100
+#
 # Usage:
-#   bash benchmarks/run_vllm_eval_cloud_as_edge.sh [DATASET] [eval options...]
+#   bash benchmarks/run_vllm_eval_clover.sh [DATASET] [eval options...]
 #
 # Examples:
-#   bash benchmarks/run_vllm_eval_cloud_as_edge.sh wikitq --max-cases 20
-#   bash benchmarks/run_vllm_eval_cloud_as_edge.sh tablebench
+#   bash benchmarks/run_vllm_eval_clover.sh wikitq --max-cases 20
+#   bash benchmarks/run_vllm_eval_clover.sh tablebench
 # =============================================================================
 
 # =============================================================================
 # User settings
-# Edit these values, then run: bash benchmarks/run_vllm_eval_cloud_as_edge.sh
+# Edit these values, then run: bash benchmarks/run_vllm_eval_clover.sh
 # Every variable can also be overridden via environment variables (CLOVER_*).
 # =============================================================================
 
@@ -108,7 +122,7 @@ PYTHON_BIN="${PYTHON_BIN:-$(command -v python 2>/dev/null || true)}"
 usage() {
   cat <<'EOF'
 Usage:
-  bash benchmarks/run_vllm_eval_cloud_as_edge.sh [DATASET] [eval options...]
+  bash benchmarks/run_vllm_eval_clover.sh [DATASET] [eval options...]
 
 Starts two local vLLM servers (EDGE1 + EDGE2) and runs the selected eval.
 All model/server/concurrency settings are configured at the top of this script
@@ -118,9 +132,9 @@ DATASET:
   tablebench | wikitq | tablefact
 
 Examples:
-  bash benchmarks/run_vllm_eval_cloud_as_edge.sh
-  bash benchmarks/run_vllm_eval_cloud_as_edge.sh wikitq --max-cases 20
-  bash benchmarks/run_vllm_eval_cloud_as_edge.sh tablebench
+  bash benchmarks/run_vllm_eval_clover.sh
+  bash benchmarks/run_vllm_eval_clover.sh wikitq --max-cases 20
+  bash benchmarks/run_vllm_eval_clover.sh tablebench
 
 Environment variables (key ones):
   CLOVER_EDGE1_MODEL_PATH / CLOVER_EDGE2_MODEL_PATH   Model paths
