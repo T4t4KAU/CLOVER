@@ -37,6 +37,13 @@ TABLEBENCH_WEIGHTS = {
 
 TABLEBENCH_QTYPES = frozenset({"FactChecking", "NumericalReasoning"})
 
+TABLEFACT_WEIGHTS = {
+    "FactChecking/simple": 50,
+    "FactChecking/complex": 50,
+}
+
+TABLEFACT_QTYPES = frozenset({"FactChecking"})
+
 WIKITQ_EDGE_OPPORTUNITY_WEIGHTS = {
     "field_selection": 30,
     "value_normalization": 15,
@@ -52,7 +59,14 @@ TABLEBENCH_EDGE_OPPORTUNITY_WEIGHTS = {
     "deterministic_control": 30,
 }
 
-SELECTION_POLICIES = frozenset({"representative", "edge_opportunity"})
+TABLEFACT_EDGE_OPPORTUNITY_WEIGHTS = {
+    "field_selection": 30,
+    "value_normalization": 15,
+    "candidate_selection": 25,
+    "deterministic_control": 30,
+}
+
+SELECTION_POLICIES = frozenset({"representative", "edge_opportunity", "full_eval"})
 
 _DETERMINISTIC_OPERATION_RE = re.compile(
     r"\b(how many|number of|count|total|sum|average|mean|difference|"
@@ -82,8 +96,6 @@ def build_ablation_subset(
 ) -> dict[str, Any]:
     """Write one deterministic JSONL manifest and its summary."""
 
-    if size <= 0:
-        raise ValueError("size must be positive")
     normalized = _normalize_dataset(dataset)
     policy = _normalize_selection_policy(selection_policy)
     cases = _load_cases(dataset_root)
@@ -108,6 +120,27 @@ def build_ablation_subset(
         else:
             assign = _tablebench_stratum
             weights = TABLEBENCH_WEIGHTS
+    elif normalized == "tablefact":
+        cases = [
+            case
+            for case in cases
+            if str(case.get("qtype") or "") in TABLEFACT_QTYPES
+        ]
+        case_id_counts = Counter(str(case.get("case_id") or "") for case in cases)
+        cases = [
+            case
+            for case in cases
+            if case_id_counts[str(case.get("case_id") or "")] == 1
+        ]
+        if policy == "edge_opportunity":
+            assign = lambda case: _edge_opportunity_stratum(  # noqa: E731
+                case,
+                dataset=normalized,
+            )
+            weights = TABLEFACT_EDGE_OPPORTUNITY_WEIGHTS
+        else:
+            assign = _tablebench_stratum
+            weights = TABLEFACT_WEIGHTS
     else:
         if policy == "edge_opportunity":
             assign = lambda case: _edge_opportunity_stratum(  # noqa: E731
@@ -119,14 +152,22 @@ def build_ablation_subset(
             assign = _wikitq_stratum
             weights = WIKITQ_WEIGHTS
 
-    selected, quotas = _stratified_select(
-        cases=cases,
-        assign=assign,
-        weights=weights,
-        size=size,
-        seed=seed,
-        dataset=normalized,
-    )
+    if policy == "full_eval":
+        # Full-eval mode: keep every eligible case without stratified sampling.
+        # Strata are still assigned for diagnostic breakdowns in the summary.
+        selected = cases
+        quotas = {}
+    else:
+        if size <= 0:
+            raise ValueError("size must be positive")
+        selected, quotas = _stratified_select(
+            cases=cases,
+            assign=assign,
+            weights=weights,
+            size=size,
+            seed=seed,
+            dataset=normalized,
+        )
     records = [
         _manifest_record(
             case,
@@ -151,7 +192,7 @@ def build_ablation_subset(
         "uses_model_predictions": False,
         "uses_answer_correctness": False,
         "size": len(records),
-        "requested_size": size,
+        "requested_size": len(records) if policy == "full_eval" else size,
         "seed": seed,
         "dataset_root": dataset_root.expanduser().as_posix(),
         "manifest": output_path.expanduser().as_posix(),
@@ -428,6 +469,12 @@ def _mechanism_tags(
         if subtype in {"Comparison", "Ranking", "Time-basedCalculation"}:
             return ["node_review", "cloud_recovery"]
         return ["contract_gate", "cloud_recovery"]
+    if dataset == "tablefact":
+        if stratum == "FactChecking/simple":
+            return ["static_finalization", "local_semantic_binding"]
+        if stratum == "FactChecking/complex":
+            return ["edge_local_review", "cloud_recovery"]
+        return ["contract_gate", "cloud_recovery"]
     mapping = {
         "aggregation": ["static_finalization", "contract_gate"],
         "boolean": ["contract_gate", "edge_local_review"],
@@ -528,6 +575,20 @@ def _edge_opportunity_stratum(case: dict[str, Any], *, dataset: str) -> str:
             return "candidate_selection"
         return "deterministic_control"
 
+    if dataset == "tablefact":
+        # TableFact is purely FactChecking/boolean; edge opportunity is driven
+        # by cell mentions and format risk rather than qsubtype.
+        if int(features.get("matched_format_risk_cells", 0) or 0) > 0:
+            return "value_normalization"
+        if int(features.get("matched_body_cells", 0) or 0) > 0:
+            return "field_selection"
+        if (
+            0 < int(features.get("table_rows", 0) or 0) <= 15
+            and 0 < int(features.get("table_columns", 0) or 0) <= 10
+        ):
+            return "candidate_selection"
+        return "deterministic_control"
+
     if answer_type.startswith("list") and not deterministic:
         return "list_assembly"
     if (
@@ -589,6 +650,8 @@ def _normalize_dataset(value: str) -> str:
         return "wikitq"
     if normalized == "tablebench":
         return normalized
+    if normalized in {"tablefact", "tabfact"}:
+        return "tablefact"
     raise ValueError(f"Unsupported ablation dataset: {value!r}")
 
 
@@ -598,6 +661,7 @@ def _normalize_selection_policy(value: str) -> str:
         "mechanism_stratified": "representative",
         "edge": "edge_opportunity",
         "opportunity": "edge_opportunity",
+        "full": "full_eval",
     }
     normalized = aliases.get(normalized, normalized)
     if normalized not in SELECTION_POLICIES:
@@ -612,7 +676,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build a fixed mechanism-stratified ablation subset."
     )
-    parser.add_argument("--dataset", required=True, choices=("tablebench", "wikitq"))
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        choices=("tablebench", "wikitq", "tablefact"),
+    )
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--size", type=int, default=100)

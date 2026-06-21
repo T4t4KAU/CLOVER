@@ -1,0 +1,45 @@
+{
+  "dataset": "wikitq",
+  "selection_policy": "full_eval_outcome_blind",
+  "selection_basis": [
+    "question_text",
+    "answer_type",
+    "dataset_metadata",
+    "table_shape",
+    "cell_representation"
+  ],
+  "uses_model_predictions": false,
+  "uses_answer_correctness": false,
+  "size": 4344,
+  "requested_size": 4344,
+  "seed": 20260619,
+  "dataset_root": "/Users/huangwenxuan/Documents/codes/CLOVER/datasets/wikitq",
+  "manifest": "/Users/huangwenxuan/Documents/codes/CLOVER/benchmarks/ablation_cases/wikitq_full_eval.jsonl",
+  "eligible_cases": 4344,
+  "quotas": {},
+  "strata": {
+    "aggregation": 1655,
+    "boolean": 62,
+    "comparison": 549,
+    "direct_lookup": 551,
+    "extrema": 522,
+    "multi_answer": 115,
+    "temporal_order": 890
+  },
+  "answer_types": {
+    "list[number]": 19,
+    "list[string]": 96,
+    "number": 2181,
+    "string": 2048
+  },
+  "mechanism_tags": {
+    "cloud_recovery": 1961,
+    "cloud_synthesis": 115,
+    "contract_gate": 1832,
+    "edge_local_review": 62,
+    "local_semantic_binding": 551,
+    "node_review": 1961,
+    "static_finalization": 2206
+  },
+  "unique_tables": 421
+}

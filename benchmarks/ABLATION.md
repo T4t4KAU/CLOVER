@@ -1,88 +1,81 @@
-# CLOVER 消融实验脚本
+# CLOVER Ablation Suite
 
-两套数据集实验彼此独立，每套固定使用 100 个 case：
+The three dataset experiments are independent. Each can run on either a fixed-size subset (default 100 cases) or the full dataset:
 
-- `run_wikitq_ablation.sh`：WikiTQ 机制分层子集；
-- `run_tablebench_ablation.sh`：TableBench 子集，仅包含 `FactChecking` 与 `NumericalReasoning`。
+- `run_wikitq_ablation.sh`: WikiTQ.
+- `run_tablebench_ablation.sh`: TableBench, restricted to `FactChecking` and `NumericalReasoning`.
+- `run_tablefact_ablation.sh`: TableFact, restricted to `FactChecking` (the `simple` and `complex` subtypes).
 
-抽样仅依据数据集元信息、问题文本、答案类型、表格规模和单元格表示形式，
-不读取模型预测、运行轨迹或正确性结果。默认 manifest 位于
-`benchmarks/ablation_cases/`，八个变体严格复用同一 case 集合。
+Sampling relies only on dataset metadata, question text, answer type, table shape, and cell representation. It never reads model predictions, execution traces, or correctness labels. Default manifests live in `benchmarks/ablation_cases/`, and all ten variants reuse the same case set.
 
-脚本支持两种互补的固定子集：
+The suite supports three selection policies:
 
-- `representative`：原始任务类型分层子集，用于报告整体 ACC/成本趋势；
-- `edge_opportunity`：Edge 机制增强子集，用于检验局部语义处理是否提高
-  ACC、减少 Cloud 调用，以及节点修复和末端复核各自贡献多少。
+- `representative`: original task-type stratified subset, used to report overall ACC/cost trends.
+- `edge_opportunity`: Edge-mechanism-enriched subset, used to test whether local semantic processing improves ACC, reduces Cloud calls, and how much node repair and terminal review each contribute.
+- `full_eval`: the full eligible dataset (TableBench 493 / WikiTQ 4344 / TableFact 1998), used for the final reported ablation numbers.
 
-当前消融脚本默认使用 `edge_opportunity`。WikiTQ 中 85 个 case 来自字段选择、
-值归一化、短列表整理和小候选集，15 个 case 是确定性控制题；TableBench 中
-70 个 case 来自局部语义机会，30 个是确定性控制题。每个 manifest 的
-`.summary.json` 明确记录抽样依据，并标记
-`uses_model_predictions=false` 和 `uses_answer_correctness=false`。
+For the final paper, use `full_eval` so the ablation ACC matches the main results table. The 100-case subsets remain useful for quick iteration and the `mechanism-focused, outcome-blind` analysis.
 
-论文中应将它明确称为 “mechanism-focused, outcome-blind subset”，不要把该
-子集上的 ACC 当作整个 benchmark 的无偏总体 ACC。若篇幅允许，建议同时报告
-`representative` 子集作为稳健性对照。
+For WikiTQ, 85 cases come from field selection, value normalization, short-list assembly, and small candidate sets, while 15 are deterministic control questions. For TableBench, 70 cases come from local semantic opportunities and 30 are deterministic control questions. For TableFact, 70 cases come from field selection, value normalization, and small candidate sets, while 30 are deterministic control questions. Each manifest's `.summary.json` records the sampling basis explicitly and marks `uses_model_predictions=false` and `uses_answer_correctness=false`.
 
-## 运行
+In the paper, refer to the 100-case subset explicitly as the "mechanism-focused, outcome-blind subset". Do not treat ACC on this subset as an unbiased population ACC over the entire benchmark. If space permits, also report the `representative` subset as a robustness control.
+
+## Running
 
 ```bash
 conda activate dl
 
+# 100-case subset (default, for quick iteration):
 bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
 bash benchmarks/run_tablebench_ablation.sh /path/to/edge-model
+bash benchmarks/run_tablefact_ablation.sh /path/to/edge-model
+
+# Full dataset (for final reported numbers):
+CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
+CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_tablebench_ablation.sh /path/to/edge-model
+CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_tablefact_ablation.sh /path/to/edge-model
 ```
 
-每套脚本运行以下八个变体：
+Each script runs the following ten variants:
 
-1. `full`：完整 CLOVER；
-2. `all_edge`：关闭 Static Fast Path，将所有静态可执行节点交给 Edge Agent；
-3. `no_edge`：关闭 Edge Agent、节点修复、节点复核与末端 Edge Review，其他静态和 Cloud 能力与 Full 保持一致；
-4. `static`：仅关闭节点级 Edge Repair，保留末端 Edge Review；
-5. `no_contract`：关闭 Edge Agent 输出契约验证；
-6. `end_review`：关闭节点级 Edge Repair 和 Node Review，只保留末端 Edge Review；
-7. `one_shot`：保留 Cloud 最终综合，但禁止 Cloud 生成后续 SQL/DAG action；
-8. `cloud_finalize`：关闭静态与末端 Edge 最终化，统一交给 Cloud 综合。
+1. `full`: Full CLOVER.
+2. `all_edge`: Disable Static Fast Path and route every statically executable node to the Edge Agent.
+3. `no_edge`: Disable Edge Agent, node repair, node review, and terminal Edge Review; keep all other static and Cloud capabilities aligned with Full.
+4. `static`: Disable only node-level Edge Repair; keep terminal Edge Review.
+5. `no_contract`: Disable Edge Agent output contract verification.
+6. `end_review`: Disable node-level Edge Repair and Node Review; keep only terminal Edge Review.
+7. `one_shot`: Keep Cloud final synthesis but forbid Cloud from emitting follow-up SQL/DAG actions.
+8. `cloud_finalize`: Disable static and terminal Edge finalization; route everything to Cloud synthesis.
+9. `static_only`: Disable the entire Edge family and Cloud Replan/Synthesis, leaving one Cloud planning pass plus Static Fast Path/Finalization. Measures the upper bound of Static execution alone; cases that Static cannot finalize are expected to fail.
+10. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family (Agent/Repair/Review) plus Cloud Synthesis as the terminal fallback. Tests whether Edge can independently finalize when Static is unavailable.
 
-`all_edge` 中，Edge 输出直接进入后续 DAG；静态执行结果仅作为 shadow
-reference 计算一致率，不会在不一致时替换 Edge 输出。汇总报告额外给出
-Accuracy、Cloud calls、Edge calls、Edge tokens、总运行时间、Runtime
-failures，以及 Edge 输出与静态参照结果的一致率。
+In `all_edge`, Edge output flows directly into the downstream DAG; static execution results serve only as a shadow reference for agreement-rate computation and never replace Edge output on disagreement. The summary report additionally reports Accuracy, Cloud calls, Edge calls, Edge tokens, total runtime, runtime failures, and the agreement rate between Edge output and the static reference.
 
-`no_edge` 是验证 Edge 是否真正替代 Cloud 的无混杂对照组。它保留静态最终化、
-Cloud synthesis 和 Cloud replan，因此与 Full 之间的 Cloud 调用差异可归因于
-Edge 路径是否启用。
+`no_edge` is the unconfounded control for verifying whether Edge truly substitutes for Cloud. It keeps static finalization, Cloud synthesis, and Cloud replan, so the Cloud-call delta against Full can be attributed to whether the Edge path is enabled.
 
-Full CLOVER 默认启用主动局部语义复核：
+`static_only` and `no_edge` are complementary: `no_edge` keeps Cloud Replan/Synthesis as fallback, while `static_only` further disables them, leaving only Static. Comparing the two separates the contributions of Static and Cloud fallback. `no_static` and `all_edge` are complementary: `all_edge` only disables Static Fast Path while keeping Static Finalization, whereas `no_static` further disables Static Finalization to test whether Edge can independently complete terminal finalization.
+
+Full CLOVER enables proactive local semantic review by default:
 
 ```text
 CLOVER_EDGE_REVIEW_PROACTIVE=true
 ```
 
-静态运行时仅在 evidence 闭合且规模受限时触发，包括单行多字段选择、至多五行的
-候选选择、简单布尔组合、短列表整理，以及百分数、单位、引号、标签或尾部括号的
-值归一化。Edge 输出必须引用 fact ID，并通过确定性操作重放；复核失败时继续原有
-静态或 Cloud 路径。包含最高、排序、计数或跨行比较的列表问题不会进入主动
-Edge 整理，而是保留在确定性或 Cloud 路径。
+Static execution triggers only when evidence is closed and size-bounded, including single-row multi-field selection, candidate selection over at most five rows, simple boolean combinations, short-list assembly, and value normalization for percentages, units, quotes, labels, or trailing parentheses. Edge output must reference fact IDs and replay through deterministic operations; on review failure, execution falls back to the original static or Cloud path. List questions involving superlatives, ranking, counting, or cross-row comparison do not enter proactive Edge assembly and remain on the deterministic or Cloud path.
 
-为了减少顺序偏差，默认使用 seed 对八个变体进行可复现打乱，实际顺序记录在
-`variant_order.txt`。可通过以下变量指定固定顺序：
+To reduce ordering bias, the ten variants are reproducibly shuffled using the seed by default; the actual order is recorded in `variant_order.txt`. A fixed order can be specified via:
 
 ```bash
-CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
+CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static
 ```
 
-同一套实验只启动一次 vLLM 服务。每个变体开始前会执行一次不计入评测时间的
-本地模型 warm-up。结果默认写入：
+Each experiment starts the vLLM server only once. Before each variant, a local-model warm-up is performed and excluded from the measured time. Results are written to:
 
 ```text
 benchmark/runs/<dataset>_ablation_<timestamp>/
 ```
 
-目录中的 `sanity_check.json` 会校验固定 case 集、细粒度 feature flags、
-`w/o Cloud Replan` 的重规划计数，以及 Cloud Finalization 的终止路径。
-八个变体结束后，脚本会在终端直接打印汇总表，并生成：
+The `sanity_check.json` in that directory validates the fixed case set, fine-grained feature flags, the replan count for `w/o Cloud Replan`, and the terminal path for Cloud Finalization. After the ten variants finish, the script prints the summary table to the terminal and generates:
 
 ```text
 ablation_summary.md
@@ -90,32 +83,27 @@ ablation_summary.csv
 ablation_summary.json
 ```
 
-表中包含：
+The table includes:
 
-- 正确率、相对 Full CLOVER 的百分点变化和 Exact McNemar 配对检验；
-- 相对 Full 的退化/恢复 case 数；
-- 节点 Edge 运行/成功/step、节点复核和契约拒绝；
-- 末端 Edge 调用/命中/上报、主动语义机会/命中与 Cloud 重规划次数；
-- 最终答案来源、Cloud/本地模型 token、估算成本和耗时。
-- `Full CLOVER` 与 `w/o Edge Agent` 的直接 Edge-to-Cloud 替代效应，包括
-  Cloud 调用、synthesis、replan、token、成本和每题调用增量。
-- `End-only Review` 对比 `w/o Edge Agent` 的终局/主动语义复核贡献，以及
-  `Full CLOVER` 对比 `End-only Review` 的节点修复贡献。
-- 每个变体相对 Full 的具体退化/恢复 case ID、含 retry case 的正确率以及
-  runtime error 类型。
+- Accuracy, percentage-point delta vs Full CLOVER, and the exact McNemar paired test.
+- Regression/recovery case counts vs Full.
+- Node Edge runs/successes/steps, node reviews, and contract rejections.
+- Terminal Edge calls/hits/escalations, proactive semantic opportunities/hits, and Cloud replan counts.
+- Final answer sources, Cloud/local model tokens, estimated cost, and runtime.
+- The direct Edge-to-Cloud substitution effect between `Full CLOVER` and `w/o Edge Agent`, including Cloud calls, synthesis, replan, tokens, cost, and per-query call delta.
+- The terminal/proactive semantic review contribution of `End-only Review` vs `w/o Edge Agent`, and the node-repair contribution of `Full CLOVER` vs `End-only Review`.
+- Per-variant regression/recovery case IDs vs Full, retry-case accuracy, and runtime error types.
 
-此外会生成：
+Additionally, the suite generates:
 
 ```text
 ablation_case_diagnostics.jsonl
 ablation_discordant_cases.csv
 ```
 
-前者保存每个 case 在八个变体下的正确性、答案来源、retry 和错误类型；后者只
-保存 Full 与变体结果不同的配对 case，便于直接检查 Contract Verification 和
-Cloud Replan 为什么出现反向增益。
+The former records each case's correctness, answer source, retry, and error type across the ten variants; the latter keeps only paired cases where Full and a variant disagree, making it easy to inspect why Contract Verification or Cloud Replan produced reverse gains.
 
-如果八组实验已经跑完，只需要补生成汇总而不重跑：
+If the ten runs are already complete and only the summary needs to be regenerated without rerunning:
 
 ```bash
 python -m benchmarks.summarize_ablation_suite \
@@ -123,38 +111,105 @@ python -m benchmarks.summarize_ablation_suite \
   --dataset wikitq
 ```
 
-## 重新生成固定子集
+## Regenerating the Fixed Subset
 
 ```bash
 CLOVER_ABLATION_REGENERATE_MANIFEST=1 \
 bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
 ```
 
-默认参数：
+Default parameters:
 
 ```text
 CLOVER_ABLATION_SIZE=100
 CLOVER_ABLATION_SEED=20260619
 CLOVER_ABLATION_SELECTION_POLICY=edge_opportunity
+CLOVER_ABLATION_FULL_EVAL=false
 ```
 
-运行代表性对照子集：
+Run the representative control subset:
 
 ```bash
 CLOVER_ABLATION_SELECTION_POLICY=representative \
 bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
 ```
 
-两种 policy 使用不同的 manifest 文件名，不会互相覆盖：
+The policies use different manifest filenames and never overwrite each other:
 
 ```text
 wikitq_representative_100_seed20260619.jsonl
 wikitq_edge_opportunity_100_seed20260619.jsonl
+wikitq_full_eval.jsonl
+tablebench_representative_100_seed20260619.jsonl
+tablebench_edge_opportunity_100_seed20260619.jsonl
+tablebench_full_eval.jsonl
+tablefact_representative_100_seed20260619.jsonl
+tablefact_edge_opportunity_100_seed20260619.jsonl
+tablefact_full_eval.jsonl
 ```
 
-TableBench 下载转换也固定只保留两类。已有旧转换数据需要重新生成时：
+TableBench download/conversion is also fixed to keep only the two reasoning types. To regenerate from previously converted data:
 
 ```bash
 CLOVER_DATASET_OVERWRITE=1 \
 bash benchmarks/download_datasets.sh --dataset tablebench --overwrite
 ```
+
+TableFact download/conversion defaults to the `test` split only (the `simple` and `complex` subtypes). To regenerate:
+
+```bash
+CLOVER_DATASET_OVERWRITE=1 \
+bash benchmarks/download_datasets.sh --dataset tablefact --overwrite
+```
+
+## Cost-Accuracy Pareto (P0-2)
+
+Aggregate cost-accuracy pairs across CLOVER, baselines, and ablation variants for Pareto analysis:
+
+```bash
+python -m benchmarks.summarize_cost_accuracy \
+  --dataset wikitq \
+  --ablation-suite benchmark/runs/wikitq_ablation_<timestamp> \
+  --clover-run benchmark/runs/wikitq_clover_<timestamp> \
+  --pure-cot-run benchmark/runs/wikitq_pure_cot_<timestamp> \
+  --external-baselines benchmarks/external_baselines.json \
+  --output-dir benchmark/runs/pareto_wikitq
+```
+
+Output: `cost_accuracy_pareto.{csv,md,json}` with per-query and per-1K-query cost, accuracy, Cloud/Edge calls, and total tokens.
+
+External baselines JSON format:
+
+```json
+{
+  "baselines": [
+    {
+      "method": "ReAcTable",
+      "method_key": "reactable",
+      "dataset": "wikitq",
+      "total_cases": 4344,
+      "correct_cases": 3500,
+      "estimated_cost_usd": 12.5,
+      "remote_calls": 8688,
+      "remote_tokens": 25000000
+    }
+  ]
+}
+```
+
+## Edge Model Scale Sweep (P0-3)
+
+Measure how Edge model size affects accuracy, cost, and Edge-only finalization. Runs `full` and `no_static` variants across multiple Edge models on the full datasets:
+
+```bash
+# Edit USER_EDGE_MODELS at the top of the script, then:
+bash benchmarks/run_edge_model_sweep.sh
+
+# Or override via environment:
+CLOVER_EDGE_MODELS=/models/Qwen2.5-3B-Instruct:/models/Qwen2.5-7B-Instruct:/models/Qwen3-4B-Instruct \
+bash benchmarks/run_edge_model_sweep.sh
+```
+
+Output: `edge_model_sweep.{csv,md,json}` with accuracy, cost, Cloud/Edge calls, model calls (latency proxy), and tokens per query for each (Edge model, dataset, variant) combination.
+
+The `full` variant shows how Edge scale affects overall CLOVER performance. The `no_static` variant shows whether larger Edge models can independently finalize when Static is unavailable.

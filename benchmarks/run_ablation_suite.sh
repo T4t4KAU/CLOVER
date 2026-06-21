@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Command-line arguments and environment variables still override these values.
 # =============================================================================
-USER_DATASET="wikitq"  # wikitq | tablebench
+USER_DATASET="wikitq"  # wikitq | tablebench | tablefact
 USER_PYTHON_BIN="python"  # Use the python from the active conda environment
 USER_EDGE_MODEL_PATH="/path/to/Qwen2.5-3B-Instruct"
 USER_DEEPSEEK_API_KEY=""
@@ -30,11 +30,12 @@ USER_SYNTHESIZE_LLM_CONFIG="model_config/deepseek_remote_llm_config.json"
 USER_OUTPUT_ROOT=""                # Empty: benchmark/runs/<dataset>_ablation_<time>
 USER_ABLATION_SIZE="100"
 USER_ABLATION_SEED="20260619"
-USER_ABLATION_SELECTION_POLICY="edge_opportunity"  # representative | edge_opportunity
+USER_ABLATION_SELECTION_POLICY="edge_opportunity"  # representative | edge_opportunity | full_eval
+USER_ABLATION_FULL_EVAL="false"                    # true: use the full dataset (all eligible cases) instead of a fixed-size subset
 USER_MAX_RETRIES="1"
 USER_VALIDATE_ONLY="false"         # true: validate settings/cases without running
 USER_VARIANT_ORDER=""              # Empty: deterministic shuffle using the seed
-                                    # Or: full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
+                                    # Or: full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static
 
 # Optional explicit case IDs. Leave this empty to use the bundled fixed
 # 100-case manifest in benchmarks/ablation_cases.
@@ -56,18 +57,23 @@ Usage:
   bash benchmarks/run_ablation_suite.sh [DATASET] [EDGE_MODEL_PATH] [eval options...]
 
 DATASET:
-  tablebench | wikitq
+  tablebench | wikitq | tablefact
 
-This runs eight variants on one fixed 100-case manifest:
-  full, all_edge, no_edge, static, no_contract, end_review, one_shot, cloud_finalize
+This runs ten variants on one fixed manifest:
+  full, all_edge, no_edge, static, no_contract, end_review, one_shot, cloud_finalize, static_only, no_static
 
 The internal names map to:
-  all_edge      = All-Edge Routing / w/o Static Fast Path
+  all_edge       = All-Edge Routing / w/o Static Fast Path
   no_edge        = w/o Edge Agent (all local Edge paths disabled)
   static         = w/o Edge Repair (terminal Edge review remains enabled)
   end_review     = end-only Edge review
   one_shot       = w/o Cloud Replan (Cloud final synthesis remains enabled)
   cloud_finalize = force final synthesis through Cloud
+  static_only    = w/o Edge Agent + w/o Cloud Replan/Synthesis (Static upper bound)
+  no_static      = w/o Static Fast Path + w/o Static Finalization (Edge-only finalization)
+
+Set CLOVER_ABLATION_FULL_EVAL=true to run on the full dataset instead of a
+fixed-size subset.
 
 Examples:
   # Use the User settings block at the top of this script:
@@ -76,15 +82,20 @@ Examples:
   # Override dataset and model temporarily:
   bash benchmarks/run_ablation_suite.sh wikitq /models/Qwen2.5-3B-Instruct
   bash benchmarks/run_ablation_suite.sh tablebench /models/Qwen2.5-3B-Instruct
+  bash benchmarks/run_ablation_suite.sh tablefact /models/Qwen2.5-3B-Instruct
+
+  # Full-dataset ablation (TableBench 493 / WikiTQ 4344 / TableFact 1998):
+  CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablebench /models/Qwen2.5-3B-Instruct
 
 Useful environment variables:
-  CLOVER_ABLATION_SIZE=100
+  CLOVER_ABLATION_FULL_EVAL=true          # Use the full dataset
+  CLOVER_ABLATION_SIZE=100                # Subset size (ignored when FULL_EVAL=true)
   CLOVER_ABLATION_SEED=20260619
   CLOVER_ABLATION_SELECTION_POLICY=edge_opportunity
   CLOVER_ABLATION_REGENERATE_MANIFEST=1
   CLOVER_ABLATION_OUTPUT_ROOT=/path/to/output
   CLOVER_EDGE_MODEL_PATH=/path/to/model
-  CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize
+  CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static
   CLOVER_VLLM_WARMUP=true
   CLOVER_EDGE_REVIEW_PROACTIVE=true
 EOF
@@ -102,8 +113,9 @@ if [[ "${1:-}" != "" && "${1:-}" != --* ]]; then
 fi
 DATASET="$(printf '%s' "${DATASET}" | tr '[:upper:]' '[:lower:]')"
 case "${DATASET}" in
-  tablebench|wikitq) ;;
+  tablebench|wikitq|tablefact) ;;
   wikitablequestions) DATASET="wikitq" ;;
+  tabfact) DATASET="tablefact" ;;
   *)
     echo "Unsupported ablation dataset: ${DATASET}" >&2
     exit 2
@@ -175,15 +187,34 @@ SIZE="${CLOVER_ABLATION_SIZE:-${USER_ABLATION_SIZE}}"
 SEED="${CLOVER_ABLATION_SEED:-${USER_ABLATION_SEED}}"
 SELECTION_POLICY="${CLOVER_ABLATION_SELECTION_POLICY:-${USER_ABLATION_SELECTION_POLICY}}"
 SELECTION_POLICY="$(printf '%s' "${SELECTION_POLICY}" | tr '[:upper:]-' '[:lower:]_')"
+FULL_EVAL="${CLOVER_ABLATION_FULL_EVAL:-${USER_ABLATION_FULL_EVAL}}"
+FULL_EVAL="$(printf '%s' "${FULL_EVAL}" | tr '[:upper:]' '[:lower:]')"
+case "${FULL_EVAL}" in
+  1|true|yes|y|on)
+    FULL_EVAL="true"
+    SELECTION_POLICY="full_eval"
+    ;;
+  0|false|no|n|off)
+    FULL_EVAL="false"
+    ;;
+  *)
+    echo "USER_ABLATION_FULL_EVAL must be true or false: ${FULL_EVAL}" >&2
+    exit 2
+    ;;
+esac
 case "${SELECTION_POLICY}" in
-  representative|edge_opportunity) ;;
+  representative|edge_opportunity|full_eval) ;;
   *)
     echo "Unsupported ablation selection policy: ${SELECTION_POLICY}" >&2
     exit 2
     ;;
 esac
 MANIFEST_ROOT="${CLOVER_ABLATION_MANIFEST_ROOT:-${SCRIPT_DIR}/ablation_cases}"
-MANIFEST="${CLOVER_ABLATION_MANIFEST:-${MANIFEST_ROOT}/${DATASET}_${SELECTION_POLICY}_${SIZE}_seed${SEED}.jsonl}"
+if [[ "${SELECTION_POLICY}" == "full_eval" ]]; then
+  MANIFEST="${CLOVER_ABLATION_MANIFEST:-${MANIFEST_ROOT}/${DATASET}_full_eval.jsonl}"
+else
+  MANIFEST="${CLOVER_ABLATION_MANIFEST:-${MANIFEST_ROOT}/${DATASET}_${SELECTION_POLICY}_${SIZE}_seed${SEED}.jsonl}"
+fi
 REGENERATE_MANIFEST="${CLOVER_ABLATION_REGENERATE_MANIFEST:-0}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 DEFAULT_OUTPUT_ROOT="${REPO_ROOT}/benchmark/runs/${DATASET}_ablation_${TIMESTAMP}"
@@ -284,7 +315,8 @@ SELECTED_CASE_IDS=()
 while IFS= read -r case_id; do
   [[ -n "${case_id}" ]] && SELECTED_CASE_IDS+=("${case_id}")
 done <"${CASE_ID_LIST}"
-if [[ "${#SELECTED_CASE_IDS[@]}" -ne "${SIZE}" ]]; then
+if [[ "${FULL_EVAL}" != "true" \
+      && "${#SELECTED_CASE_IDS[@]}" -ne "${SIZE}" ]]; then
   if [[ "${ACTIVE_MANIFEST}" == "${MANIFEST}" ]]; then
     echo "Manifest has ${#SELECTED_CASE_IDS[@]} cases; regenerating ${SIZE} cases." >&2
     "${PYTHON_BIN}" -m benchmarks.ablation_subset \
@@ -302,10 +334,16 @@ if [[ "${#SELECTED_CASE_IDS[@]}" -ne "${SIZE}" ]]; then
     done <"${CASE_ID_LIST}"
   fi
 fi
-if [[ "${#SELECTED_CASE_IDS[@]}" -ne "${SIZE}" ]]; then
+if [[ "${FULL_EVAL}" != "true" \
+      && "${#SELECTED_CASE_IDS[@]}" -ne "${SIZE}" ]]; then
   echo "Expected ${SIZE} case ids but read ${#SELECTED_CASE_IDS[@]}: ${ACTIVE_MANIFEST}" >&2
   exit 1
 fi
+if [[ "${FULL_EVAL}" == "true" && "${#SELECTED_CASE_IDS[@]}" -eq 0 ]]; then
+  echo "Full-eval manifest is empty: ${ACTIVE_MANIFEST}" >&2
+  exit 1
+fi
+SIZE="${#SELECTED_CASE_IDS[@]}"
 
 CASE_ARGS=()
 for case_id in "${SELECTED_CASE_IDS[@]}"; do
@@ -326,6 +364,7 @@ case "$(printf '%s' "${VALIDATE_ONLY}" | tr '[:upper:]' '[:lower:]')" in
     echo "  GPUs: ${CLOVER_VLLM_GPUS}" >&2
     echo "  vLLM endpoint: ${CLOVER_VLLM_HOST}:${CLOVER_VLLM_PORT}" >&2
     echo "  cases: ${#SELECTED_CASE_IDS[@]}" >&2
+    echo "  full eval: ${FULL_EVAL}" >&2
     echo "  selection policy: ${SELECTION_POLICY}" >&2
     echo "  manifest: ${ACTIVE_MANIFEST}" >&2
     echo "  output: ${SUITE_ROOT}" >&2
@@ -422,6 +461,20 @@ run_named_variant() {
     cloud_finalize)
       run_variant cloud_finalize true true false true true true true true false
       ;;
+    static_only)
+      # Static-only: disable the entire Edge family and Cloud Replan/Synthesis,
+      # leaving one Cloud planning pass plus Static Fast Path/Finalization.
+      # Measures the upper bound of Static execution alone; cases that Static
+      # cannot finalize are expected to fail.
+      run_variant static_only false false false true false false false true true
+      ;;
+    no_static)
+      # No-Static: disable Static Fast Path and Static Finalization, keeping
+      # the full Edge family (Agent/Repair/Review) plus Cloud Synthesis as the
+      # terminal fallback. Tests whether Edge can independently finalize when
+      # Static is unavailable.
+      run_variant no_static true true true true true true true false false
+      ;;
     *)
       echo "Unknown ablation variant: $1" >&2
       exit 2
@@ -456,6 +509,8 @@ variants = [
     "end_review",
     "one_shot",
     "cloud_finalize",
+    "static_only",
+    "no_static",
 ]
 random.Random(int(sys.argv[1])).shuffle(variants)
 print("\n".join(variants))
@@ -475,6 +530,8 @@ expected = {
     "end_review",
     "one_shot",
     "cloud_finalize",
+    "static_only",
+    "no_static",
 }
 actual = sys.argv[1:]
 if len(actual) != len(expected) or set(actual) != expected:

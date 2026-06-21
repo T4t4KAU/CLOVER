@@ -1,0 +1,37 @@
+{
+  "dataset": "tablefact",
+  "selection_policy": "representative_outcome_blind",
+  "selection_basis": [
+    "question_text",
+    "answer_type",
+    "dataset_metadata",
+    "table_shape",
+    "cell_representation"
+  ],
+  "uses_model_predictions": false,
+  "uses_answer_correctness": false,
+  "size": 100,
+  "requested_size": 100,
+  "seed": 20260619,
+  "dataset_root": "/Users/huangwenxuan/Documents/codes/CLOVER/datasets/tablefact",
+  "manifest": "/Users/huangwenxuan/Documents/codes/CLOVER/benchmarks/ablation_cases/tablefact_representative_100_seed20260619.jsonl",
+  "eligible_cases": 12779,
+  "quotas": {
+    "FactChecking/simple": 50,
+    "FactChecking/complex": 50
+  },
+  "strata": {
+    "FactChecking/complex": 50,
+    "FactChecking/simple": 50
+  },
+  "answer_types": {
+    "boolean": 100
+  },
+  "mechanism_tags": {
+    "cloud_recovery": 50,
+    "edge_local_review": 50,
+    "local_semantic_binding": 50,
+    "static_finalization": 50
+  },
+  "unique_tables": 100
+}

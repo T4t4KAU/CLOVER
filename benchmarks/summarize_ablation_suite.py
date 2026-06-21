@@ -19,6 +19,8 @@ VARIANTS = (
     ("end_review", "End-only Review"),
     ("one_shot", "w/o Cloud Replan"),
     ("cloud_finalize", "Cloud Finalization"),
+    ("static_only", "Static-Only"),
+    ("no_static", "w/o Static"),
 )
 
 
@@ -990,7 +992,7 @@ def _safe_divide(numerator: int | float, denominator: int | float) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite-root", type=Path, required=True)
-    parser.add_argument("--dataset", choices=("tablebench", "wikitq"), required=True)
+    parser.add_argument("--dataset", choices=("tablebench", "wikitq", "tablefact"), required=True)
     return parser
 
 

@@ -1,0 +1,45 @@
+{
+  "dataset": "tablebench",
+  "selection_policy": "full_eval_outcome_blind",
+  "selection_basis": [
+    "question_text",
+    "answer_type",
+    "dataset_metadata",
+    "table_shape",
+    "cell_representation"
+  ],
+  "uses_model_predictions": false,
+  "uses_answer_correctness": false,
+  "size": 491,
+  "requested_size": 491,
+  "seed": 20260619,
+  "dataset_root": "/Users/huangwenxuan/Documents/codes/CLOVER/datasets/tablebench",
+  "manifest": "/Users/huangwenxuan/Documents/codes/CLOVER/benchmarks/ablation_cases/tablebench_full_eval.jsonl",
+  "eligible_cases": 491,
+  "quotas": {},
+  "strata": {
+    "FactChecking/MatchBased": 46,
+    "FactChecking/Multi-hop FactChecking": 50,
+    "NumericalReasoning/Aggregation": 49,
+    "NumericalReasoning/ArithmeticCalculation": 49,
+    "NumericalReasoning/Comparison": 50,
+    "NumericalReasoning/Counting": 50,
+    "NumericalReasoning/Domain-Specific": 49,
+    "NumericalReasoning/Multi-hop NumericalReasoing": 51,
+    "NumericalReasoning/Ranking": 50,
+    "NumericalReasoning/Time-basedCalculation": 47
+  },
+  "answer_types": {
+    "number": 318,
+    "string": 173
+  },
+  "mechanism_tags": {
+    "cloud_recovery": 297,
+    "contract_gate": 248,
+    "edge_local_review": 50,
+    "local_semantic_binding": 46,
+    "node_review": 147,
+    "static_finalization": 194
+  },
+  "unique_tables": 378
+}

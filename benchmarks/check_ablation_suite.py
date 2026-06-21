@@ -104,6 +104,30 @@ VARIANT_FLAGS = {
         "enable_static_fast_path": True,
         "enable_static_finalization": False,
     },
+    "static_only": {
+        "enable_edge_agent": False,
+        "enable_edge_repair": False,
+        "enable_terminal_edge_review": False,
+        "enable_contract_gate": True,
+        "enable_node_review": False,
+        "enable_cloud_recovery": True,
+        "enable_cloud_replan": False,
+        "enable_cloud_synthesis": False,
+        "enable_static_fast_path": True,
+        "enable_static_finalization": True,
+    },
+    "no_static": {
+        "enable_edge_agent": True,
+        "enable_edge_repair": True,
+        "enable_terminal_edge_review": True,
+        "enable_contract_gate": True,
+        "enable_node_review": True,
+        "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
+        "enable_static_fast_path": False,
+        "enable_static_finalization": False,
+    },
 }
 
 
@@ -259,6 +283,42 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
                     "edge_local_review_calls": terminal_edge_calls,
                 },
             )
+        if variant == "static_only":
+            no_edge_activity = {
+                "local_slm_calls": int(summary.get("local_slm_calls", 0) or 0),
+                "executor_edge_agent_calls": int(counters.get("executor_edge_agent_calls", 0) or 0),
+                "executor_local_slm_steps": int(counters.get("executor_local_slm_steps", 0) or 0),
+                "executor_edge_local_reviews": int(
+                    counters.get("executor_edge_local_reviews", 0) or 0
+                ),
+                "edge_local_review_calls": int(summary.get("edge_local_review_calls", 0) or 0),
+                "cloud_replan_calls": int(counters.get("cloud_replan_calls", 0) or 0),
+                "supervisor_synthesis_calls": int(
+                    counters.get("supervisor_synthesis_calls", 0) or 0
+                ),
+            }
+            _record_check(
+                checks,
+                failures,
+                variant,
+                "edge_and_cloud_replan_synthesis_disabled",
+                all(value == 0 for value in no_edge_activity.values()),
+                no_edge_activity,
+            )
+        if variant == "no_static":
+            static_hits = int(counters.get("static_final_answer_hits", 0) or 0)
+            action_hits = int(counters.get("action_group_static_answer_hits", 0) or 0)
+            _record_check(
+                checks,
+                failures,
+                variant,
+                "static_finalization_disabled",
+                static_hits == 0 and action_hits == 0,
+                {
+                    "static_final_answer_hits": static_hits,
+                    "action_group_static_answer_hits": action_hits,
+                },
+            )
 
     report = {
         "dataset": dataset,
@@ -316,7 +376,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite-root", type=Path, required=True)
-    parser.add_argument("--dataset", choices=("tablebench", "wikitq"), required=True)
+    parser.add_argument("--dataset", choices=("tablebench", "wikitq", "tablefact"), required=True)
     return parser
 
 

@@ -36,6 +36,8 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
                 "end_review": [True, False, True, False],
                 "one_shot": [True, True, False, False],
                 "cloud_finalize": [False, True, False, True],
+                "static_only": [True, False, False, False],
+                "no_static": [True, True, False, False],
             }
             for index, (variant, _) in enumerate(VARIANTS):
                 _write_variant(
