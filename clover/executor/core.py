@@ -110,7 +110,10 @@ class Executor:
             context = ExecutionContext(
                 task_type=str(plan_context.get("task_type") or "mixed"),
                 resource_store=resource_store,
-                external_params=dict(external_params or {}),
+                external_params=_resolve_external_params(
+                    external_params,
+                    slm_config=slm_config,
+                ),
                 table_cache=table_cache,
                 slm_config=slm_config,
                 slm_client=slm_client,
@@ -494,6 +497,19 @@ class Executor:
 def _validate_positive_limit(value: int, *, name: str) -> None:
     if value <= 0:
         raise PlanValidationError(f"{name} must be positive")
+
+
+def _resolve_external_params(
+    external_params: dict[str, Any] | None,
+    *,
+    slm_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    resolved = dict(external_params or {})
+    if isinstance(slm_config, dict):
+        for key in ("max_intermediate_rows", "max_iterations"):
+            if key not in resolved and slm_config.get(key) is not None:
+                resolved[key] = slm_config[key]
+    return resolved
 
 
 def execute_execution_plan(

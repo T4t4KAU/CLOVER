@@ -2,8 +2,9 @@
 
 MMQA answers come in two shapes:
 
-* ``str`` -- a plain string answer. Multi-value answers are comma-separated
-  (e.g. ``"Treasury, 115897"``).
+* ``str`` -- a plain string answer. Multi-value answers are usually
+  comma-separated (e.g. ``"Treasury, 115897"``), but converted SQL-style
+  outputs may use semicolons when individual values themselves contain commas.
 * ``dict`` -- a DataFrame-like object with ``columns`` / ``index`` / ``data``
   keys, produced when the gold SQL returns a small result table.
 
@@ -19,6 +20,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass
+from itertools import product
 from typing import Any
 
 from benchmarks.wikitq.metrics import (
@@ -46,9 +48,10 @@ def flatten_mmqa_answer(value: Any) -> list[str]:
 
     * ``dict`` answers (DataFrame-like ``{columns, index, data}``) are flattened
       by reading every cell in ``data`` row by row.
-    * ``str`` answers are split on ``, `` into items. A bare number stays a
-      single item.
-    * ``list`` / ``tuple`` answers are flattened recursively.
+    * ``str`` answers are split on semicolons when present. Commas are kept
+      because many table values are names such as ``"Last, First"``.
+    * ``list`` / ``tuple`` answers are flattened recursively, treating string
+      list items as atomic values.
     * Numbers and booleans are stringified.
     """
 
@@ -63,6 +66,11 @@ def flatten_mmqa_answer(value: Any) -> list[str]:
     if isinstance(value, (list, tuple)):
         items: list[str] = []
         for item in value:
+            if isinstance(item, str):
+                stripped = item.strip()
+                if stripped:
+                    items.append(stripped)
+                continue
             items.extend(flatten_mmqa_answer(item))
         return [item for item in items if item != ""]
     text = str(value).strip()
@@ -98,11 +106,11 @@ def _flatten_dict_answer(value: dict[str, Any]) -> list[str]:
 
 
 def _split_text_answer(text: str) -> list[str]:
-    # MMQA string answers use ", " as the multi-value separator. Keep a single
-    # value intact (do not split names that happen to contain commas without a
-    # following space).
-    if ", " in text:
-        parts = [part.strip() for part in text.split(",")]
+    # Prefer semicolons when present because converted SQL-style answers use
+    # them to separate rows whose values may themselves contain commas, e.g.
+    # "Schmidt, Kertzmann and Lubowitz; Schmitt-Lang".
+    if ";" in text:
+        parts = [part.strip() for part in text.split(";")]
         return [part for part in parts if part]
     return [text]
 
@@ -125,10 +133,16 @@ def score_mmqa_answer(
     """
 
     expected_items = flatten_mmqa_answer(expected)
-    target_values = _dedupe_values([to_value(item) for item in expected_items])
-    predicted_candidates = _prediction_value_candidates(actual, expected_count=len(target_values))
+    target_candidates = _value_candidates_from_items(expected_items)
+    expected_count = len(target_candidates[0]) if target_candidates else 0
+    predicted_candidates = _prediction_value_candidates(
+        actual,
+        expected_count=expected_count,
+    )
     correct = any(
-        check_denotation(target_values, candidate) for candidate in predicted_candidates
+        check_denotation(target_values, candidate)
+        for target_values in target_candidates
+        for candidate in predicted_candidates
     )
     actual_items = flatten_mmqa_answer(actual)
     return MMQAScore(
@@ -146,10 +160,11 @@ def _prediction_value_candidates(
     expected_count: int,
 ) -> list[list[Value]]:
     base_items = flatten_mmqa_answer(value)
-    item_candidates: list[list[str]] = [base_items]
+    item_candidates: list[list[str]] = _item_set_variants(base_items)
     if len(base_items) == 1 and expected_count > 1:
         text = base_items[0]
-        item_candidates.extend(_split_prediction_text(text))
+        for split_items in _split_prediction_text(text):
+            item_candidates.extend(_item_set_variants(split_items))
     candidates = [_dedupe_values([to_value(item) for item in items]) for items in item_candidates if items]
     if not candidates:
         candidates = [[]]
@@ -161,6 +176,55 @@ def _prediction_value_candidates(
             seen.add(key)
             unique.append(candidate)
     return unique
+
+
+def _value_candidates_from_items(items: list[str]) -> list[list[Value]]:
+    candidates = [
+        _dedupe_values([to_value(item) for item in variant])
+        for variant in _item_set_variants(items)
+    ]
+    return candidates or [[]]
+
+
+def _item_set_variants(items: list[str]) -> list[list[str]]:
+    if not items:
+        return [[]]
+    per_item = [_item_variants(item) for item in items]
+    variants: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for combo in product(*per_item):
+        key = tuple(combo)
+        if key not in seen:
+            seen.add(key)
+            variants.append(list(combo))
+        if len(variants) >= 64:
+            break
+    return variants
+
+
+def _item_variants(item: str) -> list[str]:
+    variants = [item]
+    name_variant = _comma_name_variant(item)
+    if name_variant and name_variant not in variants:
+        variants.append(name_variant)
+    return variants
+
+
+def _comma_name_variant(text: str) -> str | None:
+    match = re.fullmatch(r"\s*([^,;|]+),\s*([^,;|]+)\s*", text)
+    if not match:
+        return None
+    last, first = match.group(1).strip(), match.group(2).strip()
+    if not (_looks_like_name_part(last) and _looks_like_name_part(first)):
+        return None
+    return f"{first} {last}"
+
+
+def _looks_like_name_part(text: str) -> bool:
+    if any(char.isdigit() for char in text):
+        return False
+    tokens = [token for token in re.split(r"[\s.-]+", text) if token]
+    return bool(tokens) and all(any(char.isalpha() for char in token) for token in tokens)
 
 
 def _split_prediction_text(text: str) -> list[list[str]]:

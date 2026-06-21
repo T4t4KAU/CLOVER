@@ -107,6 +107,23 @@ class MultiTablePreprocessTest(unittest.TestCase):
             ["host", "party_host", "party"],
         )
         self.assertEqual(host_party_paths[0]["length"], 2)
+        value_matches = result["remote_dsl"]["hints"]["question_value_matches"]
+        self.assertTrue(
+            any(
+                item["table"] == "party"
+                and item["column"] == "Location"
+                and item["matches"] == ["Amsterdam"]
+                for item in value_matches
+            )
+        )
+        column_matches = result["remote_dsl"]["hints"]["question_column_matches"]
+        self.assertTrue(
+            any(
+                item["table"] == "host"
+                and item["column"] == "Age"
+                for item in column_matches
+            )
+        )
 
 
 if __name__ == "__main__":

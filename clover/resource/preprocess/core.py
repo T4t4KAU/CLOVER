@@ -41,6 +41,46 @@ MAX_JOIN_SAMPLE_ROWS = 1000
 MAX_JOIN_PROFILE_COLUMNS = 48
 MIN_JOIN_VALUE_OVERLAP = 2
 MIN_JOIN_CANDIDATE_SCORE = 0.50
+MAX_QUESTION_VALUE_MATCHES = 24
+MAX_QUESTION_COLUMN_MATCHES = 24
+MAX_QUESTION_MATCH_SAMPLE_ROWS = 2000
+MAX_QUESTION_MATCHES_PER_COLUMN = 3
+QUESTION_MATCH_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "who",
+    "what",
+    "which",
+    "where",
+    "when",
+    "whose",
+    "have",
+    "has",
+    "had",
+    "are",
+    "was",
+    "were",
+    "been",
+    "from",
+    "that",
+    "this",
+    "those",
+    "these",
+    "into",
+    "over",
+    "under",
+    "more",
+    "less",
+    "than",
+    "same",
+    "only",
+    "average",
+    "total",
+    "number",
+    "count",
+}
 
 
 def preprocess_task_dsl(
@@ -110,6 +150,21 @@ def preprocess_task_dsl(
             remote_dsl,
             join_hints,
         )
+    question_hints: dict[str, Any] = {}
+    question_value_matches = _build_question_value_matches(
+        local_dsl.get("sources", []),
+        question=str(task_dsl.get("question") or ""),
+    )
+    if question_value_matches:
+        question_hints["question_value_matches"] = question_value_matches
+    question_column_matches = _build_question_column_matches(
+        local_dsl.get("sources", []),
+        question=str(task_dsl.get("question") or ""),
+    )
+    if question_column_matches:
+        question_hints["question_column_matches"] = question_column_matches
+    if question_hints:
+        _merge_hints(local_dsl, remote_dsl, question_hints)
 
     return {
         "local_dsl": local_dsl,
@@ -408,6 +463,207 @@ def _join_path_score(edges: list[dict[str, Any]]) -> float:
     if not scores:
         return 0.0
     return sum(scores) / len(scores)
+
+
+def _build_question_value_matches(
+    sources: list[dict[str, Any]],
+    *,
+    question: str,
+) -> list[dict[str, Any]]:
+    """Find table values mentioned by the question for filter grounding."""
+
+    question_norm = _normalize_question_match_text(question)
+    question_tokens = _question_match_tokens(question)
+    if not question_norm or not question_tokens:
+        return []
+    matches: list[dict[str, Any]] = []
+    table_sources = [
+        source
+        for source in sources
+        if isinstance(source, dict)
+        and source.get("type") == "table"
+        and isinstance(source.get("path"), str)
+    ]
+    for source in table_sources:
+        schema = source.get("schema")
+        columns = schema.get("columns") if isinstance(schema, dict) else None
+        if not isinstance(columns, list):
+            continue
+        selected_columns = [str(column) for column in columns[:MAX_JOIN_PROFILE_COLUMNS]]
+        per_column: dict[str, dict[str, Any]] = {}
+        try:
+            with Path(str(source["path"])).open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row_index, row in enumerate(reader):
+                    if row_index >= MAX_QUESTION_MATCH_SAMPLE_ROWS:
+                        break
+                    if not isinstance(row, dict):
+                        continue
+                    for column in selected_columns:
+                        raw_value = row.get(column)
+                        score = _question_value_match_score(
+                            raw_value,
+                            question_norm=question_norm,
+                            question_tokens=question_tokens,
+                        )
+                        if score <= 0:
+                            continue
+                        value = str(raw_value).strip()
+                        if not value:
+                            continue
+                        item = per_column.setdefault(
+                            column,
+                            {
+                                "table": str(source.get("id") or ""),
+                                "column": column,
+                                "score": 0.0,
+                                "matches": [],
+                                "_seen": set(),
+                            },
+                        )
+                        item["score"] = max(float(item["score"]), score)
+                        seen = item["_seen"]
+                        if (
+                            isinstance(seen, set)
+                            and value not in seen
+                            and len(item["matches"]) < MAX_QUESTION_MATCHES_PER_COLUMN
+                        ):
+                            seen.add(value)
+                            item["matches"].append(value[:120])
+        except OSError:
+            continue
+        for item in per_column.values():
+            item.pop("_seen", None)
+            if item.get("matches"):
+                item["score"] = round(float(item.get("score") or 0), 3)
+                item["evidence"] = ["value_mentioned_in_question"]
+                matches.append(item)
+    matches.sort(
+        key=lambda item: (
+            float(item.get("score") or 0),
+            len(item.get("matches") or []),
+            str(item.get("table") or ""),
+            str(item.get("column") or ""),
+        ),
+        reverse=True,
+    )
+    return matches[:MAX_QUESTION_VALUE_MATCHES]
+
+
+def _build_question_column_matches(
+    sources: list[dict[str, Any]],
+    *,
+    question: str,
+) -> list[dict[str, Any]]:
+    """Find column names explicitly mentioned by the question."""
+
+    question_tokens = _question_match_tokens(question)
+    if not question_tokens:
+        return []
+    table_entity_tokens = _table_entity_tokens(sources)
+    matches: list[dict[str, Any]] = []
+    for source in sources:
+        if not isinstance(source, dict) or source.get("type") != "table":
+            continue
+        schema = source.get("schema")
+        columns = schema.get("columns") if isinstance(schema, dict) else None
+        if not isinstance(columns, list):
+            continue
+        for column in columns[:MAX_JOIN_PROFILE_COLUMNS]:
+            column_text = str(column)
+            column_tokens = _question_match_tokens(column_text) - table_entity_tokens
+            if not column_tokens:
+                continue
+            common = sorted(column_tokens & question_tokens)
+            if not common:
+                continue
+            score = len(common) / max(1, len(column_tokens))
+            if score < 0.5:
+                continue
+            matches.append(
+                {
+                    "table": str(source.get("id") or ""),
+                    "column": column_text,
+                    "score": round(score, 3),
+                    "matched_terms": common[:4],
+                    "evidence": ["column_name_mentioned_in_question"],
+                }
+            )
+    matches.sort(
+        key=lambda item: (
+            float(item.get("score") or 0),
+            len(item.get("matched_terms") or []),
+            str(item.get("table") or ""),
+            str(item.get("column") or ""),
+        ),
+        reverse=True,
+    )
+    return matches[:MAX_QUESTION_COLUMN_MATCHES]
+
+
+def _table_entity_tokens(sources: list[dict[str, Any]]) -> set[str]:
+    tokens: set[str] = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        source_id = source.get("id")
+        if not isinstance(source_id, str):
+            continue
+        for token in _question_match_tokens(source_id):
+            tokens.add(token)
+            if token.endswith("s") and len(token) > 3:
+                tokens.add(token[:-1])
+            else:
+                tokens.add(f"{token}s")
+    return tokens
+
+
+def _question_value_match_score(
+    value: Any,
+    *,
+    question_norm: str,
+    question_tokens: set[str],
+) -> float:
+    if value is None:
+        return 0.0
+    text = str(value).strip()
+    if not text:
+        return 0.0
+    value_norm = _normalize_question_match_text(text)
+    if len(value_norm) < 3:
+        return 0.0
+    if f" {value_norm} " in f" {question_norm} ":
+        return 1.0
+    value_tokens = _question_match_tokens(text)
+    if not value_tokens:
+        return 0.0
+    common = value_tokens & question_tokens
+    if not common:
+        return 0.0
+    if len(value_tokens) == 1:
+        token = next(iter(value_tokens))
+        return 0.78 if token in question_tokens and len(token) >= 4 else 0.0
+    if len(common) < 2:
+        return 0.0
+    return min(0.95, 0.55 + 0.40 * len(common) / max(1, len(value_tokens)))
+
+
+def _normalize_question_match_text(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", value.casefold())).strip()
+
+
+def _question_match_tokens(value: str) -> set[str]:
+    tokens = set()
+    for token in re.findall(r"[a-z0-9]+", value.casefold()):
+        if token in QUESTION_MATCH_STOPWORDS:
+            continue
+        if token.isdigit():
+            if len(token) >= 4:
+                tokens.add(token)
+            continue
+        if len(token) >= 3:
+            tokens.add(token)
+    return tokens
 
 
 def _join_table_profile(source: dict[str, Any]) -> dict[str, Any]:

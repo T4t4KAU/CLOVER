@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import shutil
 import time
+import gc
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -31,7 +32,6 @@ from benchmarks.tablebench.eval import (
     _sum_dsl_builder_token_usage,
     _update_record_from_task_item,
     _write_case_trace_artifacts,
-    _write_runtime_task_artifacts,
 )
 from benchmarks.utils import (
     build_brief_summary,
@@ -111,25 +111,59 @@ def run_mmqa_eval(
         validation_mode = str(validation_mode or "none").strip().lower()
         progress_bar = progress_factory(len(selected_cases)) if progress_factory else None
         try:
-            records, system_profile = _run_mmqa_cases(
-                mmqa_root=mmqa_root,
-                output_dir=output_dir,
-                selected_cases=selected_cases,
-                remote_config=remote_config,
-                synthesize_config=synthesize_config,
-                local_slm_config=local_slm_config,
-                max_workers=max_workers,
-                max_retries=max_retries,
-                validation_mode=validation_mode,
-                remote_batch_size=remote_batch_size,
-                remote_concurrency=remote_concurrency,
-                max_parallel_execution_units=max_parallel_execution_units,
-                max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
-                max_parallel_slm_sequences=max_parallel_slm_sequences,
-                max_pending_slm_sequences=max_pending_slm_sequences,
-                profile_baseline=profile_baseline,
-                progress_bar=progress_bar,
-            )
+            if eval_batch_size is not None and eval_batch_size < len(selected_cases):
+                records = []
+                profiles = []
+                for start_index in range(0, len(selected_cases), eval_batch_size):
+                    chunk = selected_cases[start_index : start_index + eval_batch_size]
+                    chunk_records, chunk_profile = _run_mmqa_cases(
+                        mmqa_root=mmqa_root,
+                        output_dir=output_dir,
+                        selected_cases=chunk,
+                        sample_offset=start_index,
+                        remote_config=remote_config,
+                        synthesize_config=synthesize_config,
+                        local_slm_config=local_slm_config,
+                        max_workers=max_workers,
+                        max_retries=max_retries,
+                        validation_mode=validation_mode,
+                        remote_batch_size=remote_batch_size,
+                        remote_concurrency=remote_concurrency,
+                        max_parallel_execution_units=max_parallel_execution_units,
+                        max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                        max_parallel_slm_sequences=max_parallel_slm_sequences,
+                        max_pending_slm_sequences=max_pending_slm_sequences,
+                        profile_baseline=profile_baseline,
+                        progress_bar=None,
+                    )
+                    records.extend(_compact_record_for_summary(record) for record in chunk_records)
+                    chunk_records.clear()
+                    profiles.append(chunk_profile)
+                    if progress_bar is not None:
+                        progress_bar.update(records)
+                    gc.collect()
+                system_profile = _merge_system_profiles(profiles)
+            else:
+                records, system_profile = _run_mmqa_cases(
+                    mmqa_root=mmqa_root,
+                    output_dir=output_dir,
+                    selected_cases=selected_cases,
+                    sample_offset=0,
+                    remote_config=remote_config,
+                    synthesize_config=synthesize_config,
+                    local_slm_config=local_slm_config,
+                    max_workers=max_workers,
+                    max_retries=max_retries,
+                    validation_mode=validation_mode,
+                    remote_batch_size=remote_batch_size,
+                    remote_concurrency=remote_concurrency,
+                    max_parallel_execution_units=max_parallel_execution_units,
+                    max_parallel_slm_node_jobs=max_parallel_slm_node_jobs,
+                    max_parallel_slm_sequences=max_parallel_slm_sequences,
+                    max_pending_slm_sequences=max_pending_slm_sequences,
+                    profile_baseline=profile_baseline,
+                    progress_bar=progress_bar,
+                )
         finally:
             if progress_bar is not None:
                 progress_bar.close()
@@ -184,11 +218,21 @@ def run_mmqa_eval(
         return summary
 
 
+def _compact_record_for_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """Drop bulky per-case traces after they have been written to case files."""
+
+    compact = dict(record)
+    compact.pop("table_diagnostics", None)
+    compact.pop("rounds", None)
+    return compact
+
+
 def _run_mmqa_cases(
     *,
     mmqa_root: Path,
     output_dir: Path,
     selected_cases: list[dict[str, Any]],
+    sample_offset: int,
     remote_config: dict[str, Any],
     synthesize_config: dict[str, Any] | None,
     local_slm_config: dict[str, Any] | None,
@@ -219,7 +263,8 @@ def _run_mmqa_cases(
         "startup_seconds": 0.0,
     }
 
-    for sample_index, sampled_case in enumerate(selected_cases):
+    for local_index, sampled_case in enumerate(selected_cases):
+        sample_index = sample_offset + local_index
         runtime_case_id = _runtime_case_id(sampled_case, sample_index)
         case_dir = output_dir / "cases" / runtime_case_id
         case_dir.mkdir(parents=True, exist_ok=True)
@@ -259,6 +304,7 @@ def _run_mmqa_cases(
             case_dir = output_dir / "cases" / case_result.case_id
             write_json(case_dir / "case_result.json", record)
             _write_case_trace_artifacts(case_dir, case_result)
+            _drop_record_heavy_fields(record)
             completed_records.append(record)
             if progress_bar is not None:
                 progress_bar.update(completed_records)
@@ -286,6 +332,7 @@ def _run_mmqa_cases(
         progress_bar=progress_bar,
         progress_lock=progress_lock,
     )
+    profiles = [item.profile for item in system_results]
     for system_result in system_results:
         for case_result in system_result.case_results:
             record = records_by_case.get(case_result.case_id)
@@ -300,28 +347,107 @@ def _run_mmqa_cases(
                 output_dir / "cases" / case_result.case_id / "case_result.json",
                 record,
             )
+        system_result.case_results.clear()
         for answer_key, task_item in system_result.task_items.items():
             record = records_by_answer.get(answer_key) or records_by_case.get(task_item.case_id)
             if record is None:
+                _drop_task_item_heavy_fields(task_item)
                 continue
+            current_sql = task_item.current_sql
             _update_record_from_task_item(record, task_item)
-            _write_runtime_task_artifacts(
+            _write_light_runtime_task_artifact(
                 output_dir / "cases" / task_item.case_id,
                 task_item,
+                current_sql=current_sql,
             )
             record["answer_key"] = answer_key
-            record["current_sql"] = task_item.current_sql
+            record["current_sql"] = current_sql
             record.setdefault("initial_sql", None)
             record["retry_count"] = task_item.retry_count
             record["task_status"] = task_item.status
+            _drop_task_item_heavy_fields(task_item)
+            _drop_record_heavy_fields(record)
             write_json(
                 output_dir / "cases" / task_item.case_id / "case_result.json",
                 record,
             )
-    system_profile = _merge_system_profiles([item.profile for item in system_results])
+        system_result.task_items.clear()
+    system_profile = _merge_system_profiles(profiles)
     startup_profile["startup_seconds"] = time.perf_counter() - startup_started
     system_profile["eval_startup"] = startup_profile
+    case_specs.clear()
+    records_by_answer.clear()
+    started_by_case.clear()
+    completed_records.clear()
+    system_results.clear()
+    gc.collect()
     return list(records_by_case.values()), system_profile
+
+
+def _drop_record_heavy_fields(record: dict[str, Any]) -> None:
+    record.pop("table_diagnostics", None)
+    record.pop("rounds", None)
+
+
+def _write_light_runtime_task_artifact(
+    case_dir: Path,
+    task_item: Any,
+    *,
+    current_sql: str | None,
+) -> None:
+    """Write a compact task snapshot for MMQA.
+
+    The generic TableBench artifact writer stores full task/local/remote DSLs and
+    context. For MMQA these objects include multi-table schemas and value
+    profiles, and copying them for every case can dominate memory after the
+    cases have already finished. Case-level decompose, synthesis, and execution
+    traces are already written from ``CaseResult`` in real time, so this compact
+    record keeps only the fields needed to audit final routing and SQL.
+    """
+
+    write_json(
+        case_dir / "runtime_task.json",
+        {
+            "answer_key": task_item.answer_key,
+            "status": task_item.status,
+            "retry_count": task_item.retry_count,
+            "answer_type": task_item.answer_type,
+            "current_sql": current_sql,
+            "last_error": task_item.last_error,
+        },
+    )
+
+
+def _drop_task_item_heavy_fields(task_item: Any) -> None:
+    """Release bulky runtime fields once their compact summary is recorded."""
+
+    for attr in ("task_dsl", "local_dsl", "remote_dsl", "context"):
+        try:
+            setattr(task_item, attr, {})
+        except Exception:  # noqa: BLE001 - best-effort memory pruning
+            pass
+    metadata = getattr(task_item, "metadata", None)
+    if isinstance(metadata, dict):
+        for key in (
+            "table_diagnostics",
+            "decompose_trace",
+            "synthesis_trace",
+            "edge_review_trace",
+            "agent_loop_trace",
+            "dsl_builder",
+        ):
+            metadata.pop(key, None)
+    memory = getattr(task_item, "memory", None)
+    if isinstance(memory, list):
+        memory.clear()
+    try:
+        task_item.current_command = None
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        task_item.result_callback = None
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _materialized_case_spec(
@@ -386,10 +512,7 @@ def _update_record_from_case_result(
 ) -> None:
     metadata = case_result.metadata if isinstance(case_result.metadata, dict) else {}
     _update_record_from_result_metadata(record, metadata)
-    score = score_mmqa_answer(
-        expected=record.get("expected_raw"),
-        actual=case_result.answer,
-    )
+    score = _score_mmqa_record(record, case_result.answer)
     record.update(
         {
             "answer_key": case_result.answer_key,
@@ -420,7 +543,8 @@ def _update_record_from_result_metadata(
     for source_key, record_key in (
         ("answer_type", "answer_type"),
         ("question", "question"),
-        ("expected_answer", "expected_raw"),
+        ("expected_answer", "expected_answer"),
+        ("expected_raw", "expected_raw"),
         ("split", "split"),
         ("task_answer_type", "task_answer_type"),
         ("final_answer_source", "final_answer_source"),
@@ -440,6 +564,20 @@ def _update_record_from_result_metadata(
         record["parse_ok"] = True
         if dsl_builder.get("task_answer_type") is not None:
             record["task_answer_type"] = dsl_builder.get("task_answer_type")
+
+
+def _score_mmqa_record(record: dict[str, Any], actual: Any) -> Any:
+    raw_score = score_mmqa_answer(
+        expected=record.get("expected_raw"),
+        actual=actual,
+    )
+    expected_answer = record.get("expected_answer")
+    if expected_answer is None:
+        return raw_score
+    answer_score = score_mmqa_answer(expected=expected_answer, actual=actual)
+    if answer_score.correct and not raw_score.correct:
+        return answer_score
+    return raw_score
 
 
 def build_summary(
@@ -665,6 +803,7 @@ def base_case_record(
         "parse_ok": False,
         "runtime_ok": False,
         "answer_correct": False,
+        "expected_answer": sampled_case.get("expected_answer"),
         "expected_raw": sampled_case.get("expected_raw"),
         "expected_standard_text": json_ready(sampled_case.get("expected_raw")),
         "final_answer": None,

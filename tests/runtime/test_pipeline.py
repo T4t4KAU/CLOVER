@@ -8,6 +8,7 @@ from clover.runtime.pipeline import (
     PipelineProfiler,
 )
 from clover.runtime.round_loop import RuntimeLoop
+from clover.runtime.table_reasoning.pipeline import _merge_batch_hints
 
 
 class GroupedPriorityQueueTest(unittest.TestCase):
@@ -101,6 +102,56 @@ class RuntimeLoopTest(unittest.TestCase):
             ["barrier:release", "parse:1", "execute:1"],
         )
         self.assertEqual(hooks.completed, [1])
+
+
+class TableReasoningBatchHintsTest(unittest.TestCase):
+    def test_preserves_shared_hints_and_groups_question_hints_by_answer(self) -> None:
+        hints = [
+            {
+                "join_candidates": [
+                    {"left": {"table": "party"}, "right": {"table": "party_host"}}
+                ],
+                "question_value_matches": [
+                    {"table": "party", "column": "Location", "matches": ["Amsterdam"]}
+                ],
+                "question_column_matches": [
+                    {"table": "host", "column": "Age", "matches": ["age"]}
+                ],
+            },
+            {
+                "join_candidates": [
+                    {"left": {"table": "party"}, "right": {"table": "party_host"}}
+                ],
+                "question_value_matches": [
+                    {"table": "host", "column": "Name", "matches": ["Lloyd Daniels"]}
+                ],
+                "question_column_matches": [],
+            },
+        ]
+
+        merged = _merge_batch_hints(
+            hints,
+            answer_keys=["answer_1", "answer_2"],
+            questions=["Where was the party?", "Who is Lloyd Daniels?"],
+        )
+
+        self.assertEqual(merged["join_candidates"], hints[0]["join_candidates"])
+        self.assertNotIn("question_value_matches", merged)
+        self.assertEqual(
+            [entry["answer"] for entry in merged["question_value_matches_by_answer"]],
+            ["answer_1", "answer_2"],
+        )
+        self.assertEqual(
+            merged["question_column_matches_by_answer"],
+            [
+                {
+                    "answer": "answer_1",
+                    "matches": hints[0]["question_column_matches"],
+                    "question": "Where was the party?",
+                }
+            ],
+        )
+
 
 class _FakePipelineHooks:
     def __init__(self) -> None:

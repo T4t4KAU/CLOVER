@@ -338,7 +338,11 @@ def _namespace_unit(
     node["output"] = _mapped_artifact(unit.output, artifact_map=artifact_map)
     params = node.get("params")
     if isinstance(params, dict):
-        node["params"] = _namespace_node_params(params, resource_map=resource_map)
+        node["params"] = _namespace_node_params(
+            params,
+            resource_map=resource_map,
+            artifact_map=artifact_map,
+        )
     metadata = _namespace_metadata(
         unit.metadata,
         resource_map=resource_map,
@@ -401,11 +405,35 @@ def _namespace_node_params(
     params: dict[str, Any],
     *,
     resource_map: dict[str, str],
+    artifact_map: dict[str, str],
 ) -> dict[str, Any]:
     updated = copy.deepcopy(params)
     source = updated.get("source")
     if isinstance(source, str):
         updated["source"] = _mapped_resource(source, resource_map=resource_map)
+    source_ref = updated.get("source_ref")
+    if isinstance(source_ref, str):
+        updated["source_ref"] = _mapped_artifact(
+            source_ref,
+            artifact_map=artifact_map,
+        )
+    joins = updated.get("joins")
+    if isinstance(joins, list):
+        for join in joins:
+            if not isinstance(join, dict):
+                continue
+            join_source = join.get("source")
+            if isinstance(join_source, str):
+                join["source"] = _mapped_resource(
+                    join_source,
+                    resource_map=resource_map,
+                )
+            join_source_ref = join.get("source_ref")
+            if isinstance(join_source_ref, str):
+                join["source_ref"] = _mapped_artifact(
+                    join_source_ref,
+                    artifact_map=artifact_map,
+                )
     return updated
 
 

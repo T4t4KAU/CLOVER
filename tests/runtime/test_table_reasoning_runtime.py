@@ -75,6 +75,45 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             18,
         )
 
+    def test_single_supervisor_answer_dict_can_use_generic_answer_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = _write_people_table(root)
+            task = next(
+                iter(
+                    table_pipeline._build_task_items(  # noqa: SLF001
+                        [
+                            _case_spec(
+                                "case_1",
+                                root,
+                                table_path,
+                                "Which country appears first?",
+                                "string",
+                            )
+                        ]
+                    ).values()
+                )
+            )
+            item = table_pipeline.LogicDagItem(
+                task=task,
+                command_output="",
+                output_type="logic_dag",
+                logic_dag={},
+            )
+            final_results = []
+            finalized = set()
+
+            table_pipeline._finalize_batch_from_answer(  # noqa: SLF001
+                batch=[item],
+                answer={"answer": "France"},
+                final_results=final_results,
+                finalized=finalized,
+            )
+
+        self.assertEqual(final_results[0].answer, "France")
+        self.assertEqual(final_results[0].answer_key, task.answer_key)
+        self.assertEqual(final_results[0].metadata["final_answer_source"], "synthesis")
+
     def test_safe_edge_local_review_finalizes_grounded_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

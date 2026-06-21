@@ -4550,6 +4550,26 @@ def _finalize_batch_from_answer(
     finalized: set[str],
 ) -> None:
     if isinstance(answer, dict):
+        if len(batch) == 1:
+            item = batch[0]
+            key = item.task.answer_key
+            if key in answer:
+                selected_answer = answer.get(key)
+            elif "answer" in answer:
+                selected_answer = answer.get("answer")
+            elif len(answer) == 1:
+                selected_answer = next(iter(answer.values()))
+            else:
+                selected_answer = _STATIC_ACTION_NO_ANSWER
+            if selected_answer is not _STATIC_ACTION_NO_ANSWER:
+                item.task.metadata[_FINAL_ANSWER_SOURCE_KEY] = "synthesis"
+                _finalize_success(
+                    item.task,
+                    answer=selected_answer,
+                    final_results=final_results,
+                    finalized=finalized,
+                )
+                return
         for item in batch:
             key = item.task.answer_key
             if key in answer:
@@ -4696,6 +4716,7 @@ def _finalize_success(
     final_results.append(result)
     if task.result_callback is not None:
         task.result_callback(result)
+        _prune_finalized_task_metadata(task)
 
 
 def _normalize_answer_for_task(task: TaskItem, answer: Any) -> Any:
@@ -4775,6 +4796,18 @@ def _finalize_failed(
     final_results.append(result)
     if task.result_callback is not None:
         task.result_callback(result)
+        _prune_finalized_task_metadata(task)
+
+
+def _prune_finalized_task_metadata(task: TaskItem) -> None:
+    for key in (
+        _TABLE_DIAGNOSTICS_KEY,
+        _DECOMPOSE_TRACE_KEY,
+        _SYNTHESIS_TRACE_KEY,
+        _EDGE_REVIEW_TRACE_KEY,
+        _AGENT_LOOP_TRACE_KEY,
+    ):
+        task.metadata.pop(key, None)
 
 
 def _pop_batch_for_source(
@@ -4807,7 +4840,12 @@ def _batch_remote_dsl(batch: list[TaskItem]) -> dict[str, Any]:
         "sources": copy.deepcopy(first.remote_dsl.get("sources", [])),
         "answers": [{"name": item.answer_key, "type": item.answer_type} for item in batch],
     }
-    _copy_shared_optional_batch_fields(dsl, [item.remote_dsl for item in batch])
+    _copy_shared_optional_batch_fields(
+        dsl,
+        [item.remote_dsl for item in batch],
+        answer_keys=[item.answer_key for item in batch],
+        questions=[item.question for item in batch],
+    )
     return dsl
 
 
@@ -4821,7 +4859,12 @@ def _batch_local_dsl(batch: list[LogicDagItem]) -> dict[str, Any]:
             {"name": item.task.answer_key, "type": item.task.answer_type} for item in batch
         ],
     }
-    _copy_shared_optional_batch_fields(dsl, [item.task.local_dsl for item in batch])
+    _copy_shared_optional_batch_fields(
+        dsl,
+        [item.task.local_dsl for item in batch],
+        answer_keys=[item.task.answer_key for item in batch],
+        questions=[item.task.question for item in batch],
+    )
     return dsl
 
 
@@ -4871,14 +4914,78 @@ def _copy_optional_task_fields(source: dict[str, Any], target: dict[str, Any]) -
 def _copy_shared_optional_batch_fields(
     target: dict[str, Any],
     dsls: list[dict[str, Any]],
+    *,
+    answer_keys: list[str] | None = None,
+    questions: list[str] | None = None,
 ) -> None:
-    for key in (PROFILE_KEY, HINTS_KEY):
-        values = [dsl.get(key) for dsl in dsls if key in dsl]
-        if not values:
-            continue
+    profile_values = [dsl.get(PROFILE_KEY) for dsl in dsls if PROFILE_KEY in dsl]
+    if profile_values and all(value == profile_values[0] for value in profile_values):
+        target[PROFILE_KEY] = copy.deepcopy(profile_values[0])
+
+    hint_values = [dsl.get(HINTS_KEY) for dsl in dsls if isinstance(dsl.get(HINTS_KEY), dict)]
+    if not hint_values:
+        return
+    target[HINTS_KEY] = _merge_batch_hints(
+        hint_values,
+        answer_keys=answer_keys or [],
+        questions=questions or [],
+    )
+
+
+def _merge_batch_hints(
+    hints: list[dict[str, Any]],
+    *,
+    answer_keys: list[str],
+    questions: list[str],
+) -> dict[str, Any]:
+    if not hints:
+        return {}
+    if all(value == hints[0] for value in hints):
+        return copy.deepcopy(hints[0])
+
+    merged: dict[str, Any] = {}
+    keys = sorted({key for item in hints for key in item})
+    for key in keys:
+        values = [item.get(key) for item in hints]
         first_value = values[0]
         if all(value == first_value for value in values):
-            target[key] = copy.deepcopy(first_value)
+            merged[key] = copy.deepcopy(first_value)
+            continue
+        if key in {"question_value_matches", "question_column_matches"}:
+            by_answer = _per_answer_hint_values(
+                key,
+                values,
+                answer_keys=answer_keys,
+                questions=questions,
+            )
+            if by_answer:
+                merged[f"{key}_by_answer"] = by_answer
+    return merged
+
+
+def _per_answer_hint_values(
+    key: str,
+    values: list[Any],
+    *,
+    answer_keys: list[str],
+    questions: list[str],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for index, value in enumerate(values):
+        if not value:
+            continue
+        entry: dict[str, Any] = {
+            "answer": (
+                answer_keys[index]
+                if index < len(answer_keys) and answer_keys[index]
+                else f"answer_{index + 1}"
+            ),
+            "matches": copy.deepcopy(value),
+        }
+        if index < len(questions) and questions[index]:
+            entry["question"] = questions[index]
+        entries.append(entry)
+    return entries
 
 
 def _query_context(task: TaskItem) -> dict[str, Any]:

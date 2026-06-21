@@ -20,10 +20,57 @@ from .static_tools import TABLE_REASONING_STATIC_TOOLS, StaticToolError
 
 _TABLE_CACHE_LOCKS_GUARD = threading.Lock()
 _TABLE_CACHE_LOCKS: dict[tuple[int, str], threading.Lock] = {}
+DEFAULT_MAX_INTERMEDIATE_ROWS = 200_000
 
 
 class PandasExecutionError(ValueError):
     """Raised when a table reasoning plan cannot be executed with pandas."""
+
+
+def _max_intermediate_rows(external_params: dict[str, Any]) -> int:
+    raw = external_params.get("max_intermediate_rows")
+    if raw is None:
+        return DEFAULT_MAX_INTERMEDIATE_ROWS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise PandasExecutionError(
+            f"max_intermediate_rows must be a positive integer: {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise PandasExecutionError(
+            f"max_intermediate_rows must be a positive integer: {raw!r}"
+        )
+    return value
+
+
+def _check_join_bound(
+    left: pd.DataFrame,
+    right: pd.DataFrame,
+    max_rows: int,
+    *,
+    op: str,
+) -> None:
+    estimated_rows = len(left.index) * len(right.index)
+    if estimated_rows > max_rows:
+        raise PandasExecutionError(
+            f"{op} would materialize up to {estimated_rows} rows, "
+            f"exceeding max_intermediate_rows={max_rows}"
+        )
+
+
+def _check_intermediate_rows(
+    frame: pd.DataFrame,
+    max_rows: int,
+    *,
+    op: str,
+) -> None:
+    rows = len(frame.index)
+    if rows > max_rows:
+        raise PandasExecutionError(
+            f"{op} produced {rows} rows, exceeding "
+            f"max_intermediate_rows={max_rows}"
+        )
 
 
 @dataclass
@@ -372,10 +419,12 @@ class PandasTableReasoningExecutor:
     def _join(self, call: dict[str, Any]) -> PandasTable:
         left = _primary_table(call).frame.copy()
         upstream = call.get("upstream_outputs", {})
+        max_rows = _max_intermediate_rows(self.external_params)
         for join in call["params"].get("joins", []):
             source = join.get("source")
             if isinstance(source, dict) and source.get("type") == "table_function":
                 left = _join_table_function(left, source)
+                _check_intermediate_rows(left, max_rows, op="Join")
                 continue
 
             if join.get("source_ref"):
@@ -391,11 +440,13 @@ class PandasTableReasoningExecutor:
             how = _join_how(join.get("kind"))
             right_alias = join.get("alias")
             if how == "cross" and join.get("on") is None:
+                _check_join_bound(left, right, max_rows, op="Join")
                 left = left.merge(
                     right,
                     how="cross",
                     suffixes=("", f"__{right_alias}" if right_alias else "__right"),
                 )
+                _check_intermediate_rows(left, max_rows, op="Join")
                 continue
 
             suffixes = ("", f"__{right_alias}" if right_alias else "__right")
@@ -416,19 +467,23 @@ class PandasTableReasoningExecutor:
                     raise PandasExecutionError(
                         "Non-equality joins without equality keys only support inner joins"
                     )
+                _check_join_bound(left, right, max_rows, op="Join")
                 left = left.merge(
                     right,
                     how="cross",
                     suffixes=suffixes,
                 )
+            _check_intermediate_rows(left, max_rows, op="Join")
             if residual_predicate is not None:
                 evaluator = _ExpressionEvaluator(left, call.get("upstream_outputs", {}))
                 mask = _series_for_frame(evaluator.eval(residual_predicate), left).fillna(False).astype(bool)
                 left = left.loc[mask].copy()
+                _check_intermediate_rows(left, max_rows, op="Join")
         return PandasTable(left.reset_index(drop=True))
 
     def _set_op(self, call: dict[str, Any]) -> PandasTable:
         tables = [_as_table(value).frame for value in call.get("upstream_outputs", {}).values()]
+        max_rows = _max_intermediate_rows(self.external_params)
         if not tables:
             raise PandasExecutionError("SetOp requires at least one table dependency")
         operator = call["params"].get("operator", "UNION").upper()
@@ -446,6 +501,7 @@ class PandasTableReasoningExecutor:
             result = merged[merged["_merge"] == "left_only"].drop(columns=["_merge"])
         else:
             raise PandasExecutionError(f"Unsupported SetOp operator: {operator}")
+        _check_intermediate_rows(result, max_rows, op="SetOp")
         return PandasTable(result.reset_index(drop=True))
 
     def _repeat_union(self, call: dict[str, Any]) -> PandasTable:
@@ -454,6 +510,8 @@ class PandasTableReasoningExecutor:
         seed_table = self._execute_subplan(params["seed_plan"])
         accumulated = seed_table.frame.reset_index(drop=True)
         delta = accumulated.copy()
+        max_rows = _max_intermediate_rows(self.external_params)
+        _check_intermediate_rows(accumulated, max_rows, op="RepeatUnion")
 
         iteration_limit = int(params.get("iteration_limit", -1))
         max_iterations = int(self.external_params.get("max_iterations", 100))
@@ -477,6 +535,7 @@ class PandasTableReasoningExecutor:
             if new_delta.empty:
                 break
             accumulated = pd.concat([accumulated, new_delta], ignore_index=True)
+            _check_intermediate_rows(accumulated, max_rows, op="RepeatUnion")
             delta = new_delta
 
         return PandasTable(accumulated.reset_index(drop=True))

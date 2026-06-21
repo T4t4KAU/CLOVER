@@ -7,6 +7,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+import sqlglot
+from sqlglot import exp
+
 from clover.optimizer.table_reasoning.sql_parser import (
     SqlParseError,
     parse_remote_sql_to_logic_dag,
@@ -30,6 +33,8 @@ def parse_sql_list_response(
 
     questions, answers = _question_answer_lists(remote_dsl)
     payload = _extract_json_array(remote_response)
+    if len(payload) == 1 and len(questions) > 1:
+        payload = [payload[0] for _ in questions]
     if len(payload) != len(questions):
         raise SqlParseError(
             "SQL array length must equal questions length: "
@@ -39,6 +44,7 @@ def parse_sql_list_response(
     sqls: list[str] = []
     for index, item in enumerate(payload):
         item_sql = _sql_from_array_item(item, index)
+        item_sql = _retarget_answer_alias(item_sql, answers[index])
         query_dsl = _query_remote_dsl(
             remote_dsl,
             questions[index],
@@ -67,6 +73,36 @@ def _sql_from_array_item(item: Any, index: int) -> str:
     raise SqlParseError(
         f"SQL array item {index} must be a SQL string or an object with sql"
     )
+
+
+_ANSWER_ALIAS_RE = re.compile(
+    r'\bAS\s+(?:"answer(?:_\d+)?"|answer(?:_\d+)?\b)',
+    flags=re.IGNORECASE,
+)
+
+
+def _retarget_answer_alias(sql: str, answer: dict[str, Any]) -> str:
+    answer_name = str(answer.get("name", "")).strip()
+    if not answer_name:
+        return sql
+    quoted = '"' + answer_name.replace('"', '""') + '"'
+    retargeted = _ANSWER_ALIAS_RE.sub(f"AS {quoted}", sql, count=1)
+    if retargeted != sql:
+        return retargeted
+    try:
+        expression = sqlglot.parse_one(sql)
+    except Exception:  # noqa: BLE001 - fall back to original validation.
+        return sql
+    if not isinstance(expression, exp.Select) or not expression.expressions:
+        return sql
+    first = expression.expressions[0]
+    first_expr = first.this if isinstance(first, exp.Alias) else first
+    expression.set(
+        "expressions",
+        [exp.alias_(first_expr.copy(), answer_name, quoted=True)]
+        + [item.copy() for item in expression.expressions[1:]],
+    )
+    return expression.sql()
 
 
 def parse_remote_sql_list_to_logic_dag(
@@ -184,7 +220,17 @@ def _validate_answer_alias(sql: str, answer: dict[str, Any], index: int) -> None
         raise SqlParseError(f"answers[{index}].name is required")
     quoted = f'"{answer_name}"'
     unquoted_pattern = re.compile(rf"\bAS\s+{re.escape(answer_name)}\b", re.IGNORECASE)
-    if quoted not in sql and not unquoted_pattern.search(sql):
+    quoted_pattern = re.compile(
+        rf"\bAS\s+\"{re.escape(answer_name)}\"",
+        re.IGNORECASE,
+    )
+    alias_count = len(quoted_pattern.findall(sql)) + len(unquoted_pattern.findall(sql))
+    if alias_count == 0:
         raise SqlParseError(
             f"SQL array item {index} must alias its output as {quoted}"
+        )
+    if alias_count > 1:
+        raise SqlParseError(
+            f"SQL array item {index} aliases multiple SELECT items as {quoted}; "
+            "combine multi-column answers into one expression"
         )

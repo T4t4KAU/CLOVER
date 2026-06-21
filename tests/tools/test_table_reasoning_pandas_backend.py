@@ -796,6 +796,48 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
 
         self.assertEqual(outputs["answer"], ["x"])
 
+    def test_join_respects_max_intermediate_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            left_path = Path(tmpdir) / "left.csv"
+            right_path = Path(tmpdir) / "right.csv"
+            left_path.write_text("id,value\n1,a\n2,b\n", encoding="utf-8")
+            right_path.write_text("label\nx\ny\n", encoding="utf-8")
+            plan = {
+                "task_type": "table_reasoning.query",
+                "resources": [
+                    {**_resource(left_path), "id": "table_1"},
+                    {**_resource(right_path), "id": "table_2"},
+                ],
+                "nodes": [
+                    _scan_node("N0", "T0"),
+                    {
+                        "id": "N1",
+                        "op": "Join",
+                        "dependency": ["T0"],
+                        "input": [],
+                        "params": {
+                            "joins": [
+                                {
+                                    "kind": "CROSS",
+                                    "source": "table_2",
+                                }
+                            ]
+                        },
+                        "output": "T1",
+                    },
+                ],
+                "edges": [],
+            }
+
+            with self.assertRaisesRegex(
+                PandasExecutionError,
+                "exceeding max_intermediate_rows=3",
+            ):
+                execute_table_reasoning_plan(
+                    plan,
+                    external_params={"max_intermediate_rows": 3},
+                )
+
     def test_executes_non_equality_self_join_from_sql(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"
