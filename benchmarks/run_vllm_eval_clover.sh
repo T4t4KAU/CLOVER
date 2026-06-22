@@ -639,6 +639,48 @@ echo "  edge2: local/${EDGE2_SERVED_MODEL_NAME} @ ${EDGE2_BASE_URL}" >&2
 echo "  synthesize: local/${EDGE2_SERVED_MODEL_NAME} @ ${EDGE2_BASE_URL}" >&2
 echo "  local: local/${EDGE1_SERVED_MODEL_NAME} @ ${EDGE1_BASE_URL}" >&2
 
+EVAL_EXIT=0
 PYTHONWARNINGS="ignore" \
 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-"${EVAL_CMD[@]}"
+"${EVAL_CMD[@]}" || EVAL_EXIT=$?
+
+# -----------------------------------------------------------------------------
+# Print brief summary (including combined per-case max context tokens) to stdout
+# -----------------------------------------------------------------------------
+SUMMARY_FILE="${OUTPUT_ROOT}/${RUN_NAME}/run_summary.json"
+if [[ -f "${SUMMARY_FILE}" ]]; then
+  "${PYTHON_BIN}" - "${SUMMARY_FILE}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+brief = summary.get("brief_summary") or {}
+ctx_stats = summary.get("max_context_tokens_stats") or {}
+remote_ctx = ctx_stats.get("remote") or {}
+local_ctx = ctx_stats.get("local") or {}
+combined_ctx = ctx_stats.get("combined") or {}
+
+print("\n===== Brief Summary =====")
+print(f"{'Benchmark':<32}: {brief.get('benchmark') or summary.get('dataset')}")
+print(f"{'Cloud Model':<32}: {brief.get('cloud_model') or (summary.get('remote_llm') or {}).get('model')}")
+print(f"{'Edge Model':<32}: {brief.get('edge_model') or (summary.get('local_slm') or {}).get('model')}")
+print(f"{'Acc. (%)':<32}: {brief.get('acc_pct')}")
+print(f"{'Cloud Tokens':<32}: {brief.get('cloud_tokens')}")
+print(f"{'Edge Tokens':<32}: {brief.get('edge_tokens')}")
+print(f"{'API Cost (USD)':<32}: {brief.get('api_cost_usd')}")
+print(f"{'Cloud Tok/Q':<32}: {brief.get('cloud_tokens_per_q')}")
+print(f"{'Edge Tok/Q':<32}: {brief.get('edge_tokens_per_q')}")
+print(f"{'Calls/Q':<32}: {brief.get('calls_per_q')}")
+print(f"{'API Cost/Q (USD)':<32}: {brief.get('api_cost_per_q_usd')}")
+print(f"{'Avg Max Ctx Tok/Q (combined)':<32}: {round(combined_ctx.get('mean', 0.0), 2)}")
+print(f"{'  remote  max/mean/min':<32}: {remote_ctx.get('max')} / {round(remote_ctx.get('mean', 0.0), 2)} / {remote_ctx.get('min')}")
+print(f"{'  local   max/mean/min':<32}: {local_ctx.get('max')} / {round(local_ctx.get('mean', 0.0), 2)} / {local_ctx.get('min')}")
+print(f"{'  combined max/mean/min':<32}: {combined_ctx.get('max')} / {round(combined_ctx.get('mean', 0.0), 2)} / {combined_ctx.get('min')}")
+print("=========================")
+PY
+else
+  echo "Summary file not found: ${SUMMARY_FILE}" >&2
+fi
+
+exit ${EVAL_EXIT}

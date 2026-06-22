@@ -23,9 +23,11 @@ from benchmarks.utils import (
 )
 from benchmarks.tablebench.eval import (
     _config_summary,
+    _ctx_stats,
     _dsl_builder_record_summary,
     _dsl_builder_total_tokens,
     _merge_system_profiles,
+    _per_case_max_context_tokens,
     _run_system_groups,
     _slm_scheduler_summary,
     _sum_dsl_builder_token_usage,
@@ -599,6 +601,18 @@ def build_summary(
         "failure_cases": display_path(failure_cases),
     }
     summary["brief_summary"] = build_brief_summary(summary)
+    ctx_tokens = _per_case_max_context_tokens(records, output_dir)
+    summary["max_context_tokens_per_case"] = ctx_tokens
+    summary["max_context_tokens_stats"] = {
+        "remote": _ctx_stats(ctx_tokens["remote"]),
+        "local": _ctx_stats(ctx_tokens["local"]),
+        "combined": _ctx_stats(ctx_tokens["combined"]),
+    }
+    summary["avg_max_context_tokens_per_query"] = (
+        sum(ctx_tokens["combined"]) / len(ctx_tokens["combined"])
+        if ctx_tokens["combined"]
+        else 0.0
+    )
     return summary
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import math
 import re
@@ -22,6 +23,7 @@ import time
 import traceback
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -388,7 +390,9 @@ class TableExecutor:
         for index, hist_df in enumerate(self.series_dfs):
             local_vars[f"DF{index}"] = hist_df.copy()
         try:
-            exec(code, {"__builtins__": __builtins__}, local_vars)  # noqa: S102
+            stdout_buffer = io.StringIO()
+            with redirect_stdout(stdout_buffer):
+                exec(code, {"__builtins__": __builtins__}, local_vars)  # noqa: S102
             renewed_df = local_vars.get("DF")
             if renewed_df is None:
                 self.execution_errors.append("Python code did not leave a DF variable")
