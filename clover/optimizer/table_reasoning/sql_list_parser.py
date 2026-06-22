@@ -33,7 +33,10 @@ def parse_sql_list_response(
 
     questions, answers = _question_answer_lists(remote_dsl)
     payload = _extract_json_array(remote_response)
-    if len(payload) == 1 and len(questions) > 1:
+    if len(payload) == 1 and len(questions) > 1 and _allow_single_sql_reuse(
+        questions,
+        answers,
+    ):
         payload = [payload[0] for _ in questions]
     if len(payload) != len(questions):
         raise SqlParseError(
@@ -45,6 +48,7 @@ def parse_sql_list_response(
     for index, item in enumerate(payload):
         item_sql = _sql_from_array_item(item, index)
         item_sql = _retarget_answer_alias(item_sql, answers[index])
+        item_sql = _coalesce_multicolumn_answer(item_sql, answers[index])
         query_dsl = _query_remote_dsl(
             remote_dsl,
             questions[index],
@@ -75,6 +79,71 @@ def _sql_from_array_item(item: Any, index: int) -> str:
     )
 
 
+def _normalize_question_for_reuse(question: str) -> str:
+    return " ".join(question.casefold().split())
+
+
+def _allow_single_sql_reuse(
+    questions: list[str],
+    answers: list[dict[str, Any]],
+) -> bool:
+    """Allow one returned SQL to cover only duplicate or near-duplicate pairs.
+
+    Batch prompting can cause the model to collapse two paraphrases into one SQL.
+    Reusing a single SQL broadly is unsafe, so this fallback is restricted to
+    tiny batches with matching answer signatures and highly overlapping tokens.
+    """
+
+    if len({_normalize_question_for_reuse(question) for question in questions}) == 1:
+        return True
+    if len(questions) > 2:
+        return False
+    answer_types = {
+        str(answer.get("type") or "").casefold().strip()
+        for answer in answers
+    }
+    if len(answer_types) != 1:
+        return False
+    token_sets = [_question_token_set(question) for question in questions]
+    if any(not tokens for tokens in token_sets):
+        return False
+    for left_index, left_tokens in enumerate(token_sets):
+        for right_tokens in token_sets[left_index + 1 :]:
+            union = left_tokens | right_tokens
+            if not union:
+                return False
+            if len(left_tokens & right_tokens) / len(union) < 0.74:
+                return False
+    return True
+
+
+def _question_token_set(question: str) -> set[str]:
+    stopwords = {
+        "a",
+        "an",
+        "are",
+        "be",
+        "by",
+        "from",
+        "in",
+        "is",
+        "list",
+        "of",
+        "the",
+        "to",
+        "was",
+        "were",
+        "what",
+        "who",
+        "which",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", question.casefold())
+        if token not in stopwords
+    }
+
+
 _ANSWER_ALIAS_RE = re.compile(
     r'\bAS\s+(?:"answer(?:_\d+)?"|answer(?:_\d+)?\b)',
     flags=re.IGNORECASE,
@@ -102,6 +171,41 @@ def _retarget_answer_alias(sql: str, answer: dict[str, Any]) -> str:
         [exp.alias_(first_expr.copy(), answer_name, quoted=True)]
         + [item.copy() for item in expression.expressions[1:]],
     )
+    return expression.sql()
+
+
+def _coalesce_multicolumn_answer(sql: str, answer: dict[str, Any]) -> str:
+    answer_name = str(answer.get("name", "")).strip()
+    if not answer_name:
+        return sql
+    answer_type = str(answer.get("type", "")).strip().lower()
+    if answer_type.startswith(("number", "boolean", "bool")):
+        return sql
+    try:
+        expression = sqlglot.parse_one(sql)
+    except Exception:  # noqa: BLE001 - keep original validation error.
+        return sql
+    if not isinstance(expression, exp.Select) or len(expression.expressions) <= 1:
+        return sql
+
+    values: list[exp.Expression] = []
+    for item in expression.expressions:
+        value = item.this if isinstance(item, exp.Alias) else item
+        values.append(value.copy())
+    if len(values) <= 1:
+        return sql
+
+    concat_args: list[exp.Expression] = []
+    for index, value in enumerate(values):
+        if index:
+            concat_args.append(exp.Literal.string(", "))
+        concat_args.append(value)
+    combined = exp.alias_(
+        exp.func("CONCAT", *concat_args),
+        answer_name,
+        quoted=True,
+    )
+    expression.set("expressions", [combined])
     return expression.sql()
 
 
@@ -201,10 +305,23 @@ def _extract_json_array(remote_response: str) -> list[Any]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise SqlParseError(f"Unable to parse SQL JSON array: {exc}") from exc
+        payload = _decode_first_json_array(text)
+        if payload is None:
+            raise SqlParseError(f"Unable to parse SQL JSON array: {exc}") from exc
     if not isinstance(payload, list):
         raise SqlParseError("Remote SQL response must be a JSON array")
     return payload
+
+
+def _decode_first_json_array(text: str) -> list[Any] | None:
+    start = text.find("[")
+    if start < 0:
+        return None
+    try:
+        payload, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, list) else None
 
 
 def _extract_fenced_json(text: str) -> str | None:

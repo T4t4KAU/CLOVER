@@ -17,6 +17,10 @@ Rules: JSON only. Answer if `ev` supports the answer; else ask a small action gr
 Use sql for exact data. Use analyze only when SQL cannot express the statistic.
 `ty` is answer type. If `ty` is number, `a` must be one number. If `ty` is string, `a` must be one concise string.
 Return final answers only: no explanations, full sentences, or extra values.
+For list answers, return a JSON array of atomic answer values. Do not collapse multiple rows into one sentence.
+For multi-column answers, return an array of row arrays, for example `[["name", 3], ["other", 4]]`, not `"name, 3; other, 4"`.
+For date, numeric, and boolean values, preserve the table value exactly unless the question asks for a normalized form.
+If the evidence contains the requested values exactly, copy those values instead of paraphrasing them.
 When `repair` is present, treat it as the complete compact failure report:
 - `fault` names the diagnosed failure class.
 - `sql` is the failed SQL.

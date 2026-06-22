@@ -570,11 +570,16 @@ def _score_mmqa_record(record: dict[str, Any], actual: Any) -> Any:
     raw_score = score_mmqa_answer(
         expected=record.get("expected_raw"),
         actual=actual,
+        expected_answer_type=record.get("answer_type"),
     )
     expected_answer = record.get("expected_answer")
     if expected_answer is None:
         return raw_score
-    answer_score = score_mmqa_answer(expected=expected_answer, actual=actual)
+    answer_score = score_mmqa_answer(
+        expected=expected_answer,
+        actual=actual,
+        expected_answer_type=record.get("answer_type"),
+    )
     if answer_score.correct and not raw_score.correct:
         return answer_score
     return raw_score

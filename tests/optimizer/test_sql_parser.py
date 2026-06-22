@@ -269,12 +269,12 @@ class SqlParserTest(unittest.TestCase):
                 '["SELECT \\"selfMade\\" AS \\"answer_1\\" FROM \\"table_1\\""]',
                 BATCH_REMOTE_DSL,
             )
-        with self.assertRaisesRegex(SqlParseError, 'alias its output as "answer_1"'):
-            parse_sql_list_response(
-                '["SELECT \\"selfMade\\" AS \\"wrong\\" FROM \\"table_1\\";", '
-                '"SELECT \\"country\\" AS \\"answer_2\\" FROM \\"table_1\\";"]',
-                BATCH_REMOTE_DSL,
-            )
+        parsed = parse_sql_list_response(
+            '["SELECT \\"selfMade\\" AS \\"wrong\\" FROM \\"table_1\\";", '
+            '"SELECT \\"country\\" AS \\"answer_2\\" FROM \\"table_1\\";"]',
+            BATCH_REMOTE_DSL,
+        )
+        self.assertIn('AS "answer_1"', parsed.sqls[0])
 
     def test_parses_to_logic_dag(self) -> None:
         logic_dag = parse_remote_sql_to_logic_dag(
@@ -333,7 +333,7 @@ class SqlParserTest(unittest.TestCase):
 
         self.assertEqual(
             [node["op"] for node in aggregate_dag["nodes"]],
-            ["Scan", "Filter", "Distinct", "Aggregate", "Project", "FormatAnswer"],
+            ["Scan", "Filter", "Aggregate", "Project", "FormatAnswer"],
         )
         self.assert_logic_dag_io_contract(aggregate_dag)
         self.assertEqual(
@@ -346,16 +346,12 @@ class SqlParserTest(unittest.TestCase):
             },
         )
         self.assertEqual(
-            aggregate_dag["nodes"][2]["params"]["on"],
-            [{"type": "column", "name": "country"}],
-        )
-        self.assertEqual(
-            aggregate_dag["nodes"][3]["params"]["aggregations"],
+            aggregate_dag["nodes"][2]["params"]["aggregations"],
             [
                 {
                     "function": "COUNT",
                     "argument": {"type": "column", "name": "country"},
-                    "distinct": False,
+                    "distinct": True,
                     "alias": "answer",
                 }
             ],

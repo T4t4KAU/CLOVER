@@ -28,6 +28,50 @@ class MMQAMetricsTest(unittest.TestCase):
 
         self.assertTrue(score.correct)
 
+    def test_list_typed_date_answer_splits_raw_and_conjunction(self) -> None:
+        score = score_mmqa_answer(
+            expected="January 12, 2017 and October 27, 2015",
+            actual=["October 27, 2015", "January 12, 2017"],
+            expected_answer_type="list[string]",
+        )
+
+        self.assertTrue(score.correct)
+
+    def test_string_typed_and_entity_is_not_split_as_list(self) -> None:
+        score = score_mmqa_answer(
+            expected="An Officer and a Gentleman",
+            actual=["An Officer", "a Gentleman"],
+            expected_answer_type="string",
+        )
+
+        self.assertFalse(score.correct)
+
+    def test_multirow_string_prediction_matches_flat_table_values(self) -> None:
+        score = score_mmqa_answer(
+            expected={
+                "columns": ["City", "GDP", "Year"],
+                "index": [0, 1],
+                "data": [
+                    ["Shanghai", 1919.57, 2008],
+                    ["Nanjing ( Jiangsu )", 614.55, 2009],
+                ],
+            },
+            actual=[
+                "Nanjing ( Jiangsu ), 614.55, 2009",
+                "Shanghai, 1919.57, 2008",
+            ],
+        )
+
+        self.assertTrue(score.correct)
+
+    def test_common_mojibake_matches_unicode_answer(self) -> None:
+        score = score_mmqa_answer(
+            expected="São Paulo",
+            actual="SÃ£o Paulo",
+        )
+
+        self.assertTrue(score.correct)
+
     def test_eval_scoring_uses_converted_answer_as_fallback(self) -> None:
         record = {
             "expected_raw": "Treasury, 115897",

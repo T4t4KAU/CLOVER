@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import numpy as np
 
 from clover.optimizer import parse_remote_sql_to_logic_dag
 from clover.tools import PandasExecutionError, execute_table_reasoning_plan
@@ -111,6 +112,209 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
             )
 
         self.assertEqual(outputs["answer"], 2)
+
+    def test_grouped_count_distinct_counts_within_each_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "authorship.csv"
+            table_path.write_text(
+                "authID,paperID,authOrder\n"
+                "50,200,1\n"
+                "51,200,2\n"
+                "51,201,1\n"
+                "52,201,2\n",
+                encoding="utf-8",
+            )
+            plan = parse_remote_sql_to_logic_dag(
+                'SELECT "authID" AS answer FROM "table_1" '
+                'GROUP BY "authID" HAVING COUNT(DISTINCT "paperID") = 2;',
+                _remote_dsl("list[number]", ["authID", "paperID", "authOrder"]),
+            )
+
+            outputs = execute_table_reasoning_plan(
+                plan,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], [51])
+
+    def test_self_join_preserves_qualified_join_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            authors_path = Path(tmpdir) / "authors.csv"
+            authorship_path = Path(tmpdir) / "authorship.csv"
+            authors_path.write_text(
+                "authID,lname,fname\n"
+                "50,Gibbons,Jeremy\n"
+                "51,Hinze,Ralf\n"
+                "52,James,Daniel W. H.\n",
+                encoding="utf-8",
+            )
+            authorship_path.write_text(
+                "authID,paperID,authOrder\n"
+                "50,200,1\n"
+                "51,200,2\n"
+                "51,201,1\n"
+                "52,201,2\n",
+                encoding="utf-8",
+            )
+            remote_dsl = {
+                "task_type": "table_reasoning.query",
+                "question": "",
+                "sources": [
+                    {
+                        "id": "Authors",
+                        "type": "table",
+                        "format": "csv",
+                        "schema": {"columns": ["authID", "lname", "fname"]},
+                    },
+                    {
+                        "id": "Authorship",
+                        "type": "table",
+                        "format": "csv",
+                        "schema": {"columns": ["authID", "paperID", "authOrder"]},
+                    },
+                ],
+                "answer": {"name": "answer", "type": "list[string]"},
+            }
+            plan = parse_remote_sql_to_logic_dag(
+                'SELECT DISTINCT "coauthors"."fname" || \' \' || "coauthors"."lname" AS answer '
+                'FROM "Authors" AS "ralf" '
+                'JOIN "Authorship" AS "ralf_auth" ON "ralf"."authID" = "ralf_auth"."authID" '
+                'JOIN "Authorship" AS "co_auth" ON "ralf_auth"."paperID" = "co_auth"."paperID" '
+                'JOIN "Authors" AS "coauthors" ON "co_auth"."authID" = "coauthors"."authID" '
+                'WHERE "ralf"."lname" = \'Hinze\' AND "ralf"."fname" = \'Ralf\' '
+                'AND "coauthors"."authID" <> "ralf"."authID";',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                plan,
+                resources={
+                    "Authors": {**_resource(authors_path), "id": "Authors"},
+                    "Authorship": {
+                        **_resource(authorship_path),
+                        "id": "Authorship",
+                    },
+                },
+            )
+
+        self.assertEqual(outputs["answer"], ["Jeremy Gibbons", "Daniel W. H. James"])
+
+    def test_compares_unit_formatted_strings_with_numpy_numeric_scalar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "aircraft.csv"
+            table_path.write_text(
+                "name,weight\n"
+                "small,\"1,370 lb\"\n"
+                "large,\"123,500 lb\"\n",
+                encoding="utf-8",
+            )
+            plan = {
+                "task_type": "table_reasoning.query",
+                "resources": [_resource(table_path)],
+                "nodes": [
+                    _scan_node("N0", "T0"),
+                    {
+                        "id": "N1",
+                        "op": "Filter",
+                        "dependency": ["T0"],
+                        "input": [],
+                        "params": {
+                            "predicate": {
+                                "type": "binary_op",
+                                "op": "=",
+                                "left": {"type": "column", "name": "weight"},
+                                "right": {
+                                    "type": "literal",
+                                    "value": np.int64(123500),
+                                },
+                            }
+                        },
+                        "output": "T1",
+                    },
+                    {
+                        "id": "N2",
+                        "op": "Project",
+                        "dependency": ["T1"],
+                        "input": [],
+                        "params": {"expressions": [{"expr": {"type": "column", "name": "name"}}]},
+                        "output": "T2",
+                    },
+                    _format_node("N3", "T2", "string"),
+                ],
+                "edges": [],
+            }
+
+            outputs = execute_table_reasoning_plan(plan)
+
+        self.assertEqual(outputs["answer"], "large")
+
+    def test_compares_unit_formatted_strings_with_numeric_string_scalar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "aircraft.csv"
+            table_path.write_text(
+                "name,weight\n"
+                "small,\"1,370 lb\"\n"
+                "large,\"123,500 lb\"\n",
+                encoding="utf-8",
+            )
+            plan = {
+                "task_type": "table_reasoning.query",
+                "resources": [_resource(table_path)],
+                "nodes": [
+                    _scan_node("N0", "T0"),
+                    {
+                        "id": "N1",
+                        "op": "Filter",
+                        "dependency": ["T0"],
+                        "input": [],
+                        "params": {
+                            "predicate": {
+                                "type": "binary_op",
+                                "op": "=",
+                                "left": {"type": "column", "name": "weight"},
+                                "right": {"type": "literal", "value": "123500"},
+                            }
+                        },
+                        "output": "T1",
+                    },
+                    {
+                        "id": "N2",
+                        "op": "Project",
+                        "dependency": ["T1"],
+                        "input": [],
+                        "params": {"expressions": [{"expr": {"type": "column", "name": "name"}}]},
+                        "output": "T2",
+                    },
+                    _format_node("N3", "T2", "string"),
+                ],
+                "edges": [],
+            }
+
+            outputs = execute_table_reasoning_plan(plan)
+
+        self.assertEqual(outputs["answer"], "large")
+
+    def test_str_position_treats_series_first_argument_as_haystack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "aircraft.csv"
+            table_path.write_text(
+                "name,weight\n"
+                "small,\"1,370 lb\"\n"
+                "large,\"123,500 lb\"\n",
+                encoding="utf-8",
+            )
+            plan = parse_remote_sql_to_logic_dag(
+                'SELECT "name" AS answer FROM "table_1" '
+                'WHERE CAST(SUBSTRING("weight", 1, STR_POSITION("weight", \' \') - 1) AS INT) = 123500;',
+                _remote_dsl("string", ["name", "weight"]),
+            )
+
+            outputs = execute_table_reasoning_plan(
+                plan,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], "large")
 
     def test_executes_analyze_evidence_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

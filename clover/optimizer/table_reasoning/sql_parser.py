@@ -1731,7 +1731,7 @@ def _aggregation_ast(call: exp.Expression, alias: str) -> dict[str, Any]:
     payload = {
         "function": _aggregate_name(call),
         "argument": _expr_ast(argument),
-        "distinct": False if distinct else distinct,
+        "distinct": distinct,
         "alias": alias,
     }
     if parameters:
@@ -2088,11 +2088,6 @@ def _distinct_targets(
     targets: list[exp.Expression] = []
     if select.args.get("distinct") is not None:
         targets.extend(item["expr"] for item in [_select_item(expr) for expr in select.expressions])
-
-    for call in aggregate_calls:
-        distinct, argument = _aggregate_argument(call)
-        if distinct:
-            targets.append(argument)
     return targets
 
 

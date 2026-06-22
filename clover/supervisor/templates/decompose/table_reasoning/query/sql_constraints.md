@@ -8,6 +8,7 @@ SQL rules:
 - Double-quote tables, columns, and answer aliases.
 - Each SELECT item must have a unique alias. If the requested answer is one string/list item but uses multiple fields (for example first and last name), concatenate them into one expression aliased as the answer name instead of returning separate answer columns.
 - Avoid scalar subqueries in the SELECT list; write a flat SELECT with explicit FROM/JOIN clauses, or use derived tables in FROM when a subquery is necessary.
+- Avoid `INTERSECT` and `EXCEPT`; express set intersections with joins, `EXISTS`, or `GROUP BY ... HAVING COUNT(DISTINCT ...)`.
 - Each `sql` is one read-only SELECT.
 - No markdown, comments, or extra text.
 - If answer type is `string`, `number`, `boolean`, or `entity`, return a single row (`LIMIT 1` or aggregate).

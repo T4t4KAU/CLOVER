@@ -125,6 +125,7 @@ def score_mmqa_answer(
     *,
     expected: Any,
     actual: Any,
+    expected_answer_type: str | None = None,
 ) -> MMQAScore:
     """Score an MMQA prediction with denotation exact match.
 
@@ -133,7 +134,10 @@ def score_mmqa_answer(
     """
 
     expected_items = flatten_mmqa_answer(expected)
-    target_candidates = _value_candidates_from_items(expected_items)
+    target_candidates = _value_candidates_from_items(
+        expected_items,
+        expected_answer_type=expected_answer_type,
+    )
     expected_count = len(target_candidates[0]) if target_candidates else 0
     predicted_candidates = _prediction_value_candidates(
         actual,
@@ -165,6 +169,9 @@ def _prediction_value_candidates(
         text = base_items[0]
         for split_items in _split_prediction_text(text):
             item_candidates.extend(_item_set_variants(split_items))
+    if len(base_items) > 1 and expected_count > len(base_items):
+        for split_items in _split_prediction_rows(base_items, expected_count):
+            item_candidates.extend(_item_set_variants(split_items))
     candidates = [_dedupe_values([to_value(item) for item in items]) for items in item_candidates if items]
     if not candidates:
         candidates = [[]]
@@ -178,10 +185,21 @@ def _prediction_value_candidates(
     return unique
 
 
-def _value_candidates_from_items(items: list[str]) -> list[list[Value]]:
+def _value_candidates_from_items(
+    items: list[str],
+    *,
+    expected_answer_type: str | None = None,
+) -> list[list[Value]]:
+    item_variants = _item_set_variants(items)
+    if len(items) == 1:
+        for split_items in _split_expected_text(
+            items[0],
+            expected_answer_type=expected_answer_type,
+        ):
+            item_variants.extend(_item_set_variants(split_items))
     candidates = [
         _dedupe_values([to_value(item) for item in variant])
-        for variant in _item_set_variants(items)
+        for variant in item_variants
     ]
     return candidates or [[]]
 
@@ -207,7 +225,22 @@ def _item_variants(item: str) -> list[str]:
     name_variant = _comma_name_variant(item)
     if name_variant and name_variant not in variants:
         variants.append(name_variant)
+    mojibake_variant = _mojibake_variant(item)
+    if mojibake_variant and mojibake_variant not in variants:
+        variants.append(mojibake_variant)
     return variants
+
+
+def _mojibake_variant(text: str) -> str | None:
+    """Repair common UTF-8 decoded as Latin-1 artifacts, e.g. SÃ£o -> São."""
+
+    if not any(marker in text for marker in ("Ã", "Â", "â")):
+        return None
+    try:
+        repaired = text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return None
+    return repaired if repaired != text else None
 
 
 def _comma_name_variant(text: str) -> str | None:
@@ -244,6 +277,68 @@ def _split_prediction_text(text: str) -> list[list[str]]:
             ]
         )
     return candidates
+
+
+def _split_prediction_rows(items: list[str], expected_count: int) -> list[list[str]]:
+    candidates: list[list[str]] = []
+    row_splits: list[list[str]] = []
+    for item in items:
+        split = _split_row_text(item)
+        if len(split) <= 1:
+            return candidates
+        row_splits.append(split)
+    flattened = [cell for row in row_splits for cell in row]
+    if len(flattened) == expected_count:
+        candidates.append(flattened)
+    return candidates
+
+
+def _split_row_text(text: str) -> list[str]:
+    for separator in ("|", "\t"):
+        if separator in text:
+            return [part.strip() for part in text.split(separator) if part.strip()]
+    if ", " in text:
+        return [part.strip() for part in text.split(",") if part.strip()]
+    return [text.strip()] if text.strip() else []
+
+
+def _split_expected_text(
+    text: str,
+    *,
+    expected_answer_type: str | None,
+) -> list[list[str]]:
+    if not str(expected_answer_type or "").startswith("list"):
+        return []
+    if ";" in text:
+        return []
+    parts = [
+        part.strip()
+        for part in re.split(r"\s+and\s+", text, flags=re.IGNORECASE)
+        if part.strip()
+    ]
+    if len(parts) <= 1:
+        return []
+    if all(_looks_like_date_text(part) for part in parts):
+        return [parts]
+    return []
+
+
+def _looks_like_date_text(text: str) -> bool:
+    value = text.strip()
+    if not value:
+        return False
+    month_pattern = (
+        r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|sept|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?"
+    )
+    if re.search(month_pattern, value, flags=re.IGNORECASE) and re.search(r"\d", value):
+        return True
+    if re.fullmatch(r"\d{4}(?:[-/]\d{1,2}(?:[-/]\d{1,2})?)?", value):
+        return True
+    if re.fullmatch(r"\d{1,2}[-/]\d{1,2}(?:[-/]\d{2,4})?", value):
+        return True
+    return False
 
 
 def _dedupe_values(values: list[Value]) -> list[Value]:

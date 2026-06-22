@@ -6,11 +6,12 @@ import ast
 import copy
 import itertools
 import math
+import numbers
 import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import pandas as pd
 
@@ -450,9 +451,19 @@ class PandasTableReasoningExecutor:
                 continue
 
             suffixes = ("", f"__{right_alias}" if right_alias else "__right")
-            left_keys, right_keys, residual_predicate = _join_keys(join.get("on"), right_alias)
+            left_keys, right_keys, residual_predicate = _join_keys(
+                join.get("on"),
+                right_alias,
+                left_columns=left.columns,
+            )
             if left_keys:
                 left, right = _coerce_join_key_dtypes(left, right, left_keys, right_keys)
+                right = _preserve_aliased_join_keys(
+                    right,
+                    left_keys=left_keys,
+                    right_keys=right_keys,
+                    right_alias=right_alias,
+                )
                 # Pandas merge handles equality keys. Any remaining non-equality
                 # conjunct is evaluated as a residual filter after the merge.
                 left = left.merge(
@@ -787,11 +798,16 @@ class _ExpressionEvaluator:
         if function in {"LENGTH", "LEN"}:
             return _series_for_frame(args[0], self.frame).astype("string").str.len()
         if function in {"STR_POSITION", "STRPOS", "INSTR", "LOCATE", "POSITION"}:
-            # SQL STR_POSITION(needle, haystack) returns 1-based index of the first
-            # occurrence of needle in haystack, or 0 if not found. Either argument
-            # may be a column (Series) or a literal; broadcast as needed.
-            needle = args[0]
-            haystack = args[1] if len(args) > 1 else args[0]
+            # SQL dialects disagree on whether string-position functions use
+            # (needle, haystack) or (haystack, needle). In table questions, the
+            # common generated form is STR_POSITION(column, literal), so treat a
+            # Series first argument as the haystack.
+            if len(args) > 1 and isinstance(args[0], pd.Series):
+                haystack = args[0]
+                needle = args[1]
+            else:
+                needle = args[0]
+                haystack = args[1] if len(args) > 1 else args[0]
             haystack_series = _series_for_frame(haystack, self.frame).astype("string")
             needle_scalar = _to_python_scalar(needle)
             found = haystack_series.str.find(str(needle_scalar))
@@ -822,10 +838,14 @@ class _ExpressionEvaluator:
             return result
         if function in {"SUBSTRING", "SUBSTR"}:
             series = _series_for_frame(args[0], self.frame).astype("string")
-            sql_start = int(_to_python_scalar(args[1])) if len(args) > 1 else 1
+            start_arg = args[1] if len(args) > 1 else 1
+            length_arg = args[2] if len(args) > 2 else None
+            if isinstance(start_arg, pd.Series) or isinstance(length_arg, pd.Series):
+                return _substring_series(series, start_arg, length_arg, self.frame)
+            sql_start = int(_to_python_scalar(start_arg))
             start = sql_start - 1 if sql_start > 0 else sql_start
-            if len(args) > 2 and args[2] is not None:
-                length = int(_to_python_scalar(args[2]))
+            if length_arg is not None:
+                length = int(_to_python_scalar(length_arg))
                 return series.str.slice(start, start + length)
             return series.str.slice(start)
         if function == "LEFT":
@@ -1515,7 +1535,16 @@ def _unwrap_singleton_collection(value: Any) -> Any:
 
 
 def _is_number_like(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(value, numbers.Number) and not isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        return bool(
+            re.fullmatch(
+                r"\s*[$€£]?[+-]?(?:\d[\d,]*(?:\.\d*)?|\.\d+)%?\s*",
+                value,
+            )
+        )
+    return False
 
 
 def _coerce_scalar_for_series(series: pd.Series, value: Any) -> Any:
@@ -1634,6 +1663,38 @@ def _cast_value(value: Any, target_type: str) -> Any:
     if "date" in target or "time" in target:
         return pd.to_datetime(value, errors="coerce")
     return value
+
+
+def _substring_series(
+    series: pd.Series,
+    start_arg: Any,
+    length_arg: Any,
+    frame: pd.DataFrame,
+) -> pd.Series:
+    starts = _series_for_frame(start_arg, frame).map(_to_number).fillna(1)
+    if length_arg is None:
+        lengths = pd.Series([None] * len(series), index=series.index)
+    else:
+        lengths = _series_for_frame(length_arg, frame).map(_to_number)
+
+    values = []
+    for value, sql_start, length in zip(
+        series.tolist(),
+        starts.tolist(),
+        lengths.tolist(),
+        strict=False,
+    ):
+        if pd.isna(value):
+            values.append(pd.NA)
+            continue
+        start = int(sql_start)
+        python_start = start - 1 if start > 0 else start
+        text = str(value)
+        if length is None or pd.isna(length):
+            values.append(text[python_start:])
+        else:
+            values.append(text[python_start : python_start + int(length)])
+    return pd.Series(values, index=series.index, dtype="string")
 
 
 def _coalesce(values: list[Any], frame: pd.DataFrame) -> pd.Series:
@@ -2317,6 +2378,8 @@ def _parse_list_value(value: Any) -> list[Any]:
 def _join_keys(
     on_expr: dict[str, Any] | None,
     right_alias: str | None,
+    *,
+    left_columns: Iterable[Any] = (),
 ) -> tuple[list[str], list[str], dict[str, Any] | None]:
     if not on_expr:
         return [], [], None
@@ -2330,7 +2393,11 @@ def _join_keys(
     residual_predicates = []
     for predicate in predicates:
         if predicate.get("type") == "binary_op" and predicate.get("op") == "=":
-            left_key, right_key = _single_join_key(predicate, right_alias)
+            left_key, right_key = _single_join_key(
+                predicate,
+                right_alias,
+                left_columns=left_columns,
+            )
             left_keys.append(left_key)
             right_keys.append(right_key)
         else:
@@ -2343,12 +2410,51 @@ def _join_keys(
     return left_keys, right_keys, residual
 
 
-def _single_join_key(on_expr: dict[str, Any], right_alias: str | None) -> tuple[str, str]:
+def _single_join_key(
+    on_expr: dict[str, Any],
+    right_alias: str | None,
+    *,
+    left_columns: Iterable[Any] = (),
+) -> tuple[str, str]:
     left_expr = on_expr["left"]
     right_expr = on_expr["right"]
     if right_alias and left_expr.get("table") == right_alias:
         left_expr, right_expr = right_expr, left_expr
-    return left_expr["name"], right_expr["name"]
+    return _join_left_key(left_expr, left_columns), right_expr["name"]
+
+
+def _join_left_key(expr: dict[str, Any], left_columns: Iterable[Any]) -> str:
+    name = str(expr["name"])
+    table = expr.get("table")
+    if table:
+        qualified = f"{name}__{table}"
+        if qualified in set(left_columns):
+            return qualified
+    return name
+
+
+def _preserve_aliased_join_keys(
+    right: pd.DataFrame,
+    *,
+    left_keys: list[str],
+    right_keys: list[str],
+    right_alias: str | None,
+) -> pd.DataFrame:
+    if not right_alias:
+        return right
+    additions: dict[str, pd.Series] = {}
+    for left_key, key in zip(left_keys, right_keys, strict=False):
+        if left_key != key:
+            continue
+        alias_key = f"{key}__{right_alias}"
+        if key in right.columns and alias_key not in right.columns:
+            additions[alias_key] = right[key]
+    if not additions:
+        return right
+    preserved = right.copy()
+    for alias_key, values in additions.items():
+        preserved[alias_key] = values
+    return preserved
 
 
 def _coerce_join_key_dtypes(
