@@ -1862,6 +1862,8 @@ class BaselineProgress:
         self.total = total
         self.width = width
         self._last_length = 0
+        if total > 0:
+            self.update([])
 
     def update(self, records: list[dict[str, Any]]) -> None:
         if self.total <= 0:
