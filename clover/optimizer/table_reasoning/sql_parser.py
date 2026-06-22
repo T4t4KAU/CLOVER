@@ -63,7 +63,7 @@ class ParsedSql:
 def parse_sql_response(remote_response: str, remote_dsl: dict[str, Any]) -> ParsedSql:
     """Extract and validate one read-only SQL statement from Remote LLM text."""
 
-    sql = extract_sql_statement(remote_response)
+    sql = _normalize_remote_sql_dialect(extract_sql_statement(remote_response))
     expression = _parse_sql_ast(sql)
     _validate_read_only_select(sql, expression)
 
@@ -77,6 +77,65 @@ def parse_sql_response(remote_response: str, remote_dsl: dict[str, Any]) -> Pars
         raise SqlParseError(f"SQL references unknown table sources: {unknown_sources}")
 
     return ParsedSql(sql=sql, source_ids=tuple(source_ids))
+
+
+def _normalize_remote_sql_dialect(sql: str) -> str:
+    """Normalize common model SQL dialect drift before parsing.
+
+    The supervisor prompt asks for double-quoted identifiers, but smaller local
+    models often emit MySQL-style backtick identifiers (for example
+    `` `director (s)` ``).  sqlglot's DuckDB parser does not accept those when
+    the identifier contains spaces or parentheses, even though the intent is
+    unambiguous.  Convert only real backtick-quoted identifiers while preserving
+    quoted string literals and already double-quoted identifiers.
+    """
+
+    if "`" not in sql:
+        return sql
+
+    normalized: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(sql):
+        char = sql[index]
+        next_char = sql[index + 1] if index + 1 < len(sql) else ""
+
+        if quote is None and char == "`":
+            index += 1
+            identifier: list[str] = []
+            while index < len(sql):
+                current = sql[index]
+                following = sql[index + 1] if index + 1 < len(sql) else ""
+                if current == "`":
+                    if following == "`":
+                        identifier.append("`")
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                identifier.append(current)
+                index += 1
+            else:
+                normalized.append("`")
+                normalized.extend(identifier)
+                continue
+
+            escaped_identifier = "".join(identifier).replace('"', '""')
+            normalized.append(f'"{escaped_identifier}"')
+            continue
+
+        normalized.append(char)
+        if quote is None and char in {"'", '"'}:
+            quote = char
+        elif quote == char:
+            if next_char == char:
+                normalized.append(next_char)
+                index += 1
+            else:
+                quote = None
+        index += 1
+
+    return "".join(normalized)
 
 
 def parse_predicate_fragment(sql_fragment: str) -> dict[str, Any]:

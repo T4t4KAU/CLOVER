@@ -460,6 +460,29 @@ class SqlParserTest(unittest.TestCase):
         with self.assertRaisesRegex(SqlParseError, "unknown table sources"):
             parse_sql_response('SELECT * FROM "private_table";', REMOTE_DSL)
 
+    def test_normalizes_backtick_quoted_identifiers(self) -> None:
+        remote_dsl = {
+            **REMOTE_DSL,
+            "sources": [
+                {
+                    **REMOTE_DSL["sources"][0],
+                    "schema": {
+                        **REMOTE_DSL["sources"][0]["schema"],
+                        "columns": ["season", "director (s)"],
+                    },
+                }
+            ],
+        }
+        parsed = parse_sql_response(
+            "SELECT COUNT(*) FROM table_1 "
+            "WHERE season = 13 AND `director (s)` = 'william malone'",
+            remote_dsl,
+        )
+
+        self.assertIn('"director (s)"', parsed.sql)
+        logic_dag = parse_remote_sql_to_logic_dag(parsed.sql, remote_dsl)
+        self.assert_logic_dag_io_contract(logic_dag)
+
     def test_parses_exists_subquery(self) -> None:
         logic_dag = parse_remote_sql_to_logic_dag(
             'SELECT EXISTS(SELECT 1 FROM "table_1" WHERE "selfMade" = \'True\') '

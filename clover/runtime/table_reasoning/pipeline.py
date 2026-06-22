@@ -89,6 +89,7 @@ VALIDATION_NONE = "none"
 VALIDATION_REMOTE_SUPERVISOR = "remote_supervisor"
 VALIDATION_MODES = frozenset({VALIDATION_NONE, VALIDATION_REMOTE_SUPERVISOR})
 _STATIC_ACTION_NO_ANSWER = object()
+_INLINE_ACTION_NO_ANSWER = object()
 _STATIC_ACTION_NUMBER_TYPES = frozenset({"number", "float", "integer", "int"})
 _STATIC_ACTION_BOOLEAN_TYPES = frozenset({"boolean", "bool"})
 _STATIC_ACTION_TEXT_TYPES = frozenset({"string", "entity", "category"})
@@ -559,6 +560,9 @@ def _planned_command_from_payload(
         if "a" not in payload:
             raise SqlParseError("Local table answer command requires a")
         return _PlannedSqlCommand(op="answer", sqls=(), answer=payload.get("a"))
+    inline_answer, payload = _split_inline_answer_action(payload)
+    if inline_answer is not _INLINE_ACTION_NO_ANSWER:
+        return _PlannedSqlCommand(op="answer", sqls=(), answer=inline_answer)
     actions = _normalize_table_actions(payload)
     if actions:
         sqls = tuple(action.q for action in actions if action.op == "sql" and action.q)
@@ -701,6 +705,13 @@ def _parse_single_table_command(
             sqls=(),
             answer=payload.get("a"),
         )
+    inline_answer, payload = _split_inline_answer_action(payload)
+    if inline_answer is not _INLINE_ACTION_NO_ANSWER:
+        return _PlannedSqlCommand(
+            op="answer",
+            sqls=(),
+            answer=inline_answer,
+        )
     analyze = _is_analyze_remote_dsl(job.remote_dsl)
     actions = _normalize_table_actions(payload)
     if actions:
@@ -812,6 +823,32 @@ def _normalize_table_actions(payload: dict[str, Any]) -> tuple[SupervisorAction,
     if any(key in payload for key in ("q", "sql", "sqls")):
         return tuple(_normalize_one_table_action({"op": "sql", **payload}, label="action"))
     return ()
+
+
+def _split_inline_answer_action(payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    action_key = "acts" if "acts" in payload else "actions" if "actions" in payload else None
+    if action_key is None:
+        return _INLINE_ACTION_NO_ANSWER, payload
+    action_list = payload.get(action_key)
+    if not isinstance(action_list, list) or not action_list:
+        return _INLINE_ACTION_NO_ANSWER, payload
+
+    remaining: list[Any] = []
+    answers: list[Any] = []
+    for item in action_list:
+        if isinstance(item, dict) and _payload_action_op(item) == "answer":
+            if "a" not in item:
+                raise SqlParseError(f"{action_key} answer action requires a")
+            answers.append(item.get("a"))
+            continue
+        remaining.append(item)
+    if not answers:
+        return _INLINE_ACTION_NO_ANSWER, payload
+    if not remaining:
+        return answers[-1], payload
+    cleaned = dict(payload)
+    cleaned[action_key] = remaining
+    return _INLINE_ACTION_NO_ANSWER, cleaned
 
 
 def _normalize_one_table_action(
@@ -4523,7 +4560,7 @@ def _finalize_success(
 def _normalize_answer_for_task(task: TaskItem, answer: Any) -> Any:
     answer_type = str(task.answer_type or "").strip().lower()
     if answer_type in {"number", "float", "integer", "int"}:
-        normalized = _normalize_number_answer(answer)
+        normalized = _normalize_number_answer(answer, question=task.question)
         if (
             isinstance(normalized, (int, float))
             and not isinstance(normalized, bool)
@@ -4545,20 +4582,37 @@ def _normalize_answer_for_task(task: TaskItem, answer: Any) -> Any:
     return answer
 
 
-def _normalize_number_answer(answer: Any) -> Any:
+def _normalize_number_answer(answer: Any, *, question: str | None = None) -> Any:
     if isinstance(answer, (int, float)) and not isinstance(answer, bool):
         return answer
     if isinstance(answer, list) and len(answer) == 1:
-        return _normalize_number_answer(answer[0])
+        return _normalize_number_answer(answer[0], question=question)
     if isinstance(answer, dict) and len(answer) == 1:
-        return _normalize_number_answer(next(iter(answer.values())))
+        return _normalize_number_answer(next(iter(answer.values())), question=question)
     if isinstance(answer, str):
         stripped = answer.strip().replace(",", "")
         try:
             return float(stripped)
         except ValueError:
+            contextual = _contextual_number_answer(stripped, question=question)
+            if contextual is not None:
+                return contextual
             return answer
     return answer
+
+
+def _contextual_number_answer(text: str, *, question: str | None) -> int | None:
+    question_text = str(question or "")
+    if not re.search(
+        r"\b(when|date|first|released|introduced|started|began)\b",
+        question_text,
+        flags=re.IGNORECASE,
+    ):
+        return None
+    match = re.search(r"\b(\d{3,4})\s*(?:[-–—]|to)\s*\d{2,4}\b", text)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def _normalize_boolean_answer(answer: Any) -> Any:

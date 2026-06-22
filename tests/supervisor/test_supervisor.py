@@ -281,7 +281,8 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(answer_decision.answer, 2)
         self.assertFalse(answer_decision.retry)
         document = parse_supervisor_decision(
-            '{"answer": "2.8%", "sufficient": true, "explanation": "Calculated from worker evidence."}'
+            '{"answer": "2.8%", "sufficient": true, '
+            '"explanation": "Calculated from worker evidence."}'
         )
         self.assertEqual(document.answer, "2.8%")
         self.assertTrue(document.sufficient)
@@ -289,7 +290,8 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(document.explanation, "Calculated from worker evidence.")
         document_retry = parse_supervisor_decision(
             '{"answer": null, "sufficient": false, "feedback": "look again", '
-            '"next_python_code": "def prepare_jobs(context):\\n    return []\\n\\ndef transform_outputs(jobs):\\n    return \\"\\""}'
+            '"next_python_code": "def prepare_jobs(context):\\n    return []\\n\\n'
+            'def transform_outputs(jobs):\\n    return \\"\\""}'
         )
         self.assertFalse(document_retry.sufficient)
         self.assertEqual(
@@ -545,7 +547,14 @@ def _logic_dag() -> dict:
     return {
         "task_type": "table_reasoning.query",
         "nodes": [
-            {"id": "N0", "op": "Scan", "dependency": [], "input": ["table_1"], "params": {"source": "table_1"}, "output": "T0"}
+            {
+                "id": "N0",
+                "op": "Scan",
+                "dependency": [],
+                "input": ["table_1"],
+                "params": {"source": "table_1"},
+                "output": "T0",
+            }
         ],
         "edges": [],
     }

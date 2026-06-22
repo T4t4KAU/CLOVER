@@ -68,7 +68,8 @@ EDGE2_MAX_TOKENS="${CLOVER_EDGE2_MAX_TOKENS:-4096}"
 EDGE2_TIMEOUT="${CLOVER_EDGE2_TIMEOUT:-600}"
 EDGE2_DTYPE="${CLOVER_EDGE2_DTYPE:-auto}"
 EDGE2_TENSOR_PARALLEL_SIZE="${CLOVER_EDGE2_TENSOR_PARALLEL_SIZE:-}"  # defaults to GPU count
-# EDGE2 repair sampling params (higher temperature => more diverse repair SQL).
+# EDGE2 repair sampling params. Dataset-specific defaults below may override
+# these values when the matching CLOVER_* variable is not set by the user.
 EDGE2_TEMPERATURE="${CLOVER_EDGE2_TEMPERATURE:-0.3}"
 EDGE2_TOP_P="${CLOVER_EDGE2_TOP_P:-0.9}"
 
@@ -210,6 +211,30 @@ case "${DATASET}" in
   tablebench|wikitq|tablefact) ;;
   *) echo "Unsupported dataset: ${DATASET}" >&2; exit 2 ;;
 esac
+
+# Empirical local 7B+3B defaults from the 2026-06-22 server sweep:
+# - TableFact is harmed badly by local repair/retry and benefits from
+#   deterministic EDGE2 generation.
+# - TableBench/WikiTQ recover a few points from modest EDGE2 sampling and one
+#   repair round, though they remain below the older DeepSeek-backed runs.
+if [[ -z "${CLOVER_EDGE2_TEMPERATURE+x}" ]]; then
+  case "${DATASET}" in
+    tablefact) EDGE2_TEMPERATURE="0.0" ;;
+    tablebench|wikitq) EDGE2_TEMPERATURE="0.3" ;;
+  esac
+fi
+if [[ -z "${CLOVER_EDGE2_TOP_P+x}" ]]; then
+  case "${DATASET}" in
+    tablefact) EDGE2_TOP_P="1.0" ;;
+    tablebench|wikitq) EDGE2_TOP_P="0.9" ;;
+  esac
+fi
+if [[ -z "${CLOVER_EDGE2_MAX_RETRIES+x}" ]]; then
+  case "${DATASET}" in
+    tablefact) EDGE2_MAX_RETRIES="0" ;;
+    tablebench|wikitq) EDGE2_MAX_RETRIES="1" ;;
+  esac
+fi
 
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   echo "No executable 'python' found. Activate the intended environment first." >&2

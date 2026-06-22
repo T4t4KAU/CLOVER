@@ -395,6 +395,9 @@ def _table_evidence_payload(
             "ty": _answer_type(source),
             "ev": _table_evidence_observations(observation),
         }
+    actions = _current_actions_list(current_command)
+    if actions:
+        payload["cmd"] = actions
     repair = _table_repair_packet(
         source=source,
         observation=observation,
