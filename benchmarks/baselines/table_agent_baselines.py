@@ -1201,17 +1201,21 @@ def load_wikitq_metrics() -> Any:
     )
 
 
+_MODULE_LOAD_LOCK = threading.Lock()
+
+
 def load_module_from_repo_path(module_name: str, path: Path) -> Any:
-    existing = sys.modules.get(module_name)
-    if existing is not None:
-        return existing
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load module {module_name} from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+    with _MODULE_LOAD_LOCK:
+        existing = sys.modules.get(module_name)
+        if existing is not None:
+            return existing
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot load module {module_name} from {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
 
 
 def score_prediction(dataset: str, case: dict[str, Any], prediction: Any) -> Any:
@@ -1389,6 +1393,10 @@ def build_summary(
         "avg_model_calls_per_query": summary["model_calls_per_query"],
         "avg_max_context_tokens_per_query": summary["avg_max_context_tokens_per_query"],
         "avg_generated_tokens_per_query": summary["avg_generated_tokens_per_query"],
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "avg_total_tokens_per_query": summary["avg_total_tokens_per_query"],
         "avg_time_seconds_per_query": summary["average_case_seconds"],
     }
     if baseline == "orchestra":
@@ -1922,6 +1930,13 @@ def print_summary(summary: dict[str, Any]) -> None:
         (
             "Avg Generated Tok / Query",
             format_optional_float(metric.get("avg_generated_tokens_per_query"), precision=2),
+        ),
+        ("Input Tokens", metric.get("input_tokens")),
+        ("Output Tokens", metric.get("output_tokens")),
+        ("Total Tokens", metric.get("total_tokens")),
+        (
+            "Avg Total Tok / Query",
+            format_optional_float(metric.get("avg_total_tokens_per_query"), precision=2),
         ),
         (
             "Avg Time / Query (s)",
