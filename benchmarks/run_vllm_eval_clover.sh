@@ -2,27 +2,22 @@
 set -euo pipefail
 
 # =============================================================================
-# Dual local vLLM launcher for CLOVER.
+# Single local vLLM launcher for CLOVER.
 #
-# Starts two independent vLLM OpenAI-compatible servers (on different ports,
-# optionally on different GPUs) and runs the selected eval. No model_config
-# JSON files are required — both the EDGE1 (local slm) and EDGE2
-# (remote + synthesize) configs are generated on the fly from the settings
-# below.
+# Starts one vLLM OpenAI-compatible server and runs the selected eval.
+# No model_config JSON files are required — both the EDGE1 (local slm) and
+# EDGE2 (remote + synthesize) configs are generated on the fly from the same
+# model settings below.
 #
 #   EDGE1  -> local slm  (edge agent, table reasoning)
-#   EDGE2  -> remote + synthesize (cloud agent, repair)
+#   EDGE2  -> same model as EDGE1 (cloud agent, repair)
 #
-# Demo: run the main experiment with two edge models / two vLLM services:
+# Demo: run the main experiment with a single vLLM service:
 #   PYTHON_BIN=/Users/huangwenxuan/Documents/codes/CLOVER/.venv/bin/python \
-#   CLOVER_EDGE1_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-3B-Instruct \
-#   CLOVER_EDGE2_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-7B-Instruct \
-#   CLOVER_EDGE1_GPUS=0 \
-#   CLOVER_EDGE2_GPUS=1 \
-#   CLOVER_EDGE1_PORT=8000 \
-#   CLOVER_EDGE2_PORT=8001 \
-#   CLOVER_EDGE1_MAX_MODEL_LEN=4096 \
-#   CLOVER_EDGE2_MAX_MODEL_LEN=8192 \
+#   CLOVER_EDGE_MODEL_PATH=/path/to/Qwen2.5-7B-Instruct \
+#   CLOVER_EDGE_GPUS=0 \
+#   CLOVER_EDGE_PORT=8000 \
+#   CLOVER_EDGE_MAX_MODEL_LEN=8192 \
 #   CLOVER_EVAL_CONCURRENCY=16 \
 #   CLOVER_EDGE2_CONCURRENCY=8 \
 #   /Users/huangwenxuan/Documents/codes/CLOVER/benchmarks/run_vllm_eval_clover.sh tablebench --max-cases 100
@@ -45,31 +40,22 @@ set -euo pipefail
 DATASET="${CLOVER_EVAL_DATASET:-tablebench}"  # tablebench | wikitq | tablefact
 
 # --- Edge model (local slm / edge agent) -----------------------------------
-EDGE1_MODEL_PATH="${CLOVER_EDGE1_MODEL_PATH:-/path/to/Qwen2.5-3B-Instruct}"
-EDGE1_GPUS="${CLOVER_EDGE1_GPUS:-0}"                # comma-separated GPU ids, e.g. 0 or 0,1
-EDGE1_GPU_MEM_UTIL="${CLOVER_EDGE1_GPU_MEM_UTIL:-0.30}"  # fraction of GPU memory
-EDGE1_PORT="${CLOVER_EDGE1_PORT:-8000}"
-EDGE1_MAX_MODEL_LEN="${CLOVER_EDGE1_MAX_MODEL_LEN:-4096}"
-EDGE1_MAX_TOKENS="${CLOVER_EDGE1_MAX_TOKENS:-512}"
-EDGE1_TIMEOUT="${CLOVER_EDGE1_TIMEOUT:-600}"
-EDGE1_DTYPE="${CLOVER_EDGE1_DTYPE:-auto}"
-EDGE1_TENSOR_PARALLEL_SIZE="${CLOVER_EDGE1_TENSOR_PARALLEL_SIZE:-}"  # defaults to GPU count
+EDGE_MODEL_PATH="${CLOVER_EDGE_MODEL_PATH:-/path/to/Qwen2.5-7B-Instruct}"
+EDGE_GPUS="${CLOVER_EDGE_GPUS:-0}"                # comma-separated GPU ids, e.g. 0 or 0,1
+EDGE_GPU_MEM_UTIL="${CLOVER_EDGE_GPU_MEM_UTIL:-0.90}"  # fraction of GPU memory
+EDGE_PORT="${CLOVER_EDGE_PORT:-8000}"
+EDGE_MAX_MODEL_LEN="${CLOVER_EDGE_MAX_MODEL_LEN:-8192}"
+EDGE_MAX_TOKENS="${CLOVER_EDGE_MAX_TOKENS:-4096}"
+EDGE_TIMEOUT="${CLOVER_EDGE_TIMEOUT:-600}"
+EDGE_DTYPE="${CLOVER_EDGE_DTYPE:-auto}"
+EDGE_TENSOR_PARALLEL_SIZE="${CLOVER_EDGE_TENSOR_PARALLEL_SIZE:-}"  # defaults to GPU count
 # Edge sampling params (0 = deterministic; >0 adds diversity for edge repair).
 EDGE1_TEMPERATURE="${CLOVER_EDGE1_TEMPERATURE:-0.0}"
 EDGE1_TOP_P="${CLOVER_EDGE1_TOP_P:-1.0}"
 
 # --- EDGE2 (remote + synthesize / cloud agent) -----------------------------
-EDGE2_MODEL_PATH="${CLOVER_EDGE2_MODEL_PATH:-/path/to/Qwen2.5-7B-Instruct}"
-EDGE2_GPUS="${CLOVER_EDGE2_GPUS:-0}"                # comma-separated GPU ids
-EDGE2_GPU_MEM_UTIL="${CLOVER_EDGE2_GPU_MEM_UTIL:-0.67}"  # fraction of GPU memory
-EDGE2_PORT="${CLOVER_EDGE2_PORT:-8001}"
-EDGE2_MAX_MODEL_LEN="${CLOVER_EDGE2_MAX_MODEL_LEN:-8192}"
-EDGE2_MAX_TOKENS="${CLOVER_EDGE2_MAX_TOKENS:-4096}"
-EDGE2_TIMEOUT="${CLOVER_EDGE2_TIMEOUT:-600}"
-EDGE2_DTYPE="${CLOVER_EDGE2_DTYPE:-auto}"
-EDGE2_TENSOR_PARALLEL_SIZE="${CLOVER_EDGE2_TENSOR_PARALLEL_SIZE:-}"  # defaults to GPU count
-# EDGE2 repair sampling params. Dataset-specific defaults below may override
-# these values when the matching CLOVER_* variable is not set by the user.
+# EDGE2 uses the same model as EDGE1 (single vLLM server).
+# Only sampling params are configurable separately for EDGE2.
 EDGE2_TEMPERATURE="${CLOVER_EDGE2_TEMPERATURE:-0.3}"
 EDGE2_TOP_P="${CLOVER_EDGE2_TOP_P:-0.9}"
 
@@ -125,7 +111,7 @@ usage() {
 Usage:
   bash benchmarks/run_vllm_eval_clover.sh [DATASET] [eval options...]
 
-Starts two local vLLM servers (EDGE1 + EDGE2) and runs the selected eval.
+Starts one local vLLM server and runs the selected eval.
 All model/server/concurrency settings are configured at the top of this script
 or via CLOVER_* environment variables.
 
@@ -138,10 +124,10 @@ Examples:
   bash benchmarks/run_vllm_eval_clover.sh tablebench
 
 Environment variables (key ones):
-  CLOVER_EDGE1_MODEL_PATH / CLOVER_EDGE2_MODEL_PATH   Model paths
-  CLOVER_EDGE1_GPUS / CLOVER_EDGE2_GPUS               GPU ids per model
-  CLOVER_EDGE1_GPU_MEM_UTIL / CLOVER_EDGE2_GPU_MEM_UTIL  GPU memory fraction
-  CLOVER_EDGE1_PORT / CLOVER_EDGE2_PORT               vLLM ports
+  CLOVER_EDGE_MODEL_PATH          Model path
+  CLOVER_EDGE_GPUS               GPU ids
+  CLOVER_EDGE_GPU_MEM_UTIL       GPU memory fraction
+  CLOVER_EDGE_PORT               vLLM port
   CLOVER_EVAL_CONCURRENCY / CLOVER_EDGE2_CONCURRENCY Eval parallelism
   CLOVER_AGENT_LOOP_MAX_ITERATIONS / CLOVER_EDGE2_MAX_RETRIES  Retry budgets
 EOF
@@ -241,25 +227,19 @@ if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
-for label in EDGE1 EDGE2; do
-  model_var="${label}_MODEL_PATH"
-  model_path="${!model_var}"
-  if [[ "${model_path}" == /path/to/* ]]; then
-    echo "Set ${label}_MODEL_PATH at the top of this script." >&2
-    exit 1
-  fi
-  if [[ "${model_path}" == /* && ! -e "${model_path}" ]]; then
-    echo "${label} model path not found: ${model_path}" >&2
-    exit 1
-  fi
-done
+model_path="${EDGE_MODEL_PATH}"
+if [[ "${model_path}" == /path/to/* ]]; then
+  echo "Set EDGE_MODEL_PATH at the top of this script." >&2
+  exit 1
+fi
+if [[ "${model_path}" == /* && ! -e "${model_path}" ]]; then
+  echo "Edge model path not found: ${model_path}" >&2
+  exit 1
+fi
 
-EDGE1_GPUS="$(validate_gpus EDGE1_GPUS "${EDGE1_GPUS}")"
-EDGE2_GPUS="$(validate_gpus EDGE2_GPUS "${EDGE2_GPUS}")"
-EDGE1_GPU_COUNT="$(count_gpus "${EDGE1_GPUS}")"
-EDGE2_GPU_COUNT="$(count_gpus "${EDGE2_GPUS}")"
-EDGE1_TENSOR_PARALLEL_SIZE="$(resolve_tp EDGE1 "${EDGE1_TENSOR_PARALLEL_SIZE}" "${EDGE1_GPU_COUNT}")"
-EDGE2_TENSOR_PARALLEL_SIZE="$(resolve_tp EDGE2 "${EDGE2_TENSOR_PARALLEL_SIZE}" "${EDGE2_GPU_COUNT}")"
+EDGE_GPUS="$(validate_gpus EDGE_GPUS "${EDGE_GPUS}")"
+EDGE_GPU_COUNT="$(count_gpus "${EDGE_GPUS}")"
+EDGE_TENSOR_PARALLEL_SIZE="$(resolve_tp EDGE "${EDGE_TENSOR_PARALLEL_SIZE}" "${EDGE_GPU_COUNT}")"
 
 PERSIST_SERVER="$(normalize_bool "${PERSIST_SERVER}")"
 WARMUP_SERVER="$(normalize_bool "${WARMUP_SERVER}")"
@@ -328,27 +308,19 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/benchmark/runs}"
 RUN_NAME="${RUN_NAME:-${DATASET}_vllm_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "${OUTPUT_ROOT}"
 TMP_DIR="$(mktemp -d)"
-EDGE1_SERVER_LOG="${OUTPUT_ROOT}/${RUN_NAME}_edge1_vllm.log"
-EDGE2_SERVER_LOG="${OUTPUT_ROOT}/${RUN_NAME}_edge2_vllm.log"
-EDGE1_BASE_URL="http://${HOST}:${EDGE1_PORT}/v1"
-EDGE2_BASE_URL="http://${HOST}:${EDGE2_PORT}/v1"
-EDGE1_SERVED_MODEL_NAME="$(basename "${EDGE1_MODEL_PATH}")"
-EDGE2_SERVED_MODEL_NAME="$(basename "${EDGE2_MODEL_PATH}")"
+EDGE_SERVER_LOG="${OUTPUT_ROOT}/${RUN_NAME}_edge_vllm.log"
+EDGE_BASE_URL="http://${HOST}:${EDGE_PORT}/v1"
+EDGE_SERVED_MODEL_NAME="$(basename "${EDGE_MODEL_PATH}")"
 
-EDGE1_PID=""
-EDGE2_PID=""
-STARTED_EDGE1=0
-STARTED_EDGE2=0
+EDGE_PID=""
+STARTED_EDGE=0
 
 cleanup() {
   if [[ "${PERSIST_SERVER}" != "true" ]]; then
-    for pid_var in EDGE1_PID EDGE2_PID; do
-      pid="${!pid_var}"
-      if [[ -n "${pid}" ]]; then
-        kill "${pid}" >/dev/null 2>&1 || true
-        wait "${pid}" >/dev/null 2>&1 || true
-      fi
-    done
+    if [[ -n "${EDGE_PID}" ]]; then
+      kill "${EDGE_PID}" >/dev/null 2>&1 || true
+      wait "${EDGE_PID}" >/dev/null 2>&1 || true
+    fi
   fi
   rm -rf "${TMP_DIR}"
 }
@@ -450,8 +422,8 @@ PY
 # -----------------------------------------------------------------------------
 write_local_config() {
   local out="$1"
-  "${PYTHON_BIN}" - "${out}" "${EDGE1_SERVED_MODEL_NAME}" "${EDGE1_BASE_URL}" \
-    "${EDGE1_MAX_TOKENS}" "${EDGE1_TIMEOUT}" "${EDGE1_TEMPERATURE}" "${EDGE1_TOP_P}" \
+  "${PYTHON_BIN}" - "${out}" "${EDGE_SERVED_MODEL_NAME}" "${EDGE_BASE_URL}" \
+    "${EDGE_MAX_TOKENS}" "${EDGE_TIMEOUT}" "${EDGE1_TEMPERATURE}" "${EDGE1_TOP_P}" \
     "${AGENT_LOOP_MAX_ITERATIONS}" \
     "${EDGE_REVIEW_MODE}" "${EDGE_REVIEW_PROACTIVE}" "${ABLATION_VARIANT}" \
     "${ENABLE_EDGE_AGENT}" "${ENABLE_EDGE_REPAIR}" "${ENABLE_TERMINAL_EDGE_REVIEW}" \
@@ -505,8 +477,8 @@ PY
 
 write_edge2_config() {
   local out="$1"
-  "${PYTHON_BIN}" - "${out}" "${EDGE2_SERVED_MODEL_NAME}" "${EDGE2_BASE_URL}" \
-    "${EDGE2_MAX_TOKENS}" "${EDGE2_TIMEOUT}" "${EDGE2_TEMPERATURE}" "${EDGE2_TOP_P}" <<'PY'
+  "${PYTHON_BIN}" - "${out}" "${EDGE_SERVED_MODEL_NAME}" "${EDGE_BASE_URL}" \
+    "${EDGE_MAX_TOKENS}" "${EDGE_TIMEOUT}" "${EDGE2_TEMPERATURE}" "${EDGE2_TOP_P}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -534,25 +506,22 @@ PY
 # Print configuration
 # -----------------------------------------------------------------------------
 echo "=========================================" >&2
-echo " Dual Local vLLM Configuration" >&2
+echo " Single Local vLLM Configuration" >&2
 echo "=========================================" >&2
 echo " Dataset:              ${DATASET}" >&2
 echo "" >&2
-echo " Edge model (local):   ${EDGE1_MODEL_PATH}" >&2
-echo "   GPUs:               ${EDGE1_GPUS} (tp=${EDGE1_TENSOR_PARALLEL_SIZE})" >&2
-echo "   GPU mem util:       ${EDGE1_GPU_MEM_UTIL}" >&2
-echo "   Endpoint:           ${EDGE1_BASE_URL}" >&2
-echo "   Max model len:      ${EDGE1_MAX_MODEL_LEN}" >&2
-echo "   Max tokens:         ${EDGE1_MAX_TOKENS}" >&2
+echo " Edge model:           ${EDGE_MODEL_PATH}" >&2
+echo "   GPUs:               ${EDGE_GPUS} (tp=${EDGE_TENSOR_PARALLEL_SIZE})" >&2
+echo "   GPU mem util:       ${EDGE_GPU_MEM_UTIL}" >&2
+echo "   Endpoint:           ${EDGE_BASE_URL}" >&2
+echo "   Max model len:      ${EDGE_MAX_MODEL_LEN}" >&2
+echo "   Max tokens:         ${EDGE_MAX_TOKENS}" >&2
+echo "" >&2
+echo " EDGE1 sampling:" >&2
 echo "   Temperature:        ${EDGE1_TEMPERATURE}" >&2
 echo "   Top-p:              ${EDGE1_TOP_P}" >&2
 echo "" >&2
-echo " EDGE2 model:          ${EDGE2_MODEL_PATH}" >&2
-echo "   GPUs:               ${EDGE2_GPUS} (tp=${EDGE2_TENSOR_PARALLEL_SIZE})" >&2
-echo "   GPU mem util:       ${EDGE2_GPU_MEM_UTIL}" >&2
-echo "   Endpoint:           ${EDGE2_BASE_URL}" >&2
-echo "   Max model len:      ${EDGE2_MAX_MODEL_LEN}" >&2
-echo "   Max tokens:         ${EDGE2_MAX_TOKENS}" >&2
+echo " EDGE2 sampling:" >&2
 echo "   Temperature:        ${EDGE2_TEMPERATURE}" >&2
 echo "   Top-p:              ${EDGE2_TOP_P}" >&2
 echo "" >&2
@@ -562,26 +531,19 @@ echo " EDGE2 max retries:    ${EDGE2_MAX_RETRIES}" >&2
 echo "=========================================" >&2
 
 # -----------------------------------------------------------------------------
-# Start both vLLM servers
+# Start vLLM server
 # -----------------------------------------------------------------------------
-EDGE1_PID="$(start_vllm \
-  "edge" "${EDGE1_MODEL_PATH}" "${EDGE1_GPUS}" "${EDGE1_TENSOR_PARALLEL_SIZE}" \
-  "${EDGE1_PORT}" "${EDGE1_GPU_MEM_UTIL}" "${EDGE1_MAX_MODEL_LEN}" \
-  "${EDGE1_DTYPE}" "${EDGE1_SERVED_MODEL_NAME}" "${EDGE1_SERVER_LOG}")"
-STARTED_EDGE1=1
-warmup_server "${EDGE1_BASE_URL}" "${EDGE1_SERVED_MODEL_NAME}" "edge"
-
-EDGE2_PID="$(start_vllm \
-  "edge2" "${EDGE2_MODEL_PATH}" "${EDGE2_GPUS}" "${EDGE2_TENSOR_PARALLEL_SIZE}" \
-  "${EDGE2_PORT}" "${EDGE2_GPU_MEM_UTIL}" "${EDGE2_MAX_MODEL_LEN}" \
-  "${EDGE2_DTYPE}" "${EDGE2_SERVED_MODEL_NAME}" "${EDGE2_SERVER_LOG}")"
-STARTED_EDGE2=1
-warmup_server "${EDGE2_BASE_URL}" "${EDGE2_SERVED_MODEL_NAME}" "edge2"
+EDGE_PID="$(start_vllm \
+  "edge" "${EDGE_MODEL_PATH}" "${EDGE_GPUS}" "${EDGE_TENSOR_PARALLEL_SIZE}" \
+  "${EDGE_PORT}" "${EDGE_GPU_MEM_UTIL}" "${EDGE_MAX_MODEL_LEN}" \
+  "${EDGE_DTYPE}" "${EDGE_SERVED_MODEL_NAME}" "${EDGE_SERVER_LOG}")"
+STARTED_EDGE=1
+warmup_server "${EDGE_BASE_URL}" "${EDGE_SERVED_MODEL_NAME}" "edge"
 
 # -----------------------------------------------------------------------------
 # Generate configs
 # -----------------------------------------------------------------------------
-LOCAL_CONFIG="${TMP_DIR}/edge1_local_slm_config.json"
+LOCAL_CONFIG="${TMP_DIR}/edge_local_slm_config.json"
 EDGE2_CONFIG="${TMP_DIR}/edge2_llm_config.json"
 write_local_config "${LOCAL_CONFIG}"
 write_edge2_config "${EDGE2_CONFIG}"
@@ -635,9 +597,9 @@ esac
 
 echo "Running ${DATASET} evaluation" >&2
 echo "  output: ${OUTPUT_ROOT}/${RUN_NAME}" >&2
-echo "  edge2: local/${EDGE2_SERVED_MODEL_NAME} @ ${EDGE2_BASE_URL}" >&2
-echo "  synthesize: local/${EDGE2_SERVED_MODEL_NAME} @ ${EDGE2_BASE_URL}" >&2
-echo "  local: local/${EDGE1_SERVED_MODEL_NAME} @ ${EDGE1_BASE_URL}" >&2
+echo "  edge2: local/${EDGE_SERVED_MODEL_NAME} @ ${EDGE_BASE_URL}" >&2
+echo "  synthesize: local/${EDGE_SERVED_MODEL_NAME} @ ${EDGE_BASE_URL}" >&2
+echo "  local: local/${EDGE_SERVED_MODEL_NAME} @ ${EDGE_BASE_URL}" >&2
 
 EVAL_EXIT=0
 PYTHONWARNINGS="ignore" \
