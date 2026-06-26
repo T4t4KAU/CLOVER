@@ -2,22 +2,27 @@
 set -euo pipefail
 
 # =============================================================================
-# Single local vLLM launcher for CLOVER.
+# Dual local vLLM launcher for CLOVER.
 #
-# Starts one vLLM OpenAI-compatible server and runs the selected eval.
-# No model_config JSON files are required — both the EDGE1 (local slm) and
-# EDGE2 (remote + synthesize) configs are generated on the fly from the same
-# model settings below.
+# Starts EDGE1 and EDGE2 OpenAI-compatible vLLM servers and runs the selected
+# eval. No model_config JSON files are required — both configs are generated on
+# the fly from the model settings below. If EDGE1 and EDGE2 point to the same
+# model and no explicit EDGE2 port is set, the script reuses one server to avoid
+# wasting GPU memory.
 #
 #   EDGE1  -> local slm  (edge agent, table reasoning)
-#   EDGE2  -> same model as EDGE1 (cloud agent, repair)
+#   EDGE2  -> local OpenAI-compatible supervisor/synthesis/repair model
 #
-# Demo: run the main experiment with a single vLLM service:
-#   PYTHON_BIN=/Users/huangwenxuan/Documents/codes/CLOVER/.venv/bin/python \
-#   CLOVER_EDGE_MODEL_PATH=/path/to/Qwen2.5-7B-Instruct \
-#   CLOVER_EDGE_GPUS=0 \
-#   CLOVER_EDGE_PORT=8000 \
-#   CLOVER_EDGE_MAX_MODEL_LEN=8192 \
+# Demo: run the main experiment with two vLLM services:
+#   PYTHON_BIN=/root/miniconda3/envs/clover/bin/python \
+#   CLOVER_EDGE1_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-14B-Instruct \
+#   CLOVER_EDGE2_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-Coder-14B-Instruct \
+#   CLOVER_EDGE1_GPUS=0 \
+#   CLOVER_EDGE2_GPUS=0 \
+#   CLOVER_EDGE1_PORT=8000 \
+#   CLOVER_EDGE2_PORT=8001 \
+#   CLOVER_EDGE1_MAX_MODEL_LEN=8192 \
+#   CLOVER_EDGE2_MAX_MODEL_LEN=8192 \
 #   CLOVER_EVAL_CONCURRENCY=16 \
 #   CLOVER_EDGE2_CONCURRENCY=8 \
 #   /Users/huangwenxuan/Documents/codes/CLOVER/benchmarks/run_vllm_eval_clover.sh tablebench --max-cases 100
@@ -39,30 +44,38 @@ set -euo pipefail
 # --- Dataset ---
 DATASET="${CLOVER_EVAL_DATASET:-tablebench}"  # tablebench | wikitq | tablefact
 
-# --- Edge model (local slm / edge agent) -----------------------------------
-EDGE_MODEL_PATH="${CLOVER_EDGE_MODEL_PATH:-/path/to/Qwen2.5-7B-Instruct}"
-EDGE_GPUS="${CLOVER_EDGE_GPUS:-0}"                # comma-separated GPU ids, e.g. 0 or 0,1
-EDGE_GPU_MEM_UTIL="${CLOVER_EDGE_GPU_MEM_UTIL:-0.90}"  # fraction of GPU memory
-EDGE_PORT="${CLOVER_EDGE_PORT:-8000}"
-EDGE_MAX_MODEL_LEN="${CLOVER_EDGE_MAX_MODEL_LEN:-8192}"
-EDGE_MAX_TOKENS="${CLOVER_EDGE_MAX_TOKENS:-4096}"
-EDGE_TIMEOUT="${CLOVER_EDGE_TIMEOUT:-600}"
-EDGE_DTYPE="${CLOVER_EDGE_DTYPE:-auto}"
-EDGE_TENSOR_PARALLEL_SIZE="${CLOVER_EDGE_TENSOR_PARALLEL_SIZE:-}"  # defaults to GPU count
-# Edge sampling params (0 = deterministic; >0 adds diversity for edge repair).
+# --- EDGE1 model (local slm / edge agent) ----------------------------------
+EDGE1_MODEL_PATH="${CLOVER_EDGE1_MODEL_PATH:-${CLOVER_EDGE_MODEL_PATH:-/root/autodl-tmp/models/Qwen2.5-14B-Instruct}}"
+EDGE1_GPUS="${CLOVER_EDGE1_GPUS:-${CLOVER_EDGE_GPUS:-0}}"  # comma-separated GPU ids, e.g. 0 or 0,1
+EDGE1_GPU_MEM_UTIL="${CLOVER_EDGE1_GPU_MEM_UTIL:-${CLOVER_EDGE_GPU_MEM_UTIL:-}}"
+EDGE1_PORT="${CLOVER_EDGE1_PORT:-${CLOVER_EDGE_PORT:-8000}}"
+EDGE1_MAX_MODEL_LEN="${CLOVER_EDGE1_MAX_MODEL_LEN:-${CLOVER_EDGE_MAX_MODEL_LEN:-8192}}"
+EDGE1_MAX_TOKENS="${CLOVER_EDGE1_MAX_TOKENS:-${CLOVER_EDGE_MAX_TOKENS:-3072}}"
+EDGE1_TIMEOUT="${CLOVER_EDGE1_TIMEOUT:-${CLOVER_EDGE_TIMEOUT:-600}}"
+EDGE1_DTYPE="${CLOVER_EDGE1_DTYPE:-${CLOVER_EDGE_DTYPE:-auto}}"
+EDGE1_TENSOR_PARALLEL_SIZE="${CLOVER_EDGE1_TENSOR_PARALLEL_SIZE:-${CLOVER_EDGE_TENSOR_PARALLEL_SIZE:-}}"  # defaults to GPU count
 EDGE1_TEMPERATURE="${CLOVER_EDGE1_TEMPERATURE:-0.3}"
 EDGE1_TOP_P="${CLOVER_EDGE1_TOP_P:-1.0}"
 
-# --- EDGE2 (remote + synthesize / cloud agent) -----------------------------
-# EDGE2 uses the same model as EDGE1 (single vLLM server).
-# Only sampling params are configurable separately for EDGE2.
+# --- EDGE2 model (supervisor + synthesize / repair agent) -------------------
+EDGE2_MODEL_PATH="${CLOVER_EDGE2_MODEL_PATH:-${CLOVER_EDGE_MODEL_PATH:-${EDGE1_MODEL_PATH}}}"
+EDGE2_GPUS="${CLOVER_EDGE2_GPUS:-${CLOVER_EDGE_GPUS:-0}}"
+EDGE2_GPU_MEM_UTIL="${CLOVER_EDGE2_GPU_MEM_UTIL:-${CLOVER_EDGE_GPU_MEM_UTIL:-}}"
+EDGE2_PORT="${CLOVER_EDGE2_PORT:-8001}"
+EDGE2_MAX_MODEL_LEN="${CLOVER_EDGE2_MAX_MODEL_LEN:-${CLOVER_EDGE_MAX_MODEL_LEN:-8192}}"
+EDGE2_MAX_TOKENS="${CLOVER_EDGE2_MAX_TOKENS:-${CLOVER_EDGE_MAX_TOKENS:-3072}}"
+EDGE2_TIMEOUT="${CLOVER_EDGE2_TIMEOUT:-${CLOVER_EDGE_TIMEOUT:-600}}"
+EDGE2_DTYPE="${CLOVER_EDGE2_DTYPE:-${CLOVER_EDGE_DTYPE:-auto}}"
+EDGE2_TENSOR_PARALLEL_SIZE="${CLOVER_EDGE2_TENSOR_PARALLEL_SIZE:-${CLOVER_EDGE_TENSOR_PARALLEL_SIZE:-}}"  # defaults to GPU count
 EDGE2_TEMPERATURE="${CLOVER_EDGE2_TEMPERATURE:-0.3}"
 EDGE2_TOP_P="${CLOVER_EDGE2_TOP_P:-0.9}"
+FORCE_SEPARATE_EDGE_SERVERS="${CLOVER_FORCE_SEPARATE_EDGE_SERVERS:-false}"
 
 # --- Common vLLM server ---
 HOST="${CLOVER_VLLM_HOST:-127.0.0.1}"
 ENABLE_PREFIX_CACHING="${CLOVER_VLLM_ENABLE_PREFIX_CACHING:-true}"
 VLLM_SERVER_ARGS="${CLOVER_VLLM_SERVER_ARGS:-}"   # extra args, e.g. "--enforce-eager"
+VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-${CLOVER_VLLM_USE_FLASHINFER_SAMPLER:-0}}"
 SERVER_READY_TIMEOUT="${CLOVER_VLLM_READY_TIMEOUT:-600}"
 PERSIST_SERVER="${CLOVER_VLLM_PERSIST_SERVER:-false}"
 WARMUP_SERVER="${CLOVER_VLLM_WARMUP:-true}"
@@ -78,8 +91,27 @@ MAX_PENDING_SLM_SEQUENCES="${CLOVER_MAX_PENDING_SLM_SEQUENCES:-64}"
 SLM_SCHEDULER="${CLOVER_SLM_SCHEDULER:-tptt}"                  # tptt | fifo
 
 # --- Agent retry budgets ---
-AGENT_LOOP_MAX_ITERATIONS="${CLOVER_AGENT_LOOP_MAX_ITERATIONS:-3}"  # edge agent max iterations
-EDGE2_MAX_RETRIES="${CLOVER_EDGE2_MAX_RETRIES:-2}"                 # EDGE2 agent max retries (--max-retries)
+AGENT_LOOP_MAX_ITERATIONS="${CLOVER_AGENT_LOOP_MAX_ITERATIONS:-4}"  # edge agent max iterations
+EDGE2_MAX_RETRIES="${CLOVER_EDGE2_MAX_RETRIES:-3}"                 # EDGE2 agent max retries (--max-retries)
+
+# --- TableFact direct verifier ---
+# Only consumed by the TableFact evaluator. It keeps the full binary fact
+# check in one deterministic vLLM call to preserve same-row evidence.
+TABLEFACT_DIRECT_VERIFIER="${CLOVER_TABLEFACT_DIRECT_VERIFIER:-true}"
+TABLEFACT_DIRECT_MAX_TOKENS="${CLOVER_TABLEFACT_DIRECT_MAX_TOKENS:-1024}"
+TABLEFACT_DIRECT_TABLE_CHAR_LIMIT="${CLOVER_TABLEFACT_DIRECT_TABLE_CHAR_LIMIT:-24000}"
+TABLEFACT_DIRECT_TEMPERATURE="${CLOVER_TABLEFACT_DIRECT_TEMPERATURE:-0.0}"
+TABLEFACT_DIRECT_TOP_P="${CLOVER_TABLEFACT_DIRECT_TOP_P:-1.0}"
+TABLEFACT_SECOND_PASS_VERIFIER="${CLOVER_TABLEFACT_SECOND_PASS_VERIFIER:-true}"
+TABLEFACT_SECOND_PASS_MAX_TOKENS="${CLOVER_TABLEFACT_SECOND_PASS_MAX_TOKENS:-1024}"
+
+# --- WikiTQ direct QA + adjudicator ---
+WIKITQ_DIRECT_ADJUDICATION="${CLOVER_WIKITQ_DIRECT_ADJUDICATION:-true}"
+WIKITQ_DIRECT_QA_MAX_TOKENS="${CLOVER_WIKITQ_DIRECT_QA_MAX_TOKENS:-192}"
+WIKITQ_ADJUDICATOR_MAX_TOKENS="${CLOVER_WIKITQ_ADJUDICATOR_MAX_TOKENS:-1024}"
+WIKITQ_DIRECT_TABLE_CHAR_LIMIT="${CLOVER_WIKITQ_DIRECT_TABLE_CHAR_LIMIT:-20000}"
+WIKITQ_DIRECT_TEMPERATURE="${CLOVER_WIKITQ_DIRECT_TEMPERATURE:-0.0}"
+WIKITQ_DIRECT_TOP_P="${CLOVER_WIKITQ_DIRECT_TOP_P:-1.0}"
 
 # --- Edge review / ablation ---
 EDGE_REVIEW_MODE="${CLOVER_EDGE_REVIEW_MODE:-safe}"               # off | shadow | safe
@@ -95,6 +127,7 @@ ENABLE_CLOUD_REPLAN="${CLOVER_ENABLE_CLOUD_REPLAN:-${ENABLE_CLOUD_RECOVERY}}"
 ENABLE_CLOUD_SYNTHESIS="${CLOVER_ENABLE_CLOUD_SYNTHESIS:-${ENABLE_CLOUD_RECOVERY}}"
 ENABLE_STATIC_FAST_PATH="${CLOVER_ENABLE_STATIC_FAST_PATH:-true}"
 ENABLE_STATIC_FINALIZATION="${CLOVER_ENABLE_STATIC_FINALIZATION:-true}"
+ENABLE_OBSERVABLE_CLOSURE_CHECKER="${CLOVER_ENABLE_OBSERVABLE_CLOSURE_CHECKER:-true}"
 
 # =============================================================================
 # Internals (no user-serviceable parts below)
@@ -111,7 +144,7 @@ usage() {
 Usage:
   bash benchmarks/run_vllm_eval_clover.sh [DATASET] [eval options...]
 
-Starts one local vLLM server and runs the selected eval.
+Starts EDGE1/EDGE2 local vLLM servers and runs the selected eval.
 All model/server/concurrency settings are configured at the top of this script
 or via CLOVER_* environment variables.
 
@@ -124,12 +157,15 @@ Examples:
   bash benchmarks/run_vllm_eval_clover.sh tablebench
 
 Environment variables (key ones):
-  CLOVER_EDGE_MODEL_PATH          Model path
-  CLOVER_EDGE_GPUS               GPU ids
-  CLOVER_EDGE_GPU_MEM_UTIL       GPU memory fraction
-  CLOVER_EDGE_PORT               vLLM port
+  CLOVER_EDGE1_MODEL_PATH / CLOVER_EDGE2_MODEL_PATH    Model paths
+  CLOVER_EDGE1_GPUS / CLOVER_EDGE2_GPUS                 GPU ids
+  CLOVER_EDGE1_PORT / CLOVER_EDGE2_PORT                 vLLM ports
+  CLOVER_EDGE1_MAX_MODEL_LEN / CLOVER_EDGE2_MAX_MODEL_LEN Context length
+  CLOVER_EDGE1_TEMPERATURE / CLOVER_EDGE2_TEMPERATURE   Sampling temperature
   CLOVER_EVAL_CONCURRENCY / CLOVER_EDGE2_CONCURRENCY Eval parallelism
   CLOVER_AGENT_LOOP_MAX_ITERATIONS / CLOVER_EDGE2_MAX_RETRIES  Retry budgets
+  CLOVER_TABLEFACT_DIRECT_VERIFIER                    Use compact TableFact verifier
+  CLOVER_TABLEFACT_SECOND_PASS_VERIFIER               Recover high-confidence false negatives
 EOF
 }
 
@@ -203,16 +239,29 @@ esac
 #   deterministic EDGE2 generation.
 # - TableBench/WikiTQ recover a few points from modest EDGE2 sampling and one
 #   repair round, though they remain below the older DeepSeek-backed runs.
+if [[ -z "${CLOVER_EDGE1_TEMPERATURE+x}" ]]; then
+  case "${DATASET}" in
+    tablefact|wikitq) EDGE1_TEMPERATURE="0.0" ;;
+    tablebench) EDGE1_TEMPERATURE="0.3" ;;
+  esac
+fi
+if [[ -z "${CLOVER_EDGE1_TOP_P+x}" ]]; then
+  case "${DATASET}" in
+    tablefact|wikitq) EDGE1_TOP_P="1.0" ;;
+    tablebench) EDGE1_TOP_P="1.0" ;;
+  esac
+fi
 if [[ -z "${CLOVER_EDGE2_TEMPERATURE+x}" ]]; then
   case "${DATASET}" in
     tablefact) EDGE2_TEMPERATURE="0.0" ;;
-    tablebench|wikitq) EDGE2_TEMPERATURE="0.3" ;;
+    wikitq) EDGE2_TEMPERATURE="0.0" ;;
+    tablebench) EDGE2_TEMPERATURE="0.3" ;;
   esac
 fi
 if [[ -z "${CLOVER_EDGE2_TOP_P+x}" ]]; then
   case "${DATASET}" in
-    tablefact) EDGE2_TOP_P="1.0" ;;
-    tablebench|wikitq) EDGE2_TOP_P="0.9" ;;
+    tablefact|wikitq) EDGE2_TOP_P="1.0" ;;
+    tablebench) EDGE2_TOP_P="0.9" ;;
   esac
 fi
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
@@ -220,23 +269,28 @@ if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
-model_path="${EDGE_MODEL_PATH}"
-if [[ "${model_path}" == /path/to/* ]]; then
-  echo "Set EDGE_MODEL_PATH at the top of this script." >&2
-  exit 1
-fi
-if [[ "${model_path}" == /* && ! -e "${model_path}" ]]; then
-  echo "Edge model path not found: ${model_path}" >&2
-  exit 1
-fi
+for model_path in "${EDGE1_MODEL_PATH}" "${EDGE2_MODEL_PATH}"; do
+  if [[ "${model_path}" == /path/to/* ]]; then
+    echo "Set EDGE1/EDGE2 model paths at the top of this script." >&2
+    exit 1
+  fi
+  if [[ "${model_path}" == /* && ! -e "${model_path}" ]]; then
+    echo "Model path not found: ${model_path}" >&2
+    exit 1
+  fi
+done
 
-EDGE_GPUS="$(validate_gpus EDGE_GPUS "${EDGE_GPUS}")"
-EDGE_GPU_COUNT="$(count_gpus "${EDGE_GPUS}")"
-EDGE_TENSOR_PARALLEL_SIZE="$(resolve_tp EDGE "${EDGE_TENSOR_PARALLEL_SIZE}" "${EDGE_GPU_COUNT}")"
+EDGE1_GPUS="$(validate_gpus EDGE1_GPUS "${EDGE1_GPUS}")"
+EDGE1_GPU_COUNT="$(count_gpus "${EDGE1_GPUS}")"
+EDGE1_TENSOR_PARALLEL_SIZE="$(resolve_tp EDGE1 "${EDGE1_TENSOR_PARALLEL_SIZE}" "${EDGE1_GPU_COUNT}")"
+EDGE2_GPUS="$(validate_gpus EDGE2_GPUS "${EDGE2_GPUS}")"
+EDGE2_GPU_COUNT="$(count_gpus "${EDGE2_GPUS}")"
+EDGE2_TENSOR_PARALLEL_SIZE="$(resolve_tp EDGE2 "${EDGE2_TENSOR_PARALLEL_SIZE}" "${EDGE2_GPU_COUNT}")"
 
 PERSIST_SERVER="$(normalize_bool "${PERSIST_SERVER}")"
 WARMUP_SERVER="$(normalize_bool "${WARMUP_SERVER}")"
 ENABLE_PREFIX_CACHING="$(normalize_bool "${ENABLE_PREFIX_CACHING}")"
+FORCE_SEPARATE_EDGE_SERVERS="$(normalize_bool "${FORCE_SEPARATE_EDGE_SERVERS}")"
 ENABLE_EDGE_AGENT="$(normalize_bool "${ENABLE_EDGE_AGENT}")"
 ENABLE_EDGE_REPAIR="$(normalize_bool "${ENABLE_EDGE_REPAIR}")"
 ENABLE_TERMINAL_EDGE_REVIEW="$(normalize_bool "${ENABLE_TERMINAL_EDGE_REVIEW}")"
@@ -247,10 +301,49 @@ ENABLE_CLOUD_REPLAN="$(normalize_bool "${ENABLE_CLOUD_REPLAN}")"
 ENABLE_CLOUD_SYNTHESIS="$(normalize_bool "${ENABLE_CLOUD_SYNTHESIS}")"
 ENABLE_STATIC_FAST_PATH="$(normalize_bool "${ENABLE_STATIC_FAST_PATH}")"
 ENABLE_STATIC_FINALIZATION="$(normalize_bool "${ENABLE_STATIC_FINALIZATION}")"
+ENABLE_OBSERVABLE_CLOSURE_CHECKER="$(normalize_bool "${ENABLE_OBSERVABLE_CLOSURE_CHECKER}")"
 EDGE_REVIEW_PROACTIVE="$(normalize_bool "${EDGE_REVIEW_PROACTIVE}")"
+TABLEFACT_DIRECT_VERIFIER="$(normalize_bool "${TABLEFACT_DIRECT_VERIFIER}")"
+TABLEFACT_SECOND_PASS_VERIFIER="$(normalize_bool "${TABLEFACT_SECOND_PASS_VERIFIER}")"
+WIKITQ_DIRECT_ADJUDICATION="$(normalize_bool "${WIKITQ_DIRECT_ADJUDICATION}")"
 
 if [[ ! "${EDGE_REVIEW_MODE}" =~ ^(off|shadow|safe)$ ]]; then
   echo "Invalid CLOVER_EDGE_REVIEW_MODE: ${EDGE_REVIEW_MODE}" >&2
+  exit 1
+fi
+
+SHARE_EDGE_SERVER=false
+if [[ "${FORCE_SEPARATE_EDGE_SERVERS}" != "true" \
+    && "${EDGE1_MODEL_PATH}" == "${EDGE2_MODEL_PATH}" \
+    && -z "${CLOVER_EDGE2_PORT+x}" ]]; then
+  EDGE2_PORT="${EDGE1_PORT}"
+  EDGE2_GPUS="${EDGE1_GPUS}"
+  EDGE2_GPU_COUNT="${EDGE1_GPU_COUNT}"
+  EDGE2_TENSOR_PARALLEL_SIZE="${EDGE1_TENSOR_PARALLEL_SIZE}"
+  EDGE2_GPU_MEM_UTIL="${EDGE1_GPU_MEM_UTIL}"
+  EDGE2_MAX_MODEL_LEN="${EDGE1_MAX_MODEL_LEN}"
+  EDGE2_DTYPE="${EDGE1_DTYPE}"
+  SHARE_EDGE_SERVER=true
+fi
+if [[ -z "${EDGE1_GPU_MEM_UTIL}" ]]; then
+  if [[ "${SHARE_EDGE_SERVER}" != "true" && "${EDGE1_GPUS}" == "${EDGE2_GPUS}" ]]; then
+    EDGE1_GPU_MEM_UTIL="0.45"
+  else
+    EDGE1_GPU_MEM_UTIL="0.90"
+  fi
+fi
+if [[ -z "${EDGE2_GPU_MEM_UTIL}" ]]; then
+  if [[ "${SHARE_EDGE_SERVER}" == "true" ]]; then
+    EDGE2_GPU_MEM_UTIL="${EDGE1_GPU_MEM_UTIL}"
+  elif [[ "${EDGE1_GPUS}" == "${EDGE2_GPUS}" ]]; then
+    EDGE2_GPU_MEM_UTIL="0.45"
+  else
+    EDGE2_GPU_MEM_UTIL="0.90"
+  fi
+fi
+if [[ "${EDGE1_PORT}" == "${EDGE2_PORT}" && "${SHARE_EDGE_SERVER}" != "true" ]]; then
+  echo "EDGE1 and EDGE2 ports are both ${EDGE1_PORT}, but the servers are not shared." >&2
+  echo "Use different ports or unset CLOVER_EDGE2_PORT when both model paths are identical." >&2
   exit 1
 fi
 
@@ -301,18 +394,25 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/benchmark/runs}"
 RUN_NAME="${RUN_NAME:-${DATASET}_vllm_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "${OUTPUT_ROOT}"
 TMP_DIR="$(mktemp -d)"
-EDGE_SERVER_LOG="${OUTPUT_ROOT}/${RUN_NAME}_edge_vllm.log"
-EDGE_BASE_URL="http://${HOST}:${EDGE_PORT}/v1"
-EDGE_SERVED_MODEL_NAME="$(basename "${EDGE_MODEL_PATH}")"
+EDGE1_SERVER_LOG="${OUTPUT_ROOT}/${RUN_NAME}_edge1_vllm.log"
+EDGE2_SERVER_LOG="${OUTPUT_ROOT}/${RUN_NAME}_edge2_vllm.log"
+EDGE1_BASE_URL="http://${HOST}:${EDGE1_PORT}/v1"
+EDGE2_BASE_URL="http://${HOST}:${EDGE2_PORT}/v1"
+EDGE1_SERVED_MODEL_NAME="${CLOVER_EDGE1_SERVED_MODEL_NAME:-$(basename "${EDGE1_MODEL_PATH}")}"
+EDGE2_SERVED_MODEL_NAME="${CLOVER_EDGE2_SERVED_MODEL_NAME:-$(basename "${EDGE2_MODEL_PATH}")}"
 
-EDGE_PID=""
-STARTED_EDGE=0
+EDGE1_PID=""
+EDGE2_PID=""
 
 cleanup() {
   if [[ "${PERSIST_SERVER}" != "true" ]]; then
-    if [[ -n "${EDGE_PID}" ]]; then
-      kill "${EDGE_PID}" >/dev/null 2>&1 || true
-      wait "${EDGE_PID}" >/dev/null 2>&1 || true
+    if [[ -n "${EDGE2_PID}" && "${EDGE2_PID}" != "${EDGE1_PID}" ]]; then
+      kill "${EDGE2_PID}" >/dev/null 2>&1 || true
+      wait "${EDGE2_PID}" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${EDGE1_PID}" ]]; then
+      kill "${EDGE1_PID}" >/dev/null 2>&1 || true
+      wait "${EDGE1_PID}" >/dev/null 2>&1 || true
     fi
   fi
   rm -rf "${TMP_DIR}"
@@ -324,10 +424,20 @@ trap cleanup EXIT
 # -----------------------------------------------------------------------------
 server_ready() {
   local base_url="$1"
-  "${PYTHON_BIN}" - "${base_url}" <<'PY' >/dev/null 2>&1
+  local expected_model="${2:-}"
+  "${PYTHON_BIN}" - "${base_url}" "${expected_model}" <<'PY' >/dev/null 2>&1
 import json, sys, urllib.request
-with urllib.request.urlopen(sys.argv[1].rstrip("/") + "/models", timeout=2) as r:
-    json.loads(r.read().decode("utf-8"))
+base_url, expected = sys.argv[1:3]
+with urllib.request.urlopen(base_url.rstrip("/") + "/models", timeout=2) as r:
+    payload = json.loads(r.read().decode("utf-8"))
+if not expected:
+    raise SystemExit(0)
+model_ids = {
+    str(item.get("id"))
+    for item in payload.get("data", [])
+    if isinstance(item, dict) and item.get("id") is not None
+}
+raise SystemExit(0 if expected in model_ids else 2)
 PY
 }
 
@@ -336,9 +446,15 @@ start_vllm() {
   local mem_util="$6" max_model_len="$7" dtype="$8" served_name="$9" log_file="${10}"
   local base_url="http://${HOST}:${port}/v1"
 
-  if server_ready "${base_url}"; then
+  if server_ready "${base_url}" "${served_name}"; then
     echo "Using existing ${label} server: ${base_url}" >&2
     return 0
+  fi
+  if server_ready "${base_url}"; then
+    echo "${label} endpoint ${base_url} is already serving a different model." >&2
+    echo "Expected served model name: ${served_name}" >&2
+    echo "Stop the existing vLLM server or choose a different CLOVER_${label}_PORT." >&2
+    exit 1
   fi
 
   local extra_args=()
@@ -346,7 +462,7 @@ start_vllm() {
     read -r -a extra_args <<< "${VLLM_SERVER_ARGS}"
   fi
   local cmd=(
-    env CUDA_VISIBLE_DEVICES="${gpus}"
+    env CUDA_VISIBLE_DEVICES="${gpus}" VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER}"
     "${VLLM_BIN}" serve "${model_path}"
     --served-model-name "${served_name}"
     --host "${HOST}"
@@ -370,14 +486,14 @@ start_vllm() {
   local pid="$!"
 
   for ((second = 0; second < SERVER_READY_TIMEOUT; second++)); do
-    server_ready "${base_url}" && break
+    server_ready "${base_url}" "${served_name}" && break
     if ! kill -0 "${pid}" >/dev/null 2>&1; then
       echo "${label} vLLM exited before becoming ready. See ${log_file}" >&2
       exit 1
     fi
     sleep 1
   done
-  if ! server_ready "${base_url}"; then
+  if ! server_ready "${base_url}" "${served_name}"; then
     echo "Timed out waiting for ${label} vLLM after ${SERVER_READY_TIMEOUT}s." >&2
     echo "See ${log_file}" >&2
     exit 1
@@ -415,14 +531,22 @@ PY
 # -----------------------------------------------------------------------------
 write_local_config() {
   local out="$1"
-  "${PYTHON_BIN}" - "${out}" "${EDGE_SERVED_MODEL_NAME}" "${EDGE_BASE_URL}" \
-    "${EDGE_MAX_TOKENS}" "${EDGE_TIMEOUT}" "${EDGE1_TEMPERATURE}" "${EDGE1_TOP_P}" \
+  "${PYTHON_BIN}" - "${out}" "${EDGE1_SERVED_MODEL_NAME}" "${EDGE1_BASE_URL}" \
+    "${EDGE1_MAX_TOKENS}" "${EDGE1_TIMEOUT}" "${EDGE1_TEMPERATURE}" "${EDGE1_TOP_P}" \
     "${AGENT_LOOP_MAX_ITERATIONS}" \
     "${EDGE_REVIEW_MODE}" "${EDGE_REVIEW_PROACTIVE}" "${ABLATION_VARIANT}" \
     "${ENABLE_EDGE_AGENT}" "${ENABLE_EDGE_REPAIR}" "${ENABLE_TERMINAL_EDGE_REVIEW}" \
     "${ENABLE_CONTRACT_GATE}" "${ENABLE_NODE_REVIEW}" "${ENABLE_CLOUD_RECOVERY}" \
     "${ENABLE_CLOUD_REPLAN}" "${ENABLE_CLOUD_SYNTHESIS}" \
-    "${ENABLE_STATIC_FAST_PATH}" "${ENABLE_STATIC_FINALIZATION}" <<'PY'
+    "${ENABLE_STATIC_FAST_PATH}" "${ENABLE_STATIC_FINALIZATION}" \
+    "${ENABLE_OBSERVABLE_CLOSURE_CHECKER}" \
+    "${TABLEFACT_DIRECT_VERIFIER}" "${TABLEFACT_DIRECT_MAX_TOKENS}" \
+    "${TABLEFACT_DIRECT_TABLE_CHAR_LIMIT}" "${TABLEFACT_DIRECT_TEMPERATURE}" \
+    "${TABLEFACT_DIRECT_TOP_P}" \
+    "${TABLEFACT_SECOND_PASS_VERIFIER}" "${TABLEFACT_SECOND_PASS_MAX_TOKENS}" \
+    "${WIKITQ_DIRECT_ADJUDICATION}" "${WIKITQ_DIRECT_QA_MAX_TOKENS}" \
+    "${WIKITQ_ADJUDICATOR_MAX_TOKENS}" "${WIKITQ_DIRECT_TABLE_CHAR_LIMIT}" \
+    "${WIKITQ_DIRECT_TEMPERATURE}" "${WIKITQ_DIRECT_TOP_P}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -436,7 +560,7 @@ payload = {
     "model": model,
     "timeout": int(timeout),
     "node_timeout_seconds": int(timeout),
-    "max_retries": 2,
+    "max_retries": 3,
     "max_tokens": int(max_tokens),
     "temperature": float(temperature),
     "top_p": float(top_p),
@@ -456,10 +580,24 @@ payload = {
     "enable_cloud_synthesis": sys.argv[19] == "true",
     "enable_static_fast_path": sys.argv[20] == "true",
     "enable_static_finalization": sys.argv[21] == "true",
-    "edge_review_max_actions": 4,
-    "edge_review_max_rows": 5,
-    "edge_review_max_columns": 5,
-    "edge_review_max_facts": 40,
+    "enable_observable_closure_checker": sys.argv[22] == "true",
+    "enable_tablefact_direct_verifier": sys.argv[23] == "true",
+    "tablefact_direct_max_tokens": int(sys.argv[24]),
+    "tablefact_direct_table_char_limit": int(sys.argv[25]),
+    "tablefact_direct_temperature": float(sys.argv[26]),
+    "tablefact_direct_top_p": float(sys.argv[27]),
+    "enable_tablefact_second_pass_verifier": sys.argv[28] == "true",
+    "tablefact_second_pass_max_tokens": int(sys.argv[29]),
+    "enable_wikitq_direct_adjudication": sys.argv[30] == "true",
+    "wikitq_direct_qa_max_tokens": int(sys.argv[31]),
+    "wikitq_adjudicator_max_tokens": int(sys.argv[32]),
+    "wikitq_direct_table_char_limit": int(sys.argv[33]),
+    "wikitq_direct_temperature": float(sys.argv[34]),
+    "wikitq_direct_top_p": float(sys.argv[35]),
+    "edge_review_max_actions": 6,
+    "edge_review_max_rows": 8,
+    "edge_review_max_columns": 8,
+    "edge_review_max_facts": 80,
     "tptt_coalesce_ms": 60,
     "tptt_prefix_tokens": 200,
     "max_tptt_leaf_sequences_per_tree": 128,
@@ -470,8 +608,8 @@ PY
 
 write_edge2_config() {
   local out="$1"
-  "${PYTHON_BIN}" - "${out}" "${EDGE_SERVED_MODEL_NAME}" "${EDGE_BASE_URL}" \
-    "${EDGE_MAX_TOKENS}" "${EDGE_TIMEOUT}" "${EDGE2_TEMPERATURE}" "${EDGE2_TOP_P}" <<'PY'
+  "${PYTHON_BIN}" - "${out}" "${EDGE2_SERVED_MODEL_NAME}" "${EDGE2_BASE_URL}" \
+    "${EDGE2_MAX_TOKENS}" "${EDGE2_TIMEOUT}" "${EDGE2_TEMPERATURE}" "${EDGE2_TOP_P}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -484,7 +622,7 @@ payload = {
     "base_url": base_url,
     "model": model,
     "timeout": int(timeout),
-    "max_retries": 2,
+    "max_retries": 3,
     "max_tokens": int(max_tokens),
     "temperature": float(temperature),
     "top_p": float(top_p),
@@ -499,20 +637,28 @@ PY
 # Print configuration
 # -----------------------------------------------------------------------------
 echo "=========================================" >&2
-echo " Single Local vLLM Configuration" >&2
+echo " CLOVER Local vLLM Configuration" >&2
 echo "=========================================" >&2
 echo " Dataset:              ${DATASET}" >&2
 echo "" >&2
-echo " Edge model:           ${EDGE_MODEL_PATH}" >&2
-echo "   GPUs:               ${EDGE_GPUS} (tp=${EDGE_TENSOR_PARALLEL_SIZE})" >&2
-echo "   GPU mem util:       ${EDGE_GPU_MEM_UTIL}" >&2
-echo "   Endpoint:           ${EDGE_BASE_URL}" >&2
-echo "   Max model len:      ${EDGE_MAX_MODEL_LEN}" >&2
-echo "   Max tokens:         ${EDGE_MAX_TOKENS}" >&2
+echo " EDGE1 local model:    ${EDGE1_MODEL_PATH}" >&2
+echo "   GPUs:               ${EDGE1_GPUS} (tp=${EDGE1_TENSOR_PARALLEL_SIZE})" >&2
+echo "   GPU mem util:       ${EDGE1_GPU_MEM_UTIL}" >&2
+echo "   Endpoint:           ${EDGE1_BASE_URL}" >&2
+echo "   Max model len:      ${EDGE1_MAX_MODEL_LEN}" >&2
+echo "   Max tokens:         ${EDGE1_MAX_TOKENS}" >&2
 echo "" >&2
 echo " EDGE1 sampling:" >&2
 echo "   Temperature:        ${EDGE1_TEMPERATURE}" >&2
 echo "   Top-p:              ${EDGE1_TOP_P}" >&2
+echo "" >&2
+echo " EDGE2 supervisor:     ${EDGE2_MODEL_PATH}" >&2
+echo "   Shared server:      ${SHARE_EDGE_SERVER}" >&2
+echo "   GPUs:               ${EDGE2_GPUS} (tp=${EDGE2_TENSOR_PARALLEL_SIZE})" >&2
+echo "   GPU mem util:       ${EDGE2_GPU_MEM_UTIL}" >&2
+echo "   Endpoint:           ${EDGE2_BASE_URL}" >&2
+echo "   Max model len:      ${EDGE2_MAX_MODEL_LEN}" >&2
+echo "   Max tokens:         ${EDGE2_MAX_TOKENS}" >&2
 echo "" >&2
 echo " EDGE2 sampling:" >&2
 echo "   Temperature:        ${EDGE2_TEMPERATURE}" >&2
@@ -521,17 +667,31 @@ echo "" >&2
 echo " Eval concurrency:     ${EVAL_CONCURRENCY} workers / ${EDGE2_CONCURRENCY} edge2" >&2
 echo " Edge agent max iters: ${AGENT_LOOP_MAX_ITERATIONS}" >&2
 echo " EDGE2 max retries:    ${EDGE2_MAX_RETRIES}" >&2
+echo " Closure checker:      ${ENABLE_OBSERVABLE_CLOSURE_CHECKER}" >&2
+echo " TableFact direct:     ${TABLEFACT_DIRECT_VERIFIER} (max_tokens=${TABLEFACT_DIRECT_MAX_TOKENS}, table_chars=${TABLEFACT_DIRECT_TABLE_CHAR_LIMIT})" >&2
+echo " TableFact 2nd pass:   ${TABLEFACT_SECOND_PASS_VERIFIER} (max_tokens=${TABLEFACT_SECOND_PASS_MAX_TOKENS})" >&2
+echo " WikiTQ direct judge:  ${WIKITQ_DIRECT_ADJUDICATION} (qa_tokens=${WIKITQ_DIRECT_QA_MAX_TOKENS}, judge_tokens=${WIKITQ_ADJUDICATOR_MAX_TOKENS})" >&2
+echo " FlashInfer sampler:   ${VLLM_USE_FLASHINFER_SAMPLER}" >&2
 echo "=========================================" >&2
 
 # -----------------------------------------------------------------------------
-# Start vLLM server
+# Start vLLM server(s)
 # -----------------------------------------------------------------------------
-EDGE_PID="$(start_vllm \
-  "edge" "${EDGE_MODEL_PATH}" "${EDGE_GPUS}" "${EDGE_TENSOR_PARALLEL_SIZE}" \
-  "${EDGE_PORT}" "${EDGE_GPU_MEM_UTIL}" "${EDGE_MAX_MODEL_LEN}" \
-  "${EDGE_DTYPE}" "${EDGE_SERVED_MODEL_NAME}" "${EDGE_SERVER_LOG}")"
-STARTED_EDGE=1
-warmup_server "${EDGE_BASE_URL}" "${EDGE_SERVED_MODEL_NAME}" "edge"
+EDGE1_PID="$(start_vllm \
+  "EDGE1" "${EDGE1_MODEL_PATH}" "${EDGE1_GPUS}" "${EDGE1_TENSOR_PARALLEL_SIZE}" \
+  "${EDGE1_PORT}" "${EDGE1_GPU_MEM_UTIL}" "${EDGE1_MAX_MODEL_LEN}" \
+  "${EDGE1_DTYPE}" "${EDGE1_SERVED_MODEL_NAME}" "${EDGE1_SERVER_LOG}")"
+warmup_server "${EDGE1_BASE_URL}" "${EDGE1_SERVED_MODEL_NAME}" "EDGE1"
+
+if [[ "${SHARE_EDGE_SERVER}" == "true" ]]; then
+  EDGE2_PID="${EDGE1_PID}"
+else
+  EDGE2_PID="$(start_vllm \
+    "EDGE2" "${EDGE2_MODEL_PATH}" "${EDGE2_GPUS}" "${EDGE2_TENSOR_PARALLEL_SIZE}" \
+    "${EDGE2_PORT}" "${EDGE2_GPU_MEM_UTIL}" "${EDGE2_MAX_MODEL_LEN}" \
+    "${EDGE2_DTYPE}" "${EDGE2_SERVED_MODEL_NAME}" "${EDGE2_SERVER_LOG}")"
+  warmup_server "${EDGE2_BASE_URL}" "${EDGE2_SERVED_MODEL_NAME}" "EDGE2"
+fi
 
 # -----------------------------------------------------------------------------
 # Generate configs
@@ -590,9 +750,9 @@ esac
 
 echo "Running ${DATASET} evaluation" >&2
 echo "  output: ${OUTPUT_ROOT}/${RUN_NAME}" >&2
-echo "  edge2: local/${EDGE_SERVED_MODEL_NAME} @ ${EDGE_BASE_URL}" >&2
-echo "  synthesize: local/${EDGE_SERVED_MODEL_NAME} @ ${EDGE_BASE_URL}" >&2
-echo "  local: local/${EDGE_SERVED_MODEL_NAME} @ ${EDGE_BASE_URL}" >&2
+echo "  edge2: local/${EDGE2_SERVED_MODEL_NAME} @ ${EDGE2_BASE_URL}" >&2
+echo "  synthesize: local/${EDGE2_SERVED_MODEL_NAME} @ ${EDGE2_BASE_URL}" >&2
+echo "  local: local/${EDGE1_SERVED_MODEL_NAME} @ ${EDGE1_BASE_URL}" >&2
 
 EVAL_EXIT=0
 PYTHONWARNINGS="ignore" \

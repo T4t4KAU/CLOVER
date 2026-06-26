@@ -24,6 +24,10 @@ class StringValue:
     normalized: str
 
     def match(self, other: "Value") -> bool:
+        left_bool = boolean_alias(self.normalized)
+        right_bool = boolean_alias(other.normalized)
+        if left_bool is not None and right_bool is not None:
+            return left_bool == right_bool
         return self.normalized == other.normalized
 
 
@@ -181,6 +185,11 @@ def parse_date(text: Any) -> tuple[int, int, int] | None:
 def answer_items(value: Any) -> list[str]:
     if isinstance(value, dict) and "answer" in value:
         value = value["answer"]
+    elif isinstance(value, dict):
+        items: list[str] = []
+        for item in value.values():
+            items.extend(answer_items(item))
+        return [item for item in items if item != ""]
     if value is None:
         return []
     if isinstance(value, bool):
@@ -199,6 +208,15 @@ def answer_items(value: Any) -> list[str]:
     if isinstance(parsed, (list, tuple)):
         return answer_items(parsed)
     return [text]
+
+
+def boolean_alias(value: Any) -> bool | None:
+    text = normalize_text(value)
+    if text in {"yes", "true", "y"}:
+        return True
+    if text in {"no", "false", "n"}:
+        return False
+    return None
 
 
 def prediction_value_candidates(value: Any, *, expected_count: int) -> list[list[Value]]:

@@ -17,6 +17,7 @@ import pandas as pd
 from clover.config import (
     ENABLE_CLOUD_REPLAN,
     ENABLE_CLOUD_SYNTHESIS,
+    ENABLE_OBSERVABLE_CLOSURE_CHECKER,
     ENABLE_STATIC_FINALIZATION,
     ENABLE_TERMINAL_EDGE_REVIEW,
     runtime_feature_enabled,
@@ -1144,6 +1145,7 @@ def _run_action_groups_batch(
             if _try_finalize_static_action_group_answer(
                 item=result.item,
                 observation=observation,
+                local_slm_config=local_slm_config,
                 final_results=final_results,
                 finalized=finalized,
                 profiler=profiler,
@@ -1251,14 +1253,18 @@ def _try_finalize_static_action_group_answer(
     *,
     item: ActionGroupItem,
     observation: dict[str, Any],
+    local_slm_config: dict[str, Any] | None,
     final_results: list[CaseResult],
     finalized: set[str],
     profiler: PipelineProfiler,
 ) -> bool:
+    checker_enabled = _observable_closure_checker_enabled(local_slm_config)
     answer = _static_relative_row_answer(item=item, observation=observation)
     relative_row_hit = answer is not _STATIC_ACTION_NO_ANSWER
     if not relative_row_hit:
         answer = _static_action_group_scalar_answer(item=item, observation=observation)
+    if answer is _STATIC_ACTION_NO_ANSWER and not checker_enabled:
+        answer = _unchecked_action_group_scalar_answer(item=item, observation=observation)
     if answer is _STATIC_ACTION_NO_ANSWER:
         _record_table_diagnostic(
             item.task,
@@ -1275,6 +1281,11 @@ def _try_finalize_static_action_group_answer(
         )
         return False
     profiler.increment("action_group_static_answer_hits")
+    profiler.increment(
+        "observable_closure_checker_hits"
+        if checker_enabled
+        else "observable_closure_checker_disabled_hits"
+    )
     if relative_row_hit:
         profiler.increment("action_group_edge_relative_row_hits")
     answer_type = _answer_type_name(item.task)
@@ -1299,7 +1310,11 @@ def _try_finalize_static_action_group_answer(
                 "reason": (
                     "edge_verified_relative_row"
                     if relative_row_hit
-                    else "single_sql_action_static_answer"
+                    else (
+                        "single_sql_action_static_answer"
+                        if checker_enabled
+                        else "unchecked_sql_action_static_answer"
+                    )
                 ),
             },
         ),
@@ -1619,6 +1634,94 @@ def _static_action_group_scalar_answer(
     return _STATIC_ACTION_NO_ANSWER
 
 
+def _unchecked_action_group_scalar_answer(
+    *,
+    item: ActionGroupItem,
+    observation: dict[str, Any],
+) -> Any:
+    """Looser static answer extraction used only for closure-checker ablation.
+
+    The normal path above requires an unambiguous scalar closed over the local
+    observation.  This fallback intentionally accepts the first answer-shaped
+    observed value so ablation runs can measure how much the closure checker
+    protects accuracy.
+    """
+
+    if len(item.actions) != 1 or item.actions[0].op != "sql":
+        return _STATIC_ACTION_NO_ANSWER
+    obs = observation.get("obs")
+    if not isinstance(obs, list) or len(obs) != 1:
+        return _STATIC_ACTION_NO_ANSWER
+    sql_observation = obs[0]
+    if (
+        not isinstance(sql_observation, dict)
+        or sql_observation.get("op") != "sql"
+        or sql_observation.get("ok") is not True
+    ):
+        return _STATIC_ACTION_NO_ANSWER
+    result_value = sql_observation.get(
+        _ACTION_FULL_RESULT_KEY,
+        sql_observation.get("res"),
+    )
+    cell = _single_answerish_cell(
+        result_value,
+        answer_key=item.task.answer_key,
+    )
+    if cell is _STATIC_ACTION_NO_ANSWER:
+        cell = _first_observed_scalar(result_value)
+    if cell is _STATIC_ACTION_NO_ANSWER:
+        return _STATIC_ACTION_NO_ANSWER
+    return _normalize_unchecked_static_answer(cell, task=item.task)
+
+
+def _first_observed_scalar(value: Any) -> Any:
+    if _is_missing_static_value(value):
+        return _STATIC_ACTION_NO_ANSWER
+    if isinstance(value, pd.DataFrame):
+        if value.empty:
+            return _STATIC_ACTION_NO_ANSWER
+        return value.iloc[0, 0]
+    if isinstance(value, dict):
+        rows = value.get("rows")
+        if isinstance(rows, list) and rows:
+            return _first_observed_scalar(rows[0])
+        for key in ("answer", "value", "result", "a"):
+            if key in value:
+                return _first_observed_scalar(value[key])
+        if len(value) == 1:
+            return _first_observed_scalar(next(iter(value.values())))
+        return _STATIC_ACTION_NO_ANSWER
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return _STATIC_ACTION_NO_ANSWER
+        if len(value) == 1:
+            return _first_observed_scalar(value[0])
+        return _STATIC_ACTION_NO_ANSWER
+    return value
+
+
+def _normalize_unchecked_static_answer(value: Any, *, task: TaskItem) -> Any:
+    answer_type = _answer_type_name(task)
+    normalized = _normalize_answer_for_task(task, value)
+    if answer_type in _STATIC_ACTION_NUMBER_TYPES:
+        if isinstance(normalized, (int, float)) and not isinstance(normalized, bool):
+            try:
+                if pd.isna(normalized):
+                    return _STATIC_ACTION_NO_ANSWER
+            except TypeError:
+                pass
+            return normalized
+        return _STATIC_ACTION_NO_ANSWER
+    if answer_type in _STATIC_ACTION_BOOLEAN_TYPES:
+        return normalized if isinstance(normalized, bool) else _STATIC_ACTION_NO_ANSWER
+    if answer_type in _STATIC_ACTION_TEXT_TYPES:
+        if normalized is None:
+            return _STATIC_ACTION_NO_ANSWER
+        text = str(normalized).strip()
+        return text if text else _STATIC_ACTION_NO_ANSWER
+    return normalized if normalized is not None else _STATIC_ACTION_NO_ANSWER
+
+
 def _public_action_group_observation(observation: dict[str, Any]) -> dict[str, Any]:
     # Build a safe copy without the full-result payloads (typically large
     # DataFrames).  A full deepcopy would double-copy those large values even
@@ -1710,9 +1813,9 @@ def _compact_runtime_repair_evidence(value: dict[str, Any]) -> dict[str, Any]:
                         else {}
                     ),
                 }
-                for item in items[:4]
+                for item in items[:8]
             ]
-            for column, items in list(column_values.items())[:4]
+            for column, items in list(column_values.items())[:8]
             if isinstance(items, list)
         }
     local_attempt = value.get("local_attempt")
@@ -2408,7 +2511,7 @@ def _compact_verification_evidence(
         root_values = mismatch.get("roots")
         if not isinstance(root_values, list):
             root_values = []
-        for root in root_values[:4]:
+        for root in root_values[:6]:
             if not isinstance(root, dict):
                 continue
             sql_literals = root.get("sql_lit")
@@ -2417,12 +2520,12 @@ def _compact_verification_evidence(
                 {
                     "col": root.get("col"),
                     "sql_lit": (
-                        [_short_evidence_value(item) for item in sql_literals[:8]]
+                        [_short_evidence_value(item) for item in sql_literals[:10]]
                         if isinstance(sql_literals, list)
                         else []
                     ),
                     "actual": (
-                        [_short_evidence_value(item) for item in actual_values[:8]]
+                        [_short_evidence_value(item) for item in actual_values[:10]]
                         if isinstance(actual_values, list)
                         else []
                     ),
@@ -2435,7 +2538,7 @@ def _compact_verification_evidence(
         candidate_values = mismatch.get("candidates")
         if not isinstance(candidate_values, list):
             candidate_values = []
-        for candidate in candidate_values[:3]:
+        for candidate in candidate_values[:5]:
             if not isinstance(candidate, dict):
                 continue
             samples = candidate.get("sample")
@@ -2445,12 +2548,12 @@ def _compact_verification_evidence(
                     "col": candidate.get("col"),
                     "literal": candidate.get("literal"),
                     "matches": (
-                        [_short_evidence_value(item) for item in matches[:3]]
+                        [_short_evidence_value(item) for item in matches[:5]]
                         if isinstance(matches, list)
                         else []
                     ),
                     "sample": (
-                        [_short_evidence_value(item) for item in samples[:3]]
+                        [_short_evidence_value(item) for item in samples[:5]]
                         if isinstance(samples, list)
                         else []
                     ),
@@ -3452,6 +3555,7 @@ def _run_static_synthesis_review(
                     raw_answer,
                     task=item.task,
                     source="format_answer",
+                    local_slm_config=local_slm_config,
                 )
                 if static_finalization_enabled
                 else None
@@ -3691,7 +3795,14 @@ def _static_final_answer_from_value(
     *,
     task: TaskItem,
     source: str,
+    local_slm_config: dict[str, Any] | None,
 ) -> _StaticFinalAnswer | None:
+    if not _observable_closure_checker_enabled(local_slm_config):
+        return _unchecked_static_final_answer_from_value(
+            value,
+            task=task,
+            source=source,
+        )
     answer_type = _answer_type_name(task)
     if _is_missing_static_value(value):
         return None
@@ -3733,6 +3844,62 @@ def _static_final_answer_from_value(
     if value is not None:
         return _StaticFinalAnswer(value=value, reason="typed_value", source=source)
     return None
+
+
+def _observable_closure_checker_enabled(config: dict[str, Any] | None) -> bool:
+    return runtime_feature_enabled(config, ENABLE_OBSERVABLE_CLOSURE_CHECKER)
+
+
+def _unchecked_static_final_answer_from_value(
+    value: Any,
+    *,
+    task: TaskItem,
+    source: str,
+) -> _StaticFinalAnswer | None:
+    if _is_missing_static_value(value):
+        return None
+    answer_type = _answer_type_name(task)
+    if answer_type in _STATIC_ACTION_NUMBER_TYPES:
+        normalized = _normalize_number_answer(value)
+        if _valid_static_number(normalized):
+            return _StaticFinalAnswer(
+                value=normalized,
+                reason="unchecked_number",
+                source=f"{source}_unchecked",
+            )
+        return None
+    if answer_type in _STATIC_ACTION_BOOLEAN_TYPES:
+        normalized = _normalize_boolean_answer(value)
+        if isinstance(normalized, bool):
+            return _StaticFinalAnswer(
+                value=normalized,
+                reason="unchecked_boolean",
+                source=f"{source}_unchecked",
+            )
+        return None
+    if answer_type.startswith("list"):
+        normalized = _normalize_static_list_answer(value, answer_type)
+        if normalized is not None:
+            return _StaticFinalAnswer(
+                value=normalized,
+                reason="unchecked_list",
+                source=f"{source}_unchecked",
+            )
+        return None
+    if answer_type in _STATIC_ACTION_TEXT_TYPES:
+        text = str(value).strip()
+        if text:
+            return _StaticFinalAnswer(
+                value=text,
+                reason="unchecked_text",
+                source=f"{source}_unchecked",
+            )
+        return None
+    return _StaticFinalAnswer(
+        value=value,
+        reason="unchecked_value",
+        source=f"{source}_unchecked",
+    )
 
 
 def _static_final_answer_reject_reason(value: Any, task: TaskItem) -> str:
@@ -4618,6 +4785,11 @@ def _contextual_number_answer(text: str, *, question: str | None) -> int | None:
 def _normalize_boolean_answer(answer: Any) -> Any:
     if isinstance(answer, bool):
         return answer
+    if isinstance(answer, (int, float)) and not isinstance(answer, bool):
+        if answer == 1:
+            return True
+        if answer == 0:
+            return False
     if isinstance(answer, str):
         normalized = answer.strip().lower()
         if normalized in {"true", "yes", "y", "1", "support", "supports"}:

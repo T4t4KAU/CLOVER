@@ -121,6 +121,12 @@ class TableReasoningNormalizationTest(unittest.TestCase):
 
         self.assertEqual(_normalize_answer_for_task(task, "1,936"), 1936.0)
 
+    def test_boolean_answer_accepts_numeric_flags(self) -> None:
+        task = SimpleNamespace(answer_type="boolean", question="is the statement true?")
+
+        self.assertIs(_normalize_answer_for_task(task, 1), True)
+        self.assertIs(_normalize_answer_for_task(task, 0), False)
+
 
 class TableReasoningRemoteCommandTest(unittest.TestCase):
     def test_promotes_answer_misplaced_inside_acts(self) -> None:

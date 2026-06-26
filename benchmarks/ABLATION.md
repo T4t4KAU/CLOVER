@@ -2,11 +2,11 @@
 
 The three dataset experiments are independent. Each can run on either a fixed-size subset (default 100 cases) or the full dataset:
 
-- `run_wikitq_ablation.sh`: WikiTQ.
-- `run_tablebench_ablation.sh`: TableBench, restricted to `FactChecking` and `NumericalReasoning`.
-- `run_tablefact_ablation.sh`: TableFact, restricted to `FactChecking` (the `simple` and `complex` subtypes).
+- `bash benchmarks/run_ablation_suite.sh wikitq`: WikiTQ.
+- `bash benchmarks/run_ablation_suite.sh tablebench`: TableBench, restricted to `FactChecking` and `NumericalReasoning`.
+- `bash benchmarks/run_ablation_suite.sh tablefact`: TableFact, restricted to `FactChecking` (the `simple` and `complex` subtypes).
 
-Sampling relies only on dataset metadata, question text, answer type, table shape, and cell representation. It never reads model predictions, execution traces, or correctness labels. Default manifests live in `benchmarks/ablation_cases/`, and all ten variants reuse the same case set.
+Sampling relies only on dataset metadata, question text, answer type, table shape, and cell representation. It never reads model predictions, execution traces, or correctness labels. Default manifests live in `benchmarks/ablation_cases/`, and all eleven variants reuse the same case set.
 
 The suite supports three selection policies:
 
@@ -23,20 +23,20 @@ In the paper, refer to the 100-case subset explicitly as the "mechanism-focused,
 ## Running
 
 ```bash
-conda activate dl
+conda activate clover
 
 # 100-case subset (default, for quick iteration):
-bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
-bash benchmarks/run_tablebench_ablation.sh /path/to/edge-model
-bash benchmarks/run_tablefact_ablation.sh /path/to/edge-model
+bash benchmarks/run_ablation_suite.sh wikitq /path/to/edge-model
+bash benchmarks/run_ablation_suite.sh tablebench /path/to/edge-model
+bash benchmarks/run_ablation_suite.sh tablefact /path/to/edge-model
 
 # Full dataset (for final reported numbers):
-CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
-CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_tablebench_ablation.sh /path/to/edge-model
-CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_tablefact_ablation.sh /path/to/edge-model
+CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh wikitq /path/to/edge-model
+CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablebench /path/to/edge-model
+CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablefact /path/to/edge-model
 ```
 
-Each script runs the following ten variants:
+The suite runs the following eleven variants:
 
 1. `full`: Full CLOVER.
 2. `all_edge`: Disable Static Fast Path and route every statically executable node to the Edge Agent.
@@ -48,6 +48,7 @@ Each script runs the following ten variants:
 8. `cloud_finalize`: Disable static and terminal Edge finalization; route everything to Cloud synthesis.
 9. `static_only`: Disable the entire Edge family and Cloud Replan/Synthesis, leaving one Cloud planning pass plus Static Fast Path/Finalization. Measures the upper bound of Static execution alone; cases that Static cannot finalize are expected to fail.
 10. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family (Agent/Repair/Review) plus Cloud Synthesis as the terminal fallback. Tests whether Edge can independently finalize when Static is unavailable.
+11. `no_closure_checker`: Keep all Full CLOVER routing/finalization components enabled but disable the Observable Closure Checker, measuring whether looser static finalization helps or hurts.
 
 In `all_edge`, Edge output flows directly into the downstream DAG; static execution results serve only as a shadow reference for agreement-rate computation and never replace Edge output on disagreement. The summary report additionally reports Accuracy, Cloud calls, Edge calls, Edge tokens, total runtime, runtime failures, and the agreement rate between Edge output and the static reference.
 
@@ -63,10 +64,10 @@ CLOVER_EDGE_REVIEW_PROACTIVE=true
 
 Static execution triggers only when evidence is closed and size-bounded, including single-row multi-field selection, candidate selection over at most five rows, simple boolean combinations, short-list assembly, and value normalization for percentages, units, quotes, labels, or trailing parentheses. Edge output must reference fact IDs and replay through deterministic operations; on review failure, execution falls back to the original static or Cloud path. List questions involving superlatives, ranking, counting, or cross-row comparison do not enter proactive Edge assembly and remain on the deterministic or Cloud path.
 
-To reduce ordering bias, the ten variants are reproducibly shuffled using the seed by default; the actual order is recorded in `variant_order.txt`. A fixed order can be specified via:
+To reduce ordering bias, the eleven variants are reproducibly shuffled using the seed by default; the actual order is recorded in `variant_order.txt`. A fixed order can be specified via:
 
 ```bash
-CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static
+CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static,no_closure_checker
 ```
 
 Each experiment starts the vLLM server only once. Before each variant, a local-model warm-up is performed and excluded from the measured time. Results are written to:
@@ -75,7 +76,7 @@ Each experiment starts the vLLM server only once. Before each variant, a local-m
 benchmark/runs/<dataset>_ablation_<timestamp>/
 ```
 
-The `sanity_check.json` in that directory validates the fixed case set, fine-grained feature flags, the replan count for `w/o Cloud Replan`, and the terminal path for Cloud Finalization. After the ten variants finish, the script prints the summary table to the terminal and generates:
+The `sanity_check.json` in that directory validates the fixed case set, fine-grained feature flags, the replan count for `w/o Cloud Replan`, and the terminal path for Cloud Finalization. After the eleven variants finish, the script prints the summary table to the terminal and generates:
 
 ```text
 ablation_summary.md
@@ -101,9 +102,9 @@ ablation_case_diagnostics.jsonl
 ablation_discordant_cases.csv
 ```
 
-The former records each case's correctness, answer source, retry, and error type across the ten variants; the latter keeps only paired cases where Full and a variant disagree, making it easy to inspect why Contract Verification or Cloud Replan produced reverse gains.
+The former records each case's correctness, answer source, retry, and error type across the eleven variants; the latter keeps only paired cases where Full and a variant disagree, making it easy to inspect why Contract Verification, Cloud Replan, or Observable Closure Checking produced reverse gains.
 
-If the ten runs are already complete and only the summary needs to be regenerated without rerunning:
+If the eleven runs are already complete and only the summary needs to be regenerated without rerunning:
 
 ```bash
 python -m benchmarks.summarize_ablation_suite \
@@ -115,7 +116,7 @@ python -m benchmarks.summarize_ablation_suite \
 
 ```bash
 CLOVER_ABLATION_REGENERATE_MANIFEST=1 \
-bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
+bash benchmarks/run_ablation_suite.sh wikitq /path/to/edge-model
 ```
 
 Default parameters:
@@ -131,7 +132,7 @@ Run the representative control subset:
 
 ```bash
 CLOVER_ABLATION_SELECTION_POLICY=representative \
-bash benchmarks/run_wikitq_ablation.sh /path/to/edge-model
+bash benchmarks/run_ablation_suite.sh wikitq /path/to/edge-model
 ```
 
 The policies use different manifest filenames and never overwrite each other:
