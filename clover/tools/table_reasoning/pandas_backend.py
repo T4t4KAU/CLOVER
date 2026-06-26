@@ -351,6 +351,10 @@ class PandasTableReasoningExecutor:
             expr = key["expr"]
             if expr.get("type") == "column" and expr.get("name") in frame.columns:
                 column = expr["name"]
+                natural_key = _natural_sort_series(frame[column], column_name=column)
+                if natural_key is not None:
+                    column = f"__sort_key_{index}"
+                    frame[column] = natural_key.to_numpy()
             else:
                 column = f"__sort_key_{index}"
                 frame[column] = _series_for_frame(evaluator.eval(expr), frame).to_numpy()
@@ -1613,6 +1617,34 @@ def _numeric_series_if_convertible(series: pd.Series) -> pd.Series | None:
     if int(numeric.reindex(non_null.index).notna().sum()) == required:
         return numeric
     return None
+
+
+def _natural_sort_series(
+    series: pd.Series,
+    *,
+    column_name: str,
+) -> pd.Series | None:
+    """Return a numeric sort key for fully numeric-looking text columns.
+
+    Small table models often omit an explicit CAST when ordering formatted
+    numbers such as ``12,345``, ``45.9%``, ``$800``, or ordinal ranks.  SQLite
+    and pandas would otherwise order those values lexicographically.  Use a
+    numeric key only when every non-empty value is convertible, and avoid
+    date/time columns where the first numeric token is not the ordering value.
+    """
+
+    if pd.api.types.is_numeric_dtype(series.dtype):
+        return None
+    if re.search(
+        r"\b(?:date|time|day|month)\b",
+        str(column_name),
+        flags=re.IGNORECASE,
+    ):
+        return None
+    numeric = _numeric_series_if_convertible(series)
+    if numeric is None:
+        return None
+    return numeric
 
 
 def _datetime_series_if_convertible(series: pd.Series) -> pd.Series | None:

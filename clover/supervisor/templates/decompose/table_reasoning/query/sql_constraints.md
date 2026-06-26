@@ -37,6 +37,8 @@ SQL rules:
   all unless the question explicitly asks for a total/overall row.
 - When ordering dates, parse/normalize dates where possible; do not rely on
   lexicographic text ordering for month names.
+{% if task_dsl.get("hints", {}).get("benchmark") == "tablebench" -%}
+- TableBench arithmetic rules:
 - For ranges like `2000-2007`, `from 2000 to 2007`, or `between 2000 and 2007`,
   include every row in the inclusive range; do not filter only the two endpoint
   years unless the question explicitly asks for endpoint values.
@@ -72,3 +74,4 @@ SQL rules:
   not `COUNT(*)` rows.
 - When casting numeric text, remove commas, percent signs, and units, but never
   remove the decimal point itself.
+{% endif -%}

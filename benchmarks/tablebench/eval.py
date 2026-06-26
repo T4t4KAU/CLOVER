@@ -1219,6 +1219,7 @@ def _tablebench_hints(sampled_case: dict[str, Any]) -> dict[str, Any]:
         hints["subcategory"] = sampled_case["qsubtype"]
     if sampled_case.get("chart_type") is not None:
         hints["chart_type"] = sampled_case["chart_type"]
+    hints["benchmark"] = "tablebench"
     return hints
 
 

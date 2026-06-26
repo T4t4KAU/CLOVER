@@ -1763,6 +1763,49 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         )
         self.assertEqual(len(client.chat.completions.requests), 1)
 
+    def test_edge_relative_row_overrides_wrong_lexical_neighbor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            table_path.write_text(
+                "name\nAlpha\nBeta\nGamma\n",
+                encoding="utf-8",
+            )
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                "SELECT name FROM table_1 "
+                                "WHERE name < 'Beta' ORDER BY name ASC LIMIT 1"
+                            )
+                        }
+                    )
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        root,
+                        table_path,
+                        "What play is next after Beta?",
+                        "string",
+                        profile="analyze",
+                    )
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=1,
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, "Gamma")
+        self.assertEqual(
+            result.case_results[0].metadata["final_answer_source"],
+            "edge_static_relative_row",
+        )
+
     def test_edge_relative_row_respects_descending_dates(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1805,6 +1848,49 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             )
 
         self.assertEqual(result.case_results[0].answer, "Christian Andersen")
+
+    def test_static_text_answer_collapses_identical_lookup_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            table_path = root / "table.csv"
+            table_path.write_text(
+                "team,league\nViking,Premier League\nViking,Premier League\n",
+                encoding="utf-8",
+            )
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "q": (
+                                'SELECT "league" FROM "table_1" '
+                                "WHERE \"team\" = 'Viking'"
+                            )
+                        }
+                    )
+                ]
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    _case_spec(
+                        "case_1",
+                        root,
+                        table_path,
+                        "What league does Viking belong to?",
+                        "string",
+                        profile="analyze",
+                    )
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                remote_batch_size=1,
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, "Premier League")
+        self.assertEqual(
+            result.case_results[0].metadata["final_answer_source"],
+            "action_static",
+        )
 
     def test_duplicate_cloud_repair_sql_is_rejected_before_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -39,6 +39,8 @@ Rules:
 - Project only requested answer fields. Keep helper values used for ranking,
   sorting, or filtering inside `ORDER BY`, CTEs, or derived tables unless the
   question explicitly asks to output them.
+{% if task_dsl.get("hints", {}).get("benchmark") == "tablebench" -%}
+- TableBench arithmetic rules:
 - For inclusive ranges such as `2000-2007`, `from 2000 to 2007`, or `between
   2000 and 2007`, include every row in the range; do not use `IN (2000, 2007)`
   unless only the endpoints are requested.
@@ -69,6 +71,7 @@ Rules:
   not `COUNT(*)`.
 - When casting numeric text, remove commas, percent signs, and units, but never
   remove the decimal point itself.
+{% endif -%}
 - For yes/no questions, answer yes/no (or boolean only when the declared answer
   type is boolean). For "A or B" comparison questions, return the winning option
   text (A or B), not true/false.

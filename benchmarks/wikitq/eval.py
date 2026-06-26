@@ -443,6 +443,8 @@ def _augment_wikitq_direct_answers(
                 sampled_case=cases_by_index[record["sample_index"]],
                 base_answer=record.get("final_answer"),
                 direct_answer=record.get("wikitq_direct_qa", {}).get("answer"),
+                base_sql=record.get("current_sql"),
+                base_source=record.get("final_answer_source"),
                 wikitq_root=wikitq_root,
                 remote_config=adjudicator_config,
                 table_char_limit=table_limit,
@@ -516,6 +518,8 @@ def _run_wikitq_adjudicator(
     sampled_case: dict[str, Any],
     base_answer: Any,
     direct_answer: Any,
+    base_sql: Any,
+    base_source: Any,
     wikitq_root: Path,
     remote_config: dict[str, Any],
     table_char_limit: int,
@@ -525,6 +529,8 @@ def _run_wikitq_adjudicator(
         sampled_case=sampled_case,
         base_answer=base_answer,
         direct_answer=direct_answer,
+        base_sql=base_sql,
+        base_source=base_source,
         wikitq_root=wikitq_root,
         table_char_limit=table_char_limit,
     )
@@ -594,6 +600,8 @@ def _wikitq_adjudicator_prompt(
     sampled_case: dict[str, Any],
     base_answer: Any,
     direct_answer: Any,
+    base_sql: Any,
+    base_source: Any,
     wikitq_root: Path,
     table_char_limit: int,
 ) -> str:
@@ -602,11 +610,17 @@ def _wikitq_adjudicator_prompt(
         "and recompute the answer from the CSV table. Check filters, row order, "
         "dates, counts, max/min, and whether the question asks for an entity, a "
         "number, yes/no, or one of two options. Candidate A and B may both be "
-        'wrong. Think briefly, then on the LAST line output exactly JSON {"answer": VALUE}. '
+        "wrong. Candidate A includes its SQL/tool evidence: verify that its "
+        "selected column, filters, aggregation, ordering, and row semantics "
+        "match every part of the question. Prefer evidence-backed A when its "
+        "SQL is complete; otherwise recompute from the table. Think briefly, "
+        'then on the LAST line output exactly JSON {"answer": VALUE}. '
         "VALUE must be a string, number, or list.\n\n"
         f"Table CSV:\n{_wikitq_table_csv(sampled_case, wikitq_root, table_char_limit)}\n\n"
         f"Question: {sampled_case.get('question')}\n"
         f"Candidate A: {json.dumps(json_ready(base_answer), ensure_ascii=False)}\n"
+        f"Candidate A source: {json.dumps(json_ready(base_source), ensure_ascii=False)}\n"
+        f"Candidate A SQL: {json.dumps(json_ready(base_sql), ensure_ascii=False)}\n"
         f"Candidate B: {json.dumps(json_ready(direct_answer), ensure_ascii=False)}"
     )
 
@@ -761,6 +775,7 @@ def _builder_case_spec(
         "answer_type": sampled_case.get("answer_type"),
         "task_type": "table_reasoning.analyze",
         "source_id": 0,
+        "hints": {"benchmark": "wikitq"},
     }
     metadata = {
         "sample_index": sample_index,

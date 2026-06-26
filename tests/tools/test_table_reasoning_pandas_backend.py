@@ -411,6 +411,27 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
 
         self.assertEqual(outputs["answer"], "fruit")
 
+    def test_sorts_fully_numeric_formatted_text_by_numeric_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                'name,Attendance\nsmall,"9,500"\nlarge,"12,000"\n',
+                encoding="utf-8",
+            )
+            remote_dsl = _remote_dsl("string", ["name", "Attendance"])
+            logic_dag = parse_remote_sql_to_logic_dag(
+                'SELECT "name" AS answer FROM "table_1" '
+                'ORDER BY "Attendance" DESC LIMIT 1;',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                logic_dag,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], "large")
+
     def test_executes_negative_substr_offset_and_concatenation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"

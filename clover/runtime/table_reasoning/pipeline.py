@@ -1439,6 +1439,7 @@ def _static_relative_row_answer(
     if not _relative_observation_needs_repair(
         observation=observation,
         literals=literals,
+        force=_explicit_relative_row_question(item.task.question),
     ):
         return _STATIC_ACTION_NO_ANSWER
     output_column = _single_selected_source_column(sql)
@@ -1485,6 +1486,7 @@ def _relative_observation_needs_repair(
     *,
     observation: dict[str, Any],
     literals: list[str],
+    force: bool = False,
 ) -> bool:
     obs = observation.get("obs")
     if not isinstance(obs, list) or len(obs) != 1 or not isinstance(obs[0], dict):
@@ -1492,6 +1494,8 @@ def _relative_observation_needs_repair(
     result = obs[0].get("res")
     if not isinstance(result, dict):
         return False
+    if force:
+        return True
     if result.get("n") == 0:
         return True
     rows = result.get("rows")
@@ -1505,6 +1509,21 @@ def _relative_observation_needs_repair(
         if any(normalized == _normalized_relative_text(item) for item in literals):
             return True
     return False
+
+
+def _explicit_relative_row_question(question: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:"
+            r"immediately\s+(?:before|after)|"
+            r"comes?\s+(?:immediately\s+)?(?:before|after)|"
+            r"(?:listed|shown|appears?)\s+(?:immediately\s+)?(?:before|after)|"
+            r"(?:next|previous)\s+(?:\w+\s+){0,2}(?:after|before|to)"
+            r")\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _relative_row_direction(question: str) -> int | None:
@@ -1575,7 +1594,19 @@ def _single_selected_source_column(sql: str) -> str | None:
     if "," in projection or re.search(r"\b(count|sum|min|max|avg|case)\s*\(", projection, re.I):
         return None
     identifiers = [item.replace('""', '"') for item in re.findall(r'"((?:""|[^"])*)"', projection)]
-    return identifiers[0] if len(identifiers) == 1 else None
+    if len(identifiers) == 1:
+        return identifiers[0]
+    projection = re.sub(
+        r"\s+as\s+(?:[`\"\[]?[A-Za-z_][A-Za-z0-9_]*[`\"\]]?)\s*$",
+        "",
+        projection,
+        flags=re.IGNORECASE,
+    ).strip()
+    match = re.fullmatch(
+        r"(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)",
+        projection,
+    )
+    return match.group(1) if match is not None else None
 
 
 def _sql_anchor_literals(sql: str, *, question: str) -> list[str]:
@@ -2028,6 +2059,11 @@ def _targeted_action_result_answer(
     ]
     if len(text_values) != len(rows):
         return _STATIC_ACTION_NO_ANSWER
+    normalized_values = {
+        re.sub(r"\s+", " ", value).strip().casefold() for value in text_values
+    }
+    if len(normalized_values) == 1:
+        return text_values[0]
     return ", ".join(text_values)
 
 
