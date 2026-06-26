@@ -35,11 +35,12 @@ class SupervisorTest(unittest.TestCase):
             }
         )
 
-        self.assertIn("Evidence plan:", prompt)
+        self.assertIn("Evidence SQL object:", prompt)
+        self.assertIn("Evidence analyze object:", prompt)
         self.assertIn("Terminal answer:", prompt)
         self.assertIn("Choose one mutually exclusive action form", prompt)
-        self.assertIn("`acts` may contain only `sql` or `analyze` actions", prompt)
-        self.assertIn('Never put `{"op":"answer"}` inside `acts`', prompt)
+        self.assertIn("Return one action only", prompt)
+        self.assertIn("Do not return `acts`, `actions`, `sqls`, arrays", prompt)
 
     def test_synthesis_payload_strips_evaluation_labels(self) -> None:
         local_dsl = {
@@ -389,7 +390,7 @@ class SupervisorTest(unittest.TestCase):
         )
 
         self.assertIn("No more execution rounds are available", prompt)
-        self.assertIn("Do not return `acts`", prompt)
+        self.assertIn("Do not return an action", prompt)
 
     def test_parses_answer_and_action_decisions(self) -> None:
         answer_decision = parse_supervisor_decision('{"op":"answer","a":2}')

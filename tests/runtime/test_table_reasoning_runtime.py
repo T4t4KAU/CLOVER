@@ -27,6 +27,51 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             {"op": "sql", "q": "SELECT COUNT(*) FROM table_1"},
         )
 
+    def test_table_command_parser_ignores_reasoning_json_before_final_answer(
+        self,
+    ) -> None:
+        payload = _load_json_object(
+            '<think>Example: {"sql": "SELECT ..."} is only a draft.</think>\n'
+            '{"sql": "SELECT COUNT(*) AS answer_1 FROM table_1"}'
+        )
+
+        self.assertEqual(
+            payload,
+            {"sql": "SELECT COUNT(*) AS answer_1 FROM table_1"},
+        )
+
+    def test_table_command_parser_recovers_last_sql_when_reasoning_is_truncated(
+        self,
+    ) -> None:
+        payload = _load_json_object(
+            "<think>I found the query but may run out of budget.\n"
+            "```sql\n"
+            'SELECT "name" AS "answer_1" FROM "table_1" LIMIT 1;\n'
+            "```\n"
+            "Now I would output JSON"
+        )
+
+        self.assertEqual(
+            payload,
+            {"sql": 'SELECT "name" AS "answer_1" FROM "table_1" LIMIT 1'},
+        )
+
+    def test_table_command_parser_recovers_fenced_json_sql_without_outer_json(
+        self,
+    ) -> None:
+        payload = _load_json_object(
+            "Reasoning text.\n"
+            "```json\n"
+            '{"sql": "SELECT COUNT(*) AS answer_1 FROM table_1;"}\n'
+            "```\n"
+            "More text."
+        )
+
+        self.assertEqual(
+            payload,
+            {"sql": "SELECT COUNT(*) AS answer_1 FROM table_1;"},
+        )
+
     def test_table_action_parser_accepts_wrapped_seed_sql(self) -> None:
         actions = table_pipeline._normalize_table_actions(  # noqa: SLF001
             {
@@ -51,6 +96,42 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                     "q": "find trend evidence",
                     "seed": 'SELECT "year" FROM "table_1";',
                 }
+            )
+
+    def test_table_action_parser_rejects_batch_protocol_keys(self) -> None:
+        for payload in (
+            {"sqls": ['SELECT "x" FROM "table_1";']},
+            {
+                "questions": ["one"],
+                "answers": [{"name": "answer_1", "type": "string"}],
+                "sql": 'SELECT "x" FROM "table_1";',
+            },
+            {"acts": [{"op": "sql", "sqls": ['SELECT "x" FROM "table_1";']}]},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(SqlParseError):
+                    table_pipeline._normalize_table_actions(payload)  # noqa: SLF001
+
+    def test_remote_decompose_rejects_model_batch_protocol(self) -> None:
+        job = table_pipeline._RemoteDecomposeJob(  # noqa: SLF001
+            batch=[],
+            remote_dsl={
+                "task_type": "table_reasoning.query",
+                "question": "What is x?",
+                "answer": {"name": "answer_1", "type": "string"},
+            },
+        )
+
+        with self.assertRaises(SqlParseError):
+            table_pipeline._parse_remote_decompose_output(  # noqa: SLF001
+                json.dumps(
+                    {
+                        "questions": ["What is x?"],
+                        "answers": [{"name": "answer_1", "type": "string"}],
+                        "sql": 'SELECT "x" AS "answer_1" FROM "table_1";',
+                    }
+                ),
+                job,
             )
 
     def test_second_repair_requires_changed_failure_signature(self) -> None:
@@ -388,19 +469,16 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(len(client.chat.completions.requests), 0)
         self.assertEqual(result.profile["counters"]["local_entry_commands"], 1)
 
-    def test_batches_same_table_questions_and_merges_execution(self) -> None:
+    def test_processes_same_table_questions_one_by_one_without_remote_batch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        [
-                            _self_made_sql("answer_1"),
-                            _country_sql("answer_2"),
-                        ]
-                    ),
+                    json.dumps({"sql": _self_made_sql("answer_1")}),
+                    json.dumps({"sql": _country_sql("answer_2")}),
                 ],
                 usages=[
+                    {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
                     {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
                 ],
             )
@@ -424,6 +502,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                 ],
                 remote_config={"api_type": "chat_completions", "model": "fake-model"},
                 remote_batch_size=8,
+                remote_concurrency=1,
                 client=client,
                 profile_baseline=True,
             )
@@ -432,24 +511,23 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             {item.case_id: item.answer for item in result.case_results},
             {"case_1": True, "case_2": "United States"},
         )
-        self.assertEqual(result.profile["counters"]["supervisor_decompose_calls"], 1)
+        self.assertEqual(result.profile["counters"]["supervisor_decompose_calls"], 2)
         self.assertNotIn("supervisor_synthesis_calls", result.profile["counters"])
-        self.assertEqual(result.profile["counters"]["static_synthesis_calls"], 1)
-        self.assertEqual(result.profile["counters"]["remote_input_tokens"], 100)
-        self.assertEqual(result.profile["counters"]["remote_output_tokens"], 10)
-        self.assertEqual(result.profile["counters"]["remote_total_tokens"], 110)
+        self.assertEqual(result.profile["counters"]["static_synthesis_calls"], 2)
+        self.assertEqual(result.profile["counters"]["remote_input_tokens"], 200)
+        self.assertEqual(result.profile["counters"]["remote_output_tokens"], 20)
+        self.assertEqual(result.profile["counters"]["remote_total_tokens"], 220)
         self.assertEqual(
             result.profile["summary"]["remote_token_usage"],
             {
-                "input_tokens": 100,
+                "input_tokens": 200,
                 "cached_input_tokens": 0,
-                "output_tokens": 10,
+                "output_tokens": 20,
                 "reasoning_tokens": 0,
-                "total_tokens": 110,
+                "total_tokens": 220,
             },
         )
         self.assertEqual(result.profile["summary"]["validation_mode"], "none")
-        self.assertGreaterEqual(result.profile["counters"]["reused_nodes"], 3)
         self.assertIn("baseline_executor", result.profile["stages"])
         self.assertIn("local_executor_speedup", result.profile["summary"])
 
@@ -458,11 +536,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        [
-                            _country_sql("answer_1"),
-                        ]
-                    ),
+                    json.dumps({"sql": _country_sql("answer_1")}),
                 ],
             )
 
@@ -491,30 +565,27 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(diagnostics[-1]["stage"], "sql_execution")
         self.assertIs(diagnostics[-1]["finalization"]["bypass_synthesis"], True)
 
-    def test_batch_supervisor_report_accepts_keyed_answers(self) -> None:
+    def test_supervisor_reports_single_query_answers_after_unbatched_decompose(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
-            client = _StatefulChatClient(
-                [
-                    json.dumps(
-                        [
+
+            def respond(prompt: str, _index: int) -> dict[str, object]:
+                if "Task DSL" in prompt and "Self-made?" in prompt:
+                    return {
+                        "sql": (
                             'SELECT "selfMade" AS "answer_1" FROM "table_1" '
-                            "WHERE \"country\" = 'missing';",
-                            'SELECT "country" AS "answer_2" FROM "table_1" '
-                            "WHERE \"country\" = 'missing';",
-                        ]
-                    ),
-                    json.dumps(
-                        {
-                            "op": "answer",
-                            "a": {
-                                "answer_1": True,
-                                "answer_2": "United States",
-                            },
-                        }
-                    ),
-                ]
-            )
+                            "WHERE \"country\" = 'missing';"
+                        )
+                    }
+                if "Task DSL" in prompt and "Country?" in prompt:
+                    return {"sql": _country_sql("answer_2")}
+                if "Self-made?" in prompt:
+                    return {"op": "answer", "a": True}
+                if "Country?" in prompt:
+                    return {"op": "answer", "a": "United States"}
+                return {"op": "answer", "a": None}
+
+            client = _PromptRoutingChatClient(respond)
 
             result = run_table_reasoning_system(
                 case_specs=[
@@ -523,6 +594,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                 ],
                 remote_config={"api_type": "chat_completions", "model": "fake-model"},
                 remote_batch_size=2,
+                remote_concurrency=1,
                 max_retries=1,
                 validation_mode="remote_supervisor",
                 client=client,
@@ -530,11 +602,9 @@ class TableReasoningRuntimeTest(unittest.TestCase):
 
         results = {item.case_id: item for item in result.case_results}
         self.assertTrue(results["case_1"].ok)
-        self.assertEqual(results["case_1"].retry_count, 0)
         self.assertTrue(results["case_2"].ok)
-        self.assertEqual(results["case_2"].retry_count, 0)
         self.assertEqual(results["case_2"].answer, "United States")
-        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
+        self.assertGreaterEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
 
     def test_prefetches_supervisor_decompose_batches_before_local_finish(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -543,8 +613,8 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             second_table = _write_people_table(root / "second")
             client = _BlockingPrefetchChatClient(
                 [
-                    json.dumps([_country_sql("answer_1")]),
-                    json.dumps([_self_made_sql("answer_2")]),
+                    json.dumps({"sql": _country_sql("answer_1")}),
+                    json.dumps({"sql": _self_made_sql("answer_2")}),
                 ]
             )
 
@@ -566,8 +636,8 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps([_self_made_sql("answer_1")]),
-                    json.dumps([_country_sql("answer_2")]),
+                    json.dumps({"sql": _self_made_sql("answer_1")}),
+                    json.dumps({"sql": _country_sql("answer_2")}),
                 ]
             )
 
@@ -597,11 +667,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        [
-                            'SELECT COUNT(*) AS "answer_1" FROM "table_1";',
-                        ]
-                    ),
+                    json.dumps({"sql": 'SELECT COUNT(*) AS "answer_1" FROM "table_1";'}),
                 ]
             )
             executor_kwargs: list[dict] = []
@@ -783,15 +849,17 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        [
-                            'SELECT "missing" AS "answer_1" FROM "table_1";',
-                        ]
-                    ),
+                    json.dumps({"sql": 'SELECT "missing" AS "answer_1" FROM "table_1";'}),
                     json.dumps(
                         {
                             "op": "sql",
                             "q": 'SELECT COUNT(*) AS "answer_1" FROM "table_1";',
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "op": "answer",
+                            "a": 2,
                         }
                     ),
                 ]
@@ -821,11 +889,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        [
-                            'SELECT "missing" AS "answer_1" FROM "table_1";',
-                        ]
-                    ),
+                    json.dumps({"sql": 'SELECT "missing" AS "answer_1" FROM "table_1";'}),
                 ]
             )
 
@@ -849,11 +913,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        [
-                            'SELECT "missing" AS "answer_1" FROM "table_1";',
-                        ]
-                    ),
+                    json.dumps({"sql": 'SELECT "missing" AS "answer_1" FROM "table_1";'}),
                 ]
             )
 
@@ -882,11 +942,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        [
-                            'SELECT "missing" AS "answer_1" FROM "table_1";',
-                        ]
-                    ),
+                    json.dumps({"sql": 'SELECT "missing" AS "answer_1" FROM "table_1";'}),
                     json.dumps({"a": 2}),
                 ]
             )
@@ -926,15 +982,17 @@ class TableReasoningRuntimeTest(unittest.TestCase):
             table_path = _write_people_table(Path(tmpdir))
             client = _StatefulChatClient(
                 [
-                    json.dumps(
-                        [
-                            'SELECT "missing" AS "answer_1" FROM "table_1";',
-                        ]
-                    ),
+                    json.dumps({"sql": 'SELECT "missing" AS "answer_1" FROM "table_1";'}),
                     json.dumps(
                         {
                             "op": "sql",
                             "q": 'SELECT COUNT(*) AS "answer_1" FROM "table_1";',
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "op": "answer",
+                            "a": 2,
                         }
                     ),
                 ]
@@ -1596,34 +1654,27 @@ class TableReasoningRuntimeTest(unittest.TestCase):
     def test_fail_fast_interrupted_independent_answers_are_requeued(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))
-            client = _StatefulChatClient(
-                [
-                    json.dumps(
-                        [
-                            'SELECT "missing" AS "answer_1" FROM "table_1";',
-                            _country_sql("answer_2"),
-                        ]
-                    ),
-                    json.dumps(
-                        {
-                            "op": "sql",
-                            "q": 'SELECT COUNT(*) AS "answer_1" FROM "table_1";',
-                        }
-                    ),
-                    json.dumps(
-                        {
-                            "op": "answer",
-                            "a": {"answer_2": "United States"},
-                        }
-                    ),
-                    json.dumps(
-                        {
-                            "op": "answer",
-                            "a": 2,
-                        }
-                    ),
-                ]
-            )
+            repair_calls = 0
+
+            def respond(prompt: str, _index: int) -> dict[str, object]:
+                nonlocal repair_calls
+                if "Task DSL" in prompt and "How many rows?" in prompt:
+                    return {"sql": 'SELECT "missing" AS "answer_1" FROM "table_1";'}
+                if "Task DSL" in prompt and "Country?" in prompt:
+                    return {"sql": _country_sql("answer_2")}
+                if "How many rows?" in prompt:
+                    if "SELECT COUNT(*)" in prompt or repair_calls:
+                        return {"op": "answer", "a": 2}
+                    repair_calls += 1
+                    return {
+                        "op": "sql",
+                        "q": 'SELECT COUNT(*) AS "answer_1" FROM "table_1";',
+                    }
+                if "Country?" in prompt:
+                    return {"op": "answer", "a": "United States"}
+                return {"op": "answer", "a": None}
+
+            client = _PromptRoutingChatClient(respond)
 
             result = run_table_reasoning_system(
                 case_specs=[
@@ -1632,6 +1683,7 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                 ],
                 remote_config={"api_type": "chat_completions", "model": "fake-model"},
                 remote_batch_size=2,
+                remote_concurrency=1,
                 max_parallel_execution_units=1,
                 max_retries=1,
                 validation_mode="remote_supervisor",
@@ -1994,6 +2046,32 @@ class _StatefulChatClient:
         self.chat = SimpleNamespace(
             completions=_StatefulChatCompletions(output_texts, usages=usages),
         )
+
+
+class _PromptRoutingChatClient:
+    def __init__(self, responder: object) -> None:
+        self.chat = SimpleNamespace(
+            completions=_PromptRoutingChatCompletions(responder),
+        )
+
+
+class _PromptRoutingChatCompletions:
+    def __init__(self, responder: object) -> None:
+        self._responder = responder
+        self.requests: list[dict[str, object]] = []
+
+    def create(self, **kwargs: object) -> "_FakeChatResponse":
+        self.requests.append(
+            {
+                **kwargs,
+                "messages": [dict(message) for message in kwargs["messages"]],
+            }
+        )
+        prompt = str(kwargs["messages"][0]["content"])
+        text = self._responder(prompt, len(self.requests) - 1)
+        if not isinstance(text, str):
+            text = json.dumps(text)
+        return _FakeChatResponse(text)
 
 
 class FilterEvidenceExtractionTest(unittest.TestCase):

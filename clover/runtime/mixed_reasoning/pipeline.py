@@ -177,23 +177,17 @@ class _MixedRuntimeAdapter:
         if self.pending_table_remote:
             self.remote_turn = REMOTE_DOCUMENT
             first = self.pending_table_remote[0]
-            analyze = table_pipeline._is_analyze_task(first)
             batch = table_pipeline._pop_batch_for_source(
                 self.pending_table_remote,
                 first.group_key,
-                1 if analyze else self.remote_batch_size,
-                analyze=analyze,
-            )
-            remote_dsl = (
-                table_pipeline._query_remote_dsl(batch[0])
-                if analyze
-                else table_pipeline._batch_remote_dsl(batch)
+                1,
+                analyze=table_pipeline._is_analyze_task(first),
             )
             return _MixedRemoteJob(
                 kind=REMOTE_TABLE_DECOMPOSE,
                 payload=table_pipeline._RemoteDecomposeJob(
                     batch=batch,
-                    remote_dsl=remote_dsl,
+                    remote_dsl=table_pipeline._query_remote_dsl(batch[0]),
                 ),
             )
         self.remote_turn = REMOTE_TABLE_DECOMPOSE
@@ -329,7 +323,7 @@ class _TableDagLocalSink:
             _MixedLocalWorkItem(
                 kind=TABLE_WORK_DAG,
                 payload=item,
-                group_key=group_key,
+                group_key=_table_dag_work_group_key(group_key, item),
                 priority=priority,
             )
         )
@@ -377,6 +371,8 @@ def run_mixed_reasoning_system(
         max_pending_slm_sequences=max_pending_slm_sequences,
         max_retries=max_retries,
     )
+    if remote_batch_size != 1:
+        remote_batch_size = 1
     validation_mode = table_pipeline._normalize_validation_mode(validation_mode)
 
     table_specs, document_specs = _assign_mixed_answer_keys(
@@ -819,47 +815,73 @@ def _build_mixed_plan_entries(
                 )
             )
 
-    for (group_key, _priority), batch in table_groups.items():
-        if not batch:
+    for (group_key, _priority), grouped_batch in table_groups.items():
+        if not grouped_batch:
             continue
-        for item in batch:
-            item.task.status = TASK_EXECUTING
-        logic_dag = table_pipeline._batch_logic_dag(batch)
-        local_dsl = table_pipeline._batch_local_dsl(batch)
-        context = table_pipeline._batch_context(batch[0].task)
-        if adapter.profile_baseline:
-            table_pipeline._profile_one_by_one_baseline(
+        # Table query batching is intentionally disabled: each plan entry carries
+        # exactly one question/SQL through optimization, execution finalization,
+        # and supervisor synthesis. Case-level concurrency is handled by the
+        # surrounding runtime stages instead of multi-query prompts.
+        batches = [[item] for item in grouped_batch]
+        for batch_index, batch in enumerate(batches):
+            order_index = table_group_order[(group_key, _priority)] + batch_index
+            _append_table_plan_entry(
+                adapter=adapter,
+                entries=entries,
                 batch=batch,
-                table_cache=adapter.table_cache,
-                local_slm_config=adapter.local_slm_config,
-                profiler=adapter.profiler,
+                order_index=order_index,
             )
-        physical_plan = table_pipeline._optimize_table_logic_dag(
-            logic_dag=logic_dag,
-            context=context,
-            local_dsl=local_dsl,
-            profiler=adapter.profiler,
-            stage_name="optimizer",
-            items=len(batch),
-        )
-        merge_stats = physical_plan.get("merge_stats", {})
-        adapter.profiler.increment("merged_plan_count")
-        adapter.profiler.increment("merged_plan_nodes", int(merge_stats.get("nodes", 0) or 0))
-        adapter.profiler.increment(
-            "reused_nodes",
-            int(merge_stats.get("reused_nodes", 0) or 0),
-        )
-        entries.append(
-            _TablePlanEntry(
-                namespace=_table_plan_namespace(batch),
-                batch=batch,
-                logic_dag=logic_dag,
-                physical_plan=physical_plan,
-                order_index=table_group_order[(group_key, _priority)],
-            )
-        )
 
     return sorted(entries, key=lambda entry: entry.order_index)
+
+
+def _append_table_plan_entry(
+    *,
+    adapter: _MixedRuntimeAdapter,
+    entries: list[_PlanEntry],
+    batch: list[table_pipeline.LogicDagItem],
+    order_index: int,
+) -> None:
+    for item in batch:
+        item.task.status = TASK_EXECUTING
+    logic_dag = table_pipeline._batch_logic_dag(batch)
+    local_dsl = (
+        table_pipeline._query_local_dsl(batch[0].task)
+        if len(batch) == 1
+        else table_pipeline._batch_local_dsl(batch)
+    )
+    context = table_pipeline._batch_context(batch[0].task)
+    if adapter.profile_baseline:
+        table_pipeline._profile_one_by_one_baseline(
+            batch=batch,
+            table_cache=adapter.table_cache,
+            local_slm_config=adapter.local_slm_config,
+            profiler=adapter.profiler,
+        )
+    physical_plan = table_pipeline._optimize_table_logic_dag(
+        logic_dag=logic_dag,
+        context=context,
+        local_dsl=local_dsl,
+        profiler=adapter.profiler,
+        stage_name="optimizer",
+        items=len(batch),
+    )
+    merge_stats = physical_plan.get("merge_stats", {})
+    adapter.profiler.increment("merged_plan_count")
+    adapter.profiler.increment("merged_plan_nodes", int(merge_stats.get("nodes", 0) or 0))
+    adapter.profiler.increment(
+        "reused_nodes",
+        int(merge_stats.get("reused_nodes", 0) or 0),
+    )
+    entries.append(
+        _TablePlanEntry(
+            namespace=_table_plan_namespace(batch),
+            batch=batch,
+            logic_dag=logic_dag,
+            physical_plan=physical_plan,
+            order_index=order_index,
+        )
+    )
 
 
 def _execute_mixed_plan_entries(
@@ -868,6 +890,17 @@ def _execute_mixed_plan_entries(
 ) -> None:
     if len(entries) == 1:
         _execute_single_plan_entry(adapter, entries[0])
+        return
+    table_entry_count = sum(
+        1 for entry in entries if isinstance(entry, _TablePlanEntry)
+    )
+    if table_entry_count > 1:
+        # Do not merge multiple table queries into one executor plan. The table
+        # runtime intentionally carries one SQL/query at a time; case-level
+        # concurrency is provided by remote/local scheduling, not multi-SQL
+        # plans or prompts.
+        for entry in entries:
+            _execute_single_plan_entry(adapter, entry)
         return
 
     executor_fn = _executor_fn_for_entries(entries)
@@ -916,7 +949,10 @@ def _execute_mixed_plan_entries(
                     _MixedLocalWorkItem(
                         kind=TABLE_WORK_DAG,
                         payload=item,
-                        group_key=table_pipeline._dag_group_key(item.task),
+                        group_key=_table_dag_work_group_key(
+                            table_pipeline._dag_group_key(item.task),
+                            item,
+                        ),
                         priority=item.task.retry_count,
                     )
                 ),
@@ -976,7 +1012,10 @@ def _execute_single_plan_entry(
                 _MixedLocalWorkItem(
                     kind=TABLE_WORK_DAG,
                     payload=item,
-                    group_key=table_pipeline._dag_group_key(item.task),
+                    group_key=_table_dag_work_group_key(
+                        table_pipeline._dag_group_key(item.task),
+                        item,
+                    ),
                     priority=item.task.retry_count,
                 )
             ),
@@ -1108,7 +1147,10 @@ def _requeue_entry(adapter: _MixedRuntimeAdapter, entry: _PlanEntry) -> None:
                 _MixedLocalWorkItem(
                     kind=TABLE_WORK_DAG,
                     payload=item,
-                    group_key=table_pipeline._dag_group_key(item.task),
+                    group_key=_table_dag_work_group_key(
+                        table_pipeline._dag_group_key(item.task),
+                        item,
+                    ),
                     priority=item.task.retry_count,
                 )
             )
@@ -1122,6 +1164,13 @@ def _table_plan_namespace(batch: list[table_pipeline.LogicDagItem]) -> str:
     if len(batch) > 3:
         raw += f"__n{len(batch)}"
     return _safe_namespace(raw)
+
+
+def _table_dag_work_group_key(
+    group_key: str,
+    item: table_pipeline.LogicDagItem,
+) -> str:
+    return f"{group_key}::query::{item.task.answer_key}"
 
 
 def _safe_namespace(raw: str) -> str:

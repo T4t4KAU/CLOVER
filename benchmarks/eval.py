@@ -135,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("none", "remote_supervisor"),
         default="none",
     )
-    parser.add_argument("--remote-batch-size", type=int, default=16)
+    parser.add_argument("--remote-batch-size", type=int, default=1)
     parser.add_argument("--remote-concurrency", type=int, default=8)
     parser.add_argument("--slm-scheduler", choices=("fifo", "tptt"), default="tptt")
     parser.add_argument("--max-parallel-execution-units", type=int, default=8)
@@ -155,6 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.remote_batch_size != 1:
+        print(
+            "Table query batching is disabled; overriding --remote-batch-size to 1.",
+            file=sys.stderr,
+        )
+        args.remote_batch_size = 1
     dataset = _selected_dataset(args)
     run_name = args.run_name or f"{dataset}_eval"
     output_dir = (args.output_root / run_name).expanduser().resolve()

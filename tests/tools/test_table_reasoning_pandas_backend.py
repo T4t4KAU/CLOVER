@@ -429,6 +429,49 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
 
         self.assertEqual(outputs["answer"], "1234-ok")
 
+    def test_treats_double_quoted_non_column_separator_as_string_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text("first,last\nAda,Lovelace\n", encoding="utf-8")
+            remote_dsl = _remote_dsl("string", ["first", "last"])
+            logic_dag = parse_remote_sql_to_logic_dag(
+                'SELECT "first" || " " || "last" AS answer FROM "table_1" LIMIT 1;',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                logic_dag,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], "Ada Lovelace")
+
+    def test_grouped_aggregate_preserves_first_non_grouped_columns_for_sqlite_style_projection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "table.csv"
+            table_path.write_text(
+                "id,name,model\n"
+                "4,General Motors,A\n"
+                "4,General Motors,B\n"
+                "6,Chrysler,C\n",
+                encoding="utf-8",
+            )
+            remote_dsl = _remote_dsl("list[string]", ["id", "name", "model"])
+            logic_dag = parse_remote_sql_to_logic_dag(
+                'SELECT "name" || " " || "id" AS answer FROM "table_1" '
+                'GROUP BY "id" HAVING COUNT("model") > 1;',
+                remote_dsl,
+            )
+
+            outputs = execute_table_reasoning_plan(
+                logic_dag,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], ["General Motors 4"])
+
     def test_formats_last_column_when_grouped_aggregate_has_no_answer_alias(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = Path(tmpdir) / "table.csv"

@@ -23,6 +23,7 @@ set -euo pipefail
 #   CLOVER_EDGE2_PORT=8001 \
 #   CLOVER_EDGE1_MAX_MODEL_LEN=8192 \
 #   CLOVER_EDGE2_MAX_MODEL_LEN=8192 \
+#   CLOVER_DISABLE_THINKING=true \
 #   CLOVER_EVAL_CONCURRENCY=16 \
 #   CLOVER_EDGE2_CONCURRENCY=8 \
 #   /Users/huangwenxuan/Documents/codes/CLOVER/benchmarks/run_vllm_eval_clover.sh tablebench --max-cases 100
@@ -33,6 +34,7 @@ set -euo pipefail
 # Examples:
 #   bash benchmarks/run_vllm_eval_clover.sh wikitq --max-cases 20
 #   bash benchmarks/run_vllm_eval_clover.sh tablebench
+#   MMQA_SPLIT=two_table bash benchmarks/run_vllm_eval_clover.sh mmqa --sample-size 100
 # =============================================================================
 
 # =============================================================================
@@ -42,7 +44,7 @@ set -euo pipefail
 # =============================================================================
 
 # --- Dataset ---
-DATASET="${CLOVER_EVAL_DATASET:-tablebench}"  # tablebench | wikitq | tablefact
+DATASET="${CLOVER_EVAL_DATASET:-tablebench}"  # tablebench | wikitq | tablefact | mmqa
 
 # --- EDGE1 model (local slm / edge agent) ----------------------------------
 EDGE1_MODEL_PATH="${CLOVER_EDGE1_MODEL_PATH:-${CLOVER_EDGE_MODEL_PATH:-/root/autodl-tmp/models/Qwen2.5-14B-Instruct}}"
@@ -74,14 +76,16 @@ FORCE_SEPARATE_EDGE_SERVERS="${CLOVER_FORCE_SEPARATE_EDGE_SERVERS:-false}"
 # --- Common vLLM server ---
 HOST="${CLOVER_VLLM_HOST:-127.0.0.1}"
 ENABLE_PREFIX_CACHING="${CLOVER_VLLM_ENABLE_PREFIX_CACHING:-true}"
+VLLM_MAX_NUM_SEQS="${CLOVER_VLLM_MAX_NUM_SEQS:-256}"
 VLLM_SERVER_ARGS="${CLOVER_VLLM_SERVER_ARGS:-}"   # extra args, e.g. "--enforce-eager"
 VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-${CLOVER_VLLM_USE_FLASHINFER_SAMPLER:-0}}"
 SERVER_READY_TIMEOUT="${CLOVER_VLLM_READY_TIMEOUT:-600}"
 PERSIST_SERVER="${CLOVER_VLLM_PERSIST_SERVER:-false}"
 WARMUP_SERVER="${CLOVER_VLLM_WARMUP:-true}"
+DISABLE_THINKING="${CLOVER_DISABLE_THINKING:-false}"  # Qwen3/Qwen3.6: extra_body.chat_template_kwargs.enable_thinking=false
 
 # --- Concurrency & retries ---
-EDGE2_BATCH_SIZE="${CLOVER_EDGE2_BATCH_SIZE:-16}"              # EDGE2 request batch size
+EDGE2_BATCH_SIZE="${CLOVER_EDGE2_BATCH_SIZE:-1}"               # query batch size; keep 1 to avoid batch-prompt errors
 EDGE2_CONCURRENCY="${CLOVER_EDGE2_CONCURRENCY:-8}"             # concurrent EDGE2 requests
 EVAL_CONCURRENCY="${CLOVER_EVAL_CONCURRENCY:-16}"               # overall eval workers (--max-workers)
 MAX_PARALLEL_EXECUTION_UNITS="${CLOVER_MAX_PARALLEL_EXECUTION_UNITS:-8}"
@@ -149,21 +153,24 @@ All model/server/concurrency settings are configured at the top of this script
 or via CLOVER_* environment variables.
 
 DATASET:
-  tablebench | wikitq | tablefact
+  tablebench | wikitq | tablefact | mmqa
 
 Examples:
   bash benchmarks/run_vllm_eval_clover.sh
   bash benchmarks/run_vllm_eval_clover.sh wikitq --max-cases 20
   bash benchmarks/run_vllm_eval_clover.sh tablebench
+  MMQA_SPLIT=three_table bash benchmarks/run_vllm_eval_clover.sh mmqa --sample-size 100
 
 Environment variables (key ones):
   CLOVER_EDGE1_MODEL_PATH / CLOVER_EDGE2_MODEL_PATH    Model paths
   CLOVER_EDGE1_GPUS / CLOVER_EDGE2_GPUS                 GPU ids
   CLOVER_EDGE1_PORT / CLOVER_EDGE2_PORT                 vLLM ports
   CLOVER_EDGE1_MAX_MODEL_LEN / CLOVER_EDGE2_MAX_MODEL_LEN Context length
+  CLOVER_VLLM_MAX_NUM_SEQS                            vLLM sequence concurrency
   CLOVER_EDGE1_TEMPERATURE / CLOVER_EDGE2_TEMPERATURE   Sampling temperature
   CLOVER_EVAL_CONCURRENCY / CLOVER_EDGE2_CONCURRENCY Eval parallelism
   CLOVER_AGENT_LOOP_MAX_ITERATIONS / CLOVER_EDGE2_MAX_RETRIES  Retry budgets
+  CLOVER_DISABLE_THINKING                              Disable Qwen thinking chat template
   CLOVER_TABLEFACT_DIRECT_VERIFIER                    Use compact TableFact verifier
   CLOVER_TABLEFACT_SECOND_PASS_VERIFIER               Recover high-confidence false negatives
 EOF
@@ -230,7 +237,7 @@ resolve_tp() {
 # Validate inputs
 # -----------------------------------------------------------------------------
 case "${DATASET}" in
-  tablebench|wikitq|tablefact) ;;
+  tablebench|wikitq|tablefact|mmqa) ;;
   *) echo "Unsupported dataset: ${DATASET}" >&2; exit 2 ;;
 esac
 
@@ -243,12 +250,14 @@ if [[ -z "${CLOVER_EDGE1_TEMPERATURE+x}" ]]; then
   case "${DATASET}" in
     tablefact|wikitq) EDGE1_TEMPERATURE="0.0" ;;
     tablebench) EDGE1_TEMPERATURE="0.3" ;;
+    mmqa) EDGE1_TEMPERATURE="0.2" ;;
   esac
 fi
 if [[ -z "${CLOVER_EDGE1_TOP_P+x}" ]]; then
   case "${DATASET}" in
     tablefact|wikitq) EDGE1_TOP_P="1.0" ;;
     tablebench) EDGE1_TOP_P="1.0" ;;
+    mmqa) EDGE1_TOP_P="0.9" ;;
   esac
 fi
 if [[ -z "${CLOVER_EDGE2_TEMPERATURE+x}" ]]; then
@@ -256,16 +265,28 @@ if [[ -z "${CLOVER_EDGE2_TEMPERATURE+x}" ]]; then
     tablefact) EDGE2_TEMPERATURE="0.0" ;;
     wikitq) EDGE2_TEMPERATURE="0.0" ;;
     tablebench) EDGE2_TEMPERATURE="0.3" ;;
+    mmqa) EDGE2_TEMPERATURE="0.2" ;;
   esac
 fi
 if [[ -z "${CLOVER_EDGE2_TOP_P+x}" ]]; then
   case "${DATASET}" in
     tablefact|wikitq) EDGE2_TOP_P="1.0" ;;
     tablebench) EDGE2_TOP_P="0.9" ;;
+    mmqa) EDGE2_TOP_P="0.9" ;;
   esac
+fi
+if [[ "${DATASET}" == "mmqa" && -z "${CLOVER_EDGE1_MAX_TOKENS+x}" && -z "${CLOVER_EDGE_MAX_TOKENS+x}" ]]; then
+  EDGE1_MAX_TOKENS="4096"
+fi
+if [[ "${DATASET}" == "mmqa" && -z "${CLOVER_EDGE2_MAX_TOKENS+x}" && -z "${CLOVER_EDGE_MAX_TOKENS+x}" ]]; then
+  EDGE2_MAX_TOKENS="4096"
 fi
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   echo "No executable 'python' found. Activate the intended environment first." >&2
+  exit 1
+fi
+if [[ ! "${VLLM_MAX_NUM_SEQS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Invalid CLOVER_VLLM_MAX_NUM_SEQS: ${VLLM_MAX_NUM_SEQS}" >&2
   exit 1
 fi
 
@@ -289,6 +310,7 @@ EDGE2_TENSOR_PARALLEL_SIZE="$(resolve_tp EDGE2 "${EDGE2_TENSOR_PARALLEL_SIZE}" "
 
 PERSIST_SERVER="$(normalize_bool "${PERSIST_SERVER}")"
 WARMUP_SERVER="$(normalize_bool "${WARMUP_SERVER}")"
+DISABLE_THINKING="$(normalize_bool "${DISABLE_THINKING}")"
 ENABLE_PREFIX_CACHING="$(normalize_bool "${ENABLE_PREFIX_CACHING}")"
 FORCE_SEPARATE_EDGE_SERVERS="$(normalize_bool "${FORCE_SEPARATE_EDGE_SERVERS}")"
 ENABLE_EDGE_AGENT="$(normalize_bool "${ENABLE_EDGE_AGENT}")"
@@ -352,16 +374,21 @@ DATASETS_ROOT="${CLOVER_DATASETS_ROOT:-${REPO_ROOT}/datasets}"
 TABLEBENCH_ROOT="${TABLEBENCH_ROOT:-${DATASETS_ROOT}/tablebench}"
 WIKITQ_ROOT="${WIKITQ_ROOT:-${DATASETS_ROOT}/wikitq}"
 TABLEFACT_ROOT="${TABLEFACT_ROOT:-${DATASETS_ROOT}/tablefact}"
+MMQA_ROOT="${MMQA_ROOT:-${DATASETS_ROOT}/mmqa}"
 WIKITQ_SPLIT="${WIKITQ_SPLIT:-pristine-unseen-tables}"
 TABLEFACT_SPLIT="${TABLEFACT_SPLIT:-test}"
 TABLEFACT_SUBSET="${TABLEFACT_SUBSET:-small}"
+MMQA_SPLIT="${MMQA_SPLIT:-}"
 
 case "${DATASET}" in
   tablebench) DATASET_ROOT="${TABLEBENCH_ROOT}" ;;
   wikitq) DATASET_ROOT="${WIKITQ_ROOT}" ;;
   tablefact) DATASET_ROOT="${TABLEFACT_ROOT}" ;;
+  mmqa) DATASET_ROOT="${MMQA_ROOT}" ;;
 esac
-if ! find "${DATASET_ROOT}" -mindepth 2 -maxdepth 2 -name cases.jsonl \
+DATASET_CASE_MAXDEPTH=2
+[[ "${DATASET}" == "mmqa" ]] && DATASET_CASE_MAXDEPTH=3
+if ! find "${DATASET_ROOT}" -mindepth 2 -maxdepth "${DATASET_CASE_MAXDEPTH}" -name cases.jsonl \
     -print -quit 2>/dev/null | grep -q .; then
   echo "Converted ${DATASET} dataset not found: ${DATASET_ROOT}" >&2
   echo "Run: bash benchmarks/download_datasets.sh --dataset ${DATASET}" >&2
@@ -471,6 +498,7 @@ start_vllm() {
     --gpu-memory-utilization "${mem_util}"
     --tensor-parallel-size "${tp}"
     --max-model-len "${max_model_len}"
+    --max-num-seqs "${VLLM_MAX_NUM_SEQS}"
   )
   [[ "${ENABLE_PREFIX_CACHING}" == "true" ]] && cmd+=(--enable-prefix-caching)
   [[ "${#extra_args[@]}" -gt 0 ]] && cmd+=("${extra_args[@]}")
@@ -546,7 +574,8 @@ write_local_config() {
     "${TABLEFACT_SECOND_PASS_VERIFIER}" "${TABLEFACT_SECOND_PASS_MAX_TOKENS}" \
     "${WIKITQ_DIRECT_ADJUDICATION}" "${WIKITQ_DIRECT_QA_MAX_TOKENS}" \
     "${WIKITQ_ADJUDICATOR_MAX_TOKENS}" "${WIKITQ_DIRECT_TABLE_CHAR_LIMIT}" \
-    "${WIKITQ_DIRECT_TEMPERATURE}" "${WIKITQ_DIRECT_TOP_P}" <<'PY'
+    "${WIKITQ_DIRECT_TEMPERATURE}" "${WIKITQ_DIRECT_TOP_P}" \
+    "${DISABLE_THINKING}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -602,6 +631,12 @@ payload = {
     "tptt_prefix_tokens": 200,
     "max_tptt_leaf_sequences_per_tree": 128,
 }
+if sys.argv[36] == "true":
+    payload["extra_body"] = {
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+        }
+    }
 Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
 }
@@ -609,7 +644,8 @@ PY
 write_edge2_config() {
   local out="$1"
   "${PYTHON_BIN}" - "${out}" "${EDGE2_SERVED_MODEL_NAME}" "${EDGE2_BASE_URL}" \
-    "${EDGE2_MAX_TOKENS}" "${EDGE2_TIMEOUT}" "${EDGE2_TEMPERATURE}" "${EDGE2_TOP_P}" <<'PY'
+    "${EDGE2_MAX_TOKENS}" "${EDGE2_TIMEOUT}" "${EDGE2_TEMPERATURE}" "${EDGE2_TOP_P}" \
+    "${DISABLE_THINKING}" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -629,6 +665,12 @@ payload = {
     "http2": False,
     "trust_env": False,
 }
+if sys.argv[8] == "true":
+    payload["extra_body"] = {
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+        }
+    }
 Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
 }
@@ -665,6 +707,8 @@ echo "   Temperature:        ${EDGE2_TEMPERATURE}" >&2
 echo "   Top-p:              ${EDGE2_TOP_P}" >&2
 echo "" >&2
 echo " Eval concurrency:     ${EVAL_CONCURRENCY} workers / ${EDGE2_CONCURRENCY} edge2" >&2
+echo " vLLM max num seqs:    ${VLLM_MAX_NUM_SEQS}" >&2
+echo " Disable thinking:     ${DISABLE_THINKING}" >&2
 echo " Edge agent max iters: ${AGENT_LOOP_MAX_ITERATIONS}" >&2
 echo " EDGE2 max retries:    ${EDGE2_MAX_RETRIES}" >&2
 echo " Closure checker:      ${ENABLE_OBSERVABLE_CLOSURE_CHECKER}" >&2
@@ -744,6 +788,15 @@ case "${DATASET}" in
       --tablefact-split "${TABLEFACT_SPLIT}"
       --tablefact-subset "${TABLEFACT_SUBSET}"
     )
+    ;;
+  mmqa)
+    EVAL_CMD+=(
+      --mmqa-eval
+      --mmqa-root "${MMQA_ROOT}"
+    )
+    if [[ -n "${MMQA_SPLIT}" ]]; then
+      EVAL_CMD+=(--mmqa-split "${MMQA_SPLIT}")
+    fi
     ;;
 esac
 [[ "${#FORWARD_ARGS[@]}" -gt 0 ]] && EVAL_CMD+=("${FORWARD_ARGS[@]}")

@@ -191,9 +191,8 @@ def _template_paths_for_task_dsl(task_dsl: dict[str, Any]) -> tuple[str, ...]:
         raise ValueError("Supervisor decomposition prompt requires task_dsl.task_type")
     if is_table_task_type(task_type):
         if _is_table_batch_task(task_dsl):
-            return _with_table_profile_template(
-                _template_paths_for_route(TABLE_REASONING_BATCH_QUERY_ROUTE),
-                task_dsl,
+            raise ValueError(
+                "Batch table decomposition is disabled; submit one question per request"
             )
         return _with_table_profile_template(
             _template_paths_for_route(TABLE_REASONING_QUERY_ROUTE),
@@ -246,9 +245,12 @@ def _template_task_type(task_dsl: dict[str, Any]) -> str | None:
 
 
 def _is_table_batch_task(task_dsl: dict[str, Any]) -> bool:
-    return isinstance(task_dsl.get("questions"), list) and isinstance(
-        task_dsl.get("answers"),
-        list,
+    questions = task_dsl.get("questions")
+    answers = task_dsl.get("answers")
+    return (
+        isinstance(questions, list)
+        and isinstance(answers, list)
+        and (len(questions) > 1 or len(answers) > 1)
     )
 
 

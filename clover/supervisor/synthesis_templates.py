@@ -310,9 +310,11 @@ def _is_table_batch_synthesis_context(
 ) -> bool:
     if not is_table_task_type(logic_dag.get("task_type")):
         return False
-    if isinstance(logic_dag.get("query_plans"), list):
+    query_plans = logic_dag.get("query_plans")
+    if isinstance(query_plans, list) and len(query_plans) > 1:
         return True
-    if isinstance(logic_dag.get("query_outputs"), list):
+    query_outputs = logic_dag.get("query_outputs")
+    if isinstance(query_outputs, list) and len(query_outputs) > 1:
         return True
     return _is_table_batch_task(local_dsl) or _is_table_batch_task(task_dsl)
 
@@ -1499,9 +1501,12 @@ def _table_result_rows(rows: list[Any], columns: list[Any], max_rows: int = 10) 
 def _is_table_batch_task(source: dict[str, Any] | None) -> bool:
     if not isinstance(source, dict):
         return False
-    return isinstance(source.get("questions"), list) and isinstance(
-        source.get("answers"),
-        list,
+    questions = source.get("questions")
+    answers = source.get("answers")
+    return (
+        isinstance(questions, list)
+        and isinstance(answers, list)
+        and (len(questions) > 1 or len(answers) > 1)
     )
 
 

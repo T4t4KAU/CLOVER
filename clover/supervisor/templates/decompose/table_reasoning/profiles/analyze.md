@@ -8,16 +8,25 @@ Return exactly one JSON object. No ids/wrapper.
 
 Choose one mutually exclusive action form:
 
-Evidence plan:
-{"acts":[{"op":"sql","q":"SELECT ..."},{"op":"analyze","kind":"statistical|correlation","seed":"SELECT ..."}]}
+Evidence SQL object:
+`op` must be `"sql"` and `q` must be one complete SQLite SELECT using real
+source ids and columns.
+
+Evidence analyze object:
+`op` must be `"analyze"`, `kind` must be `"statistical"` or `"correlation"`,
+and `seed` must be one complete SQLite SELECT using real source ids and columns.
 
 Terminal answer:
 {"op":"answer","a":null|string|number|boolean|array|object}
 
 Rules:
-- `acts` may contain only `sql` or `analyze` actions.
-- Never put `{"op":"answer"}` inside `acts`.
+- Return one action only. Do not return `acts`, `actions`, `sqls`, arrays, or
+  multiple SQL statements.
+- Do not output placeholders, angle-bracket text, or ellipsis characters; output
+  executable SQL only.
 - SQL actions retrieve evidence only; they do not encode final answers.
+- If several evidence steps seem useful, fold them into one SELECT using joins,
+  CTEs, derived tables, aggregates, or `EXISTS`.
 - Prefer SQL for exact deterministic work: totals, averages, differences, percentages, ranks, and ties.
 - Use analyze only when the requested statistic cannot be expressed directly in SQL.
 - Exclude summary rows such as total, totals, all, overall, subtotal, rank total,
@@ -25,7 +34,7 @@ Rules:
 - For `who`/`which` questions, project the requested entity column (person,
   team, country, title, event, location, etc.), not the column used only for
   filtering, ranking, or comparison.
-- For "which X has the most/least ..." questions, filter out summary rows
+- For "which X has the most/least value" questions, filter out summary rows
   before ranking and return the X value, not the numeric max/min value.
 - For yes/no questions, answer yes/no (or boolean only when the declared answer
   type is boolean). For "A or B" comparison questions, return the winning option
@@ -33,6 +42,6 @@ Rules:
 - For "came first", "earlier", "last", "before", and "after", compare actual
   dates/row order, not raw strings.
 - Parenthesize mixed AND/OR filters.
-- For text predicates, prefer case-insensitive matching with `LOWER(...) LIKE`
+- For text predicates, prefer case-insensitive matching with `LOWER(column) LIKE`
   when the question wording may differ in case or spacing from cell text.
 - Use terminal answer only when no table evidence is needed.

@@ -9,9 +9,11 @@ Rules:
 - Double-quote tables, columns, and answer aliases.
 - Each SELECT item must have a unique alias. If the requested answer is one string/list item but uses multiple fields (for example first and last name), concatenate them into one expression aliased as the matching answer name instead of returning separate answer columns.
 - Avoid scalar subqueries in the SELECT list; write a flat SELECT with explicit FROM/JOIN clauses, or use derived tables in FROM when a subquery is necessary.
-- Avoid `INTERSECT` and `EXCEPT`; express set intersections with joins, `EXISTS`, or `GROUP BY ... HAVING COUNT(DISTINCT ...)`.
+- Avoid `INTERSECT` and `EXCEPT`; express set intersections with joins, `EXISTS`,
+  or `GROUP BY` with `HAVING COUNT(DISTINCT column)`.
 - Return one item per `questions[i]`; order and length must match.
-- Each item is {"sql":"..."}.
+- Each item is a JSON object with exactly one key, `sql`, whose value is a
+  complete SQLite SELECT statement.
 - Compute deterministic totals, averages, differences, percentages, and ranks in SQL.
 - For highest/lowest ties, return all tied rows; do not use LIMIT 1 unless one answer is guaranteed.
 - Exclude summary rows such as total, all, overall, or all ages unless explicitly requested.

@@ -46,7 +46,6 @@ from clover.optimizer import (
     extract_sql_statement,
     optimize_logic_dag_to_physical_plan,
     parse_remote_sql_to_logic_dag,
-    parse_sql_list_response,
 )
 from clover.optimizer.ir import TABLE_REASONING_QUERY_TASK_TYPE
 from clover.reasoning_profiles import (
@@ -245,6 +244,8 @@ def run_table_reasoning_system(
 
     if remote_batch_size <= 0:
         raise ValueError("remote_batch_size must be positive")
+    if remote_batch_size != 1:
+        remote_batch_size = 1
     if remote_concurrency <= 0:
         raise ValueError("remote_concurrency must be positive")
     if max_parallel_execution_units <= 0:
@@ -682,8 +683,9 @@ def _parse_remote_decompose_output(
     job: _RemoteDecomposeJob,
 ) -> tuple[_PlannedSqlCommand, ...]:
     if _is_batch_remote_dsl(job.remote_dsl):
-        parsed = parse_sql_list_response(remote_output, job.remote_dsl)
-        return tuple(_PlannedSqlCommand(op="sql", sqls=(sql,)) for sql in parsed.sqls)
+        raise SqlParseError(
+            "Batch table decomposition is disabled; submit one query per remote job"
+        )
     return (_parse_single_table_command(remote_output, job),)
 
 
@@ -753,7 +755,9 @@ def _payload_action_op(payload: dict[str, Any]) -> str:
 
 
 def _load_json_object(remote_output: str) -> dict[str, Any]:
-    text = str(remote_output or "").strip()
+    raw_text = str(remote_output or "").strip()
+    text = raw_text
+    text = _strip_reasoning_prefix(text)
     if not text:
         raise SqlParseError("Remote table command is empty")
     if text.startswith("```"):
@@ -763,10 +767,34 @@ def _load_json_object(remote_output: str) -> dict[str, Any]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        payload = _load_first_json_object(text, exc)
+        try:
+            payload = _load_first_json_object(text, exc)
+        except SqlParseError:
+            payload = _load_single_sql_payload_fallback(text)
+            if payload is None and raw_text != text:
+                payload = _load_single_sql_payload_fallback(raw_text)
+            if payload is None:
+                raise
     if not isinstance(payload, dict):
         raise SqlParseError("Remote table command must be a JSON object")
     return payload
+
+
+def _strip_reasoning_prefix(text: str) -> str:
+    """Drop explicit reasoning blocks before parsing the command JSON.
+
+    Some local reasoning models emit a long ``<think>`` section before the final
+    answer even when instructed to return JSON only.  Those thoughts often
+    contain illustrative JSON snippets such as ``{"sql": "SELECT ..."}``; the
+    runtime must parse the final command after ``</think>``, not an earlier
+    self-check example.
+    """
+
+    marker_index = text.rfind("</think>")
+    if marker_index < 0:
+        return text
+    tail = text[marker_index + len("</think>") :].strip()
+    return tail or text
 
 
 def _load_first_json_object(text: str, original_error: json.JSONDecodeError) -> Any:
@@ -781,6 +809,50 @@ def _load_first_json_object(text: str, original_error: json.JSONDecodeError) -> 
     except json.JSONDecodeError as exc:
         raise SqlParseError(f"Unable to parse table command JSON: {exc}") from exc
     return obj
+
+
+def _load_single_sql_payload_fallback(text: str) -> dict[str, Any] | None:
+    """Recover a single SQL command from non-JSON reasoning-model output.
+
+    This is intentionally a fallback, not the primary protocol. Reasoning
+    models sometimes spend the whole token budget in a ``<think>`` block and
+    never emit the final JSON even though they already wrote a complete SQL
+    snippet. When that happens, salvaging one complete SELECT preserves the
+    one-query contract without increasing token budgets.
+    """
+
+    candidates = _sql_text_candidates(text)
+    for candidate in reversed(candidates):
+        try:
+            sql = extract_sql_statement(candidate)
+        except SqlParseError:
+            continue
+        if _looks_like_placeholder_sql(sql):
+            continue
+        return {"sql": sql}
+    return None
+
+
+def _sql_text_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.finditer(r"```(?:[A-Za-z0-9_-]+)?\s*(.*?)```", text, flags=re.DOTALL):
+        block = match.group(1).strip()
+        if block:
+            candidates.append(block)
+    lowered = text.lower()
+    starts = [match.start() for match in re.finditer(r"\b(?:select|with)\b", lowered)]
+    for start in starts:
+        candidates.append(text[start:])
+    if text.strip():
+        candidates.append(text)
+    return candidates
+
+
+def _looks_like_placeholder_sql(sql: str) -> bool:
+    text = str(sql or "").strip()
+    if not text:
+        return True
+    return "..." in text or "<" in text or ">" in text
 
 
 def _normalize_sqls(value: Any) -> tuple[str, ...]:
@@ -808,10 +880,16 @@ def _normalize_sqls(value: Any) -> tuple[str, ...]:
 
 
 def _normalize_table_actions(payload: dict[str, Any]) -> tuple[SupervisorAction, ...]:
+    if any(key in payload for key in ("questions", "answers")):
+        raise SqlParseError("Batch table action protocol is disabled")
+    if "sqls" in payload:
+        raise SqlParseError("Table reasoning accepts exactly one sql/q field, not sqls")
     action_list = payload.get("acts", payload.get("actions"))
     if action_list is not None:
         if not isinstance(action_list, list) or not action_list:
             raise SqlParseError("acts must be a non-empty list")
+        if len(action_list) != 1:
+            raise SqlParseError("Table reasoning accepts exactly one action")
         actions: list[SupervisorAction] = []
         for index, item in enumerate(action_list):
             if not isinstance(item, dict):
@@ -857,11 +935,17 @@ def _normalize_one_table_action(
     *,
     label: str,
 ) -> tuple[SupervisorAction, ...]:
+    if any(key in payload for key in ("questions", "answers")):
+        raise SqlParseError(f"{label} must not use batch questions/answers")
+    if "sqls" in payload:
+        raise SqlParseError(f"{label} must use one sql/q field, not sqls")
     action_op = _payload_action_op(payload) or "sql"
     if action_op == "sql":
         sqls = _normalize_sqls(payload.get("q", payload.get("sqls", payload.get("sql"))))
         if not sqls:
             raise SqlParseError(f"{label} requires SQL q")
+        if len(sqls) != 1:
+            raise SqlParseError(f"{label} requires exactly one SQL")
         return tuple(SupervisorAction(op="sql", q=sql) for sql in sqls)
     if action_op == "analyze":
         kind = payload.get("kind")
@@ -889,13 +973,19 @@ def _command_content(command: _PlannedSqlCommand) -> str:
         )
     if command.actions:
         return json.dumps(
-            {"acts": [_action_to_dict(action) for action in command.actions]},
+            _action_command_payload(command.actions),
             ensure_ascii=False,
             separators=(",", ":"),
         )
     if len(command.sqls) == 1:
         return command.sqls[0]
     return json.dumps(list(command.sqls), ensure_ascii=False, separators=(",", ":"))
+
+
+def _action_command_payload(actions: tuple[SupervisorAction, ...]) -> dict[str, Any]:
+    if len(actions) == 1:
+        return _action_to_dict(actions[0])
+    return {"actions": [_action_to_dict(action) for action in actions]}
 
 
 def _action_to_dict(action: SupervisorAction) -> dict[str, Any]:
@@ -1879,7 +1969,7 @@ def _action_group_synthesis_diagnostic(
         "answer_key": item.task.answer_key,
         "actions": [_action_to_dict(action) for action in item.actions],
         "synthesis_input": {
-            "current_command": {"acts": [_action_to_dict(action) for action in item.actions]},
+            "current_command": _action_command_payload(item.actions),
             "observation": json_ready(observation),
         },
         "synthesis_output": json_ready(
@@ -3363,6 +3453,17 @@ def _enqueue_action_group(
     finalized: set[str],
     max_retries: int,
 ) -> None:
+    if len(actions) != 1:
+        _finalize_failed(
+            task,
+            final_results=final_results,
+            finalized=finalized,
+            error={
+                "type": "UnsupportedSupervisorAction",
+                "message": "Table reasoning accepts exactly one follow-up action",
+            },
+        )
+        return
     if _actions_repeat_prior_sql(task, actions):
         _finalize_failed(
             task,
@@ -3400,7 +3501,7 @@ def _enqueue_action_group(
         return
     task.retry_count += 1
     task.current_command = json.dumps(
-        {"acts": [_action_to_dict(action) for action in actions]},
+        _action_command_payload(actions),
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -4607,7 +4708,7 @@ def _run_one_supervisor_action_report_for_batch(
                 local_dsl=_query_local_dsl(item.task),
                 logic_dag={"task_type": item.task.task_type, "query_plans": []},
                 observation=observation,
-                current_command={"acts": [_action_to_dict(action) for action in item.actions]},
+                current_command=_action_command_payload(item.actions),
                 force_final_answer=(not allow_replan or item.task.retry_count >= max_retries),
             )
             local_profiler.increment("supervisor_synthesis_calls")
@@ -5518,7 +5619,7 @@ def _query_fragment(logic_dag: dict[str, Any]) -> dict[str, Any]:
 
 
 def _synthesis_local_dsl(batch: list[LogicDagItem]) -> dict[str, Any]:
-    if len(batch) == 1 and _is_analyze_task(batch[0].task):
+    if len(batch) == 1:
         return _query_local_dsl(batch[0].task)
     return _batch_local_dsl(batch)
 

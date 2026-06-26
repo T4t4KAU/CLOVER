@@ -1413,7 +1413,24 @@ def _column_series(frame: pd.DataFrame, expr: dict[str, Any]) -> pd.Series:
     ]
     if len(normalized_matches) == 1:
         return frame[normalized_matches[0]]
+    if table is None and _looks_like_quoted_string_literal_name(name):
+        return pd.Series([str(name)] * len(frame), index=frame.index)
     raise PandasExecutionError(f"Unknown column: {name}")
+
+
+def _looks_like_quoted_string_literal_name(name: Any) -> bool:
+    """Return true for parsed quoted identifiers that are clearly literals.
+
+    SQLite accepts double-quoted string literals in many contexts. SQLGlot
+    represents `" "` in expressions such as `first || " " || last` as a column
+    reference named space, which is not a real column. Treat only names with no
+    alphanumeric normalized form as constants so genuine misspelled columns
+    like `Fname` or `FullName` still fail and can trigger repair.
+    """
+
+    if not isinstance(name, str):
+        return False
+    return name != "" and _normalize_column_name(name) == ""
 
 
 def _normalize_column_name(name: Any) -> str:
@@ -2113,6 +2130,7 @@ def _aggregate_grouped_frame(
 
     rows = []
     grouped = working.groupby(key_columns, dropna=False, sort=False)
+    aggregation_columns = [aggregation["alias"] for aggregation in aggregations]
     for key_values, group_frame in grouped:
         if not isinstance(key_values, tuple):
             key_values = (key_values,)
@@ -2120,6 +2138,12 @@ def _aggregate_grouped_frame(
             output_column: _to_python_scalar(value)
             for output_column, value in zip(output_key_columns, key_values)
         }
+        for column, value in group_frame.iloc[0].items():
+            if column in row or column in aggregation_columns:
+                continue
+            if column in key_columns and column not in output_key_columns:
+                continue
+            row[column] = _to_python_scalar(value)
         for aggregation in aggregations:
             row[aggregation["alias"]] = _aggregate_frame(
                 group_frame,
@@ -2127,7 +2151,14 @@ def _aggregate_grouped_frame(
                 upstream_outputs,
             )
         rows.append(row)
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    preserved_columns = [
+        column
+        for column in result.columns
+        if column not in output_key_columns and column not in aggregation_columns
+    ]
+    ordered_columns = output_key_columns + preserved_columns + aggregation_columns
+    return result.loc[:, [column for column in ordered_columns if column in result.columns]]
 
 
 def _aggregate_frame(

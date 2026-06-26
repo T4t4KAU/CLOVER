@@ -9,11 +9,20 @@ Choose one mutually exclusive action form:
 Terminal answer:
 {"op":"answer","a":null|string|number|boolean|array|object}
 
-Evidence plan:
-{"acts":[{"op":"sql","q":"SELECT ..."},{"op":"analyze","kind":"statistical|correlation","seed":"SELECT ..."}]}
+Evidence SQL object:
+`op` must be `"sql"` and `q` must be one complete SQLite SELECT using real
+source ids and columns.
 
-Rules: JSON only. Answer if `ev` supports the answer; else ask a small action group.
-`acts` may contain only `sql` or `analyze`; never put `{"op":"answer"}` inside `acts`.
+Evidence analyze object:
+`op` must be `"analyze"`, `kind` must be `"statistical"` or `"correlation"`,
+and `seed` must be one complete SQLite SELECT using real source ids and columns.
+
+Rules: JSON only. Answer if `ev` supports the answer; else ask exactly one action.
+Never return `acts`, `actions`, `sqls`, arrays, or multiple SQL statements.
+Never output placeholders, angle-bracket text, or ellipsis characters; output
+executable SQL only.
+If several evidence checks are needed, fold them into one SELECT using joins,
+CTEs, derived tables, aggregates, or `EXISTS`.
 Use sql for exact data. Use analyze only when SQL cannot express the statistic.
 `ty` is answer type. If `ty` is number, `a` must be one number. If `ty` is string, `a` must be one concise string.
 For WikiTableQuestions-style string answers:
@@ -50,6 +59,7 @@ When `repair` is present, treat it as the complete compact failure report:
 - `prior` contains compact previous attempts.
 - `requirements` are mandatory.
 Generate one materially corrected SQL action. Never repeat `repair.sql` or SQL in `repair.prior`.
+Return the repair as exactly one SQL action object with an executable `q` SQL string.
 For `join_semantic_error`, change the join path or join keys using `repair.join_candidates` and `repair.join_paths`; include an intermediate bridge table when the candidates connect the needed tables only through that table.
 Use `repair.goal` to preserve the requested projection; most repairs should change filters, joins, grouping, ordering, or value normalization, not the selected answer column.
 Use `repair.samples` and `repair.evidence.column_values` as ground truth for actual cell wording and row relationships.
@@ -59,7 +69,7 @@ For `sql_execution_error`, replace unsupported syntax with SQLite-compatible SQL
 For `predicate_mismatch`, make the smallest predicate change supported by actual values: prefer LOWER/LIKE, punctuation/date normalization, or a literal seen in `column_values` before changing columns.
 Preserve the requested answer projection and answer type.
 {% if force_final_answer %}
-No more execution rounds are available. Return `{"op":"answer","a":...}` using the current evidence. If it is insufficient, return `{"op":"answer","a":null}`. Do not return `acts`.
+No more execution rounds are available. Return an answer object using the current evidence. If it is insufficient, return `{"op":"answer","a":null}`. Do not return an action.
 {% endif %}
 
 Supervisor JSON:
