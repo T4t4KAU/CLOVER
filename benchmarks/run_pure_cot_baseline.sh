@@ -1,6 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# =============================================================================
+# Pure Chain-of-Thought (CoT) baseline for CLOVER benchmarks.
+#
+# What it does:
+#   Sends the full table (CSV) + question to a single LLM, asks it to reason
+#   step by step, and scores the final answer with the dataset's native metric.
+#   No tools, no SQL/Python execution, no edge model, no CLOVER runtime.
+#
+# Usage:
+#   bash benchmarks/run_pure_cot_baseline.sh DATASET [MODEL_CONFIG] [options...]
+#
+# Positional arguments:
+#   DATASET       tablebench | wikitq | tablefact
+#                 (aliases: wikitablequestions -> wikitq, tabfact -> tablefact)
+#   MODEL_CONFIG  Optional path to a model config JSON. Defaults to
+#                 model_config/deepseek_remote_llm_config.json. May also be set
+#                 via $CLOVER_COT_LLM_CONFIG. Relative paths are resolved
+#                 against the repo root.
+#
+# Options (forwarded to the baseline runner):
+#   --max-cases N          Cap the number of cases evaluated.
+#   --sample-size N        Randomly sample N cases (after --max-cases).
+#   --case-id ID           Restrict to specific case ids (repeatable).
+#   --seed N               RNG seed for sampling (default 20260528).
+#   --max-workers N        Concurrent LLM requests (default 8).
+#   --output-root PATH     Run output root (default benchmark/runs).
+#   --run-name NAME        Run directory name (auto-generated if omitted).
+#   --overwrite            Overwrite an existing run directory.
+#   --validate-only        Only validate the case scope, then exit.
+#
+# Official experiment scopes:
+#   TableBench: FactChecking + NumericalReasoning (493 cases)
+#   WikiTQ:     pristine-unseen-tables (4344 cases)
+#   TableFact:  TabFact small-test (1998 cases)
+#
+# Environment variables:
+#   CLOVER_COT_LLM_CONFIG  Default model config path.
+#   CLOVER_DATASETS_ROOT   Datasets root (default <repo>/datasets).
+#   TABLEBENCH_ROOT        Override TableBench root.
+#   WIKITQ_ROOT            Override WikiTQ root.
+#   TABLEFACT_ROOT         Override TableFact root.
+#   WIKITQ_SPLIT           WikiTQ split (default pristine-unseen-tables).
+#   PYTHON_BIN             Python interpreter to use.
+#
+# Examples:
+#   bash benchmarks/run_pure_cot_baseline.sh tablebench
+#   bash benchmarks/run_pure_cot_baseline.sh tablefact
+#   bash benchmarks/run_pure_cot_baseline.sh wikitq \
+#     model_config/deepseek_remote_llm_config.json --sample-size 100
+#   bash benchmarks/run_pure_cot_baseline.sh tablebench \
+#     --max-cases 20 --max-workers 16
+# =============================================================================
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"

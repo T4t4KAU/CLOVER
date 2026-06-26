@@ -370,10 +370,23 @@ def _source_summary(source: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(safe_source.get("schema"), dict)
             else None
         )
+        row_samples = (
+            safe_source.get("schema", {}).get("row_samples")
+            if isinstance(safe_source.get("schema"), dict)
+            else None
+        )
         if columns:
             source_summary["schema"] = {"columns": columns}
+            if isinstance(row_samples, list) and row_samples:
+                source_summary["schema"]["row_samples"] = _source_row_samples(row_samples)
         summaries.append(json_ready(source_summary))
     return summaries
+
+
+def _source_row_samples(samples: list[Any]) -> list[Any]:
+    if len(samples) <= 8:
+        return samples
+    return samples[:5] + samples[-3:]
 
 
 def _table_evidence_payload(
@@ -395,6 +408,9 @@ def _table_evidence_payload(
             "ty": _answer_type(source),
             "ev": _table_evidence_observations(observation),
         }
+    actions = _current_actions_list(current_command)
+    if actions:
+        payload["cmd"] = actions
     repair = _table_repair_packet(
         source=source,
         observation=observation,
@@ -592,6 +608,7 @@ def _table_repair_packet(
         evidence=evidence,
     )
     packet: dict[str, Any] = {
+        "goal": _repair_goal(source),
         "fault": fault,
         "sql": sql,
         "failure": _repair_failure(failed=failed, evidence=evidence),
@@ -619,6 +636,9 @@ def _table_repair_packet(
     )
     if join_paths:
         packet["join_paths"] = join_paths
+    samples = _relevant_row_samples(source=source, sql=sql, evidence=evidence)
+    if samples:
+        packet["samples"] = samples
     if evidence:
         packet["evidence"] = evidence
     history = _compact_repair_history(source.get("mem"))
@@ -629,6 +649,22 @@ def _table_repair_packet(
         for key, value in packet.items()
         if value not in (None, "", [], {})
     }
+
+
+def _repair_goal(source: dict[str, Any]) -> dict[str, Any]:
+    if _is_table_batch_task(source):
+        return {"qs": _batch_questions(source)}
+    goal: dict[str, Any] = {}
+    question = source.get("question")
+    if isinstance(question, str) and question:
+        goal["q"] = question
+    answer = source.get("answer")
+    if isinstance(answer, dict):
+        for source_key, target_key in (("name", "answer"), ("type", "ty")):
+            value = answer.get(source_key)
+            if isinstance(value, str) and value:
+                goal[target_key] = value
+    return goal
 
 
 def _repair_sql(actions: list[dict[str, Any]], failed: Any) -> str:
@@ -717,6 +753,7 @@ def _repair_requirements(
         "do not repeat any prior SQL",
         "use only listed tables and columns",
         "use SQLite-compatible expressions",
+        "preserve the requested answer projection and type",
     ]
     if answer_type:
         requirements.append(f"produce answer type {answer_type}")
@@ -739,6 +776,10 @@ def _repair_requirements(
     elif fault == "join_semantic_error":
         requirements.append(
             "revise the join path or join keys using join candidates, schema, and value evidence; include a bridge table when candidates require one"
+        )
+    elif fault in {"empty_result", "predicate_mismatch", "predicate_semantic_error"}:
+        requirements.append(
+            "use evidence.column_values and samples to relax literals before changing projection"
         )
     return requirements
 
@@ -953,6 +994,18 @@ def _relevant_table_schema(
     tables = _table_columns_map(source)
     if not tables:
         return {}
+    mentioned = _repair_mentioned_columns(sql=sql, evidence=evidence)
+    output: dict[str, list[Any]] = {}
+    for table_id, columns in tables.items():
+        relevant = [column for column in columns if str(column) in mentioned]
+        if not relevant and len(columns) <= 12:
+            relevant = list(columns)
+        if relevant:
+            output[table_id] = relevant[:20]
+    return output
+
+
+def _repair_mentioned_columns(*, sql: str, evidence: dict[str, Any]) -> set[str]:
     mentioned = {
         match.group(1).replace('""', '"')
         for match in re.finditer(r'"((?:""|[^"])*)"', sql)
@@ -965,14 +1018,60 @@ def _relevant_table_schema(
         for candidate in mismatch.get("candidates", []):
             if isinstance(candidate, dict) and isinstance(candidate.get("col"), str):
                 mentioned.add(candidate["col"])
-    output: dict[str, list[Any]] = {}
-    for table_id, columns in tables.items():
-        relevant = [column for column in columns if str(column) in mentioned]
-        if not relevant and len(columns) <= 12:
-            relevant = list(columns)
-        if relevant:
-            output[table_id] = relevant[:20]
+    column_values = evidence.get("column_values")
+    if isinstance(column_values, dict):
+        mentioned.update(str(column) for column in column_values)
+    return mentioned
+
+
+def _relevant_row_samples(
+    *,
+    source: dict[str, Any],
+    sql: str,
+    evidence: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    mentioned = _repair_mentioned_columns(sql=sql, evidence=evidence)
+    output: dict[str, list[dict[str, Any]]] = {}
+    for item in source.get("sources", []):
+        if not isinstance(item, dict):
+            continue
+        table_id = item.get("id")
+        if not isinstance(table_id, str) or not table_id:
+            continue
+        schema = item.get("schema")
+        if not isinstance(schema, dict):
+            continue
+        columns = schema.get("columns")
+        row_samples = schema.get("row_samples")
+        if not isinstance(columns, list) or not isinstance(row_samples, list):
+            continue
+        selected_columns = [str(column) for column in columns if str(column) in mentioned]
+        if not selected_columns:
+            selected_columns = [str(column) for column in columns[:8]]
+        selected = set(selected_columns[:10])
+        compact_rows = []
+        for row in _bounded_row_sample_items(row_samples):
+            if not isinstance(row, dict):
+                continue
+            values = row.get("values")
+            if not isinstance(values, dict):
+                continue
+            kept_values = {
+                str(column): _short_repair_value(value, limit=80)
+                for column, value in values.items()
+                if str(column) in selected and value not in (None, "")
+            }
+            if kept_values:
+                compact_rows.append({"row": row.get("row"), "values": kept_values})
+        if compact_rows:
+            output[table_id] = compact_rows[:8]
     return output
+
+
+def _bounded_row_sample_items(samples: list[Any]) -> list[Any]:
+    if len(samples) <= 8:
+        return samples
+    return samples[:5] + samples[-3:]
 
 
 def _validated_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -1010,7 +1109,7 @@ def _validated_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     output: dict[str, Any] = {}
-    for key in ("route", "reason", "fault", "dialect", "input_rows", "output_rows"):
+    for key in ("route", "reason", "fault", "dialect", "sql", "input_rows", "output_rows"):
         value = evidence.get(key)
         if value is not None:
             output[key] = _short_repair_value(value)
@@ -1048,7 +1147,7 @@ def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
         root_values = mismatch.get("roots")
         if not isinstance(root_values, list):
             root_values = []
-        for root in root_values[:4]:
+        for root in root_values[:6]:
             if not isinstance(root, dict):
                 continue
             roots.append(
@@ -1056,11 +1155,11 @@ def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
                     "col": _short_repair_value(root.get("col")),
                     "sql_lit": [
                         _short_repair_value(item)
-                        for item in root.get("sql_lit", [])[:4]
+                        for item in root.get("sql_lit", [])[:8]
                     ],
                     "actual": [
                         _short_repair_value(item)
-                        for item in root.get("actual", [])[:4]
+                        for item in root.get("actual", [])[:8]
                     ],
                     "mismatch": _short_repair_value(root.get("mismatch")),
                 }
@@ -1071,7 +1170,7 @@ def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
         candidate_values = mismatch.get("candidates")
         if not isinstance(candidate_values, list):
             candidate_values = []
-        for candidate in candidate_values[:3]:
+        for candidate in candidate_values[:5]:
             if not isinstance(candidate, dict):
                 continue
             candidates.append(
@@ -1080,11 +1179,11 @@ def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
                     "literal": _short_repair_value(candidate.get("literal")),
                     "matches": [
                         _short_repair_value(item)
-                        for item in candidate.get("matches", [])[:3]
+                        for item in candidate.get("matches", [])[:5]
                     ],
                     "sample": [
                         _short_repair_value(item)
-                        for item in candidate.get("sample", [])[:3]
+                        for item in candidate.get("sample", [])[:5]
                     ],
                 }
             )
@@ -1106,9 +1205,9 @@ def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
                         else {}
                     ),
                 }
-                for item in items[:4]
+                for item in items[:8]
             ]
-            for column, items in list(column_values.items())[:4]
+            for column, items in list(column_values.items())[:8]
             if isinstance(items, list)
         }
     local_attempt = evidence.get("local_attempt")

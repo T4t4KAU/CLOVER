@@ -14,6 +14,11 @@ COMMON_DELIMITERS = {",", "\t", ";", "|"}
 _SAMPLE_MAX_ROWS = 5
 _SAMPLE_TAIL_ROWS = 2
 _SAMPLE_MAX_CHARS = 80
+_ROW_SAMPLE_MAX_ROWS = 18
+_ROW_SAMPLE_HEAD_ROWS = 10
+_ROW_SAMPLE_TAIL_ROWS = 4
+_ROW_SAMPLE_MAX_COLUMNS = 12
+_ROW_SAMPLE_MAX_CHARS = 60
 
 
 def extract_csv_schema(path: str | Path) -> dict[str, Any]:
@@ -68,6 +73,8 @@ def extract_csv_schema(path: str | Path) -> dict[str, Any]:
                 if truncated not in samples:
                     samples.append(truncated)
 
+        row_samples = _compact_row_samples(rows, fieldnames)
+
     columns_detail = []
     for col in fieldnames:
         entry: dict[str, Any] = {"name": col}
@@ -83,7 +90,49 @@ def extract_csv_schema(path: str | Path) -> dict[str, Any]:
         },
         "columns": list(fieldnames),
         "columns_detail": columns_detail,
+        "row_samples": row_samples,
     }
+
+
+def _compact_row_samples(
+    rows: list[dict[str, str]],
+    fieldnames: list[str],
+) -> list[dict[str, Any]]:
+    """Return bounded row-level examples for preserving column relationships.
+
+    Column-wise samples are compact, but they lose the row relationships needed
+    by table fact-checking statements such as "street X has milepost Y".  This
+    sample is intentionally small and character-limited so prompts gain those
+    relationships without serialising full benchmark tables.
+    """
+
+    row_count = len(rows)
+    if row_count == 0:
+        return []
+    if row_count <= _ROW_SAMPLE_MAX_ROWS:
+        sampled_indices = list(range(row_count))
+    else:
+        head_end = min(_ROW_SAMPLE_HEAD_ROWS, row_count)
+        tail_start = max(head_end, row_count - _ROW_SAMPLE_TAIL_ROWS)
+        sampled_indices = list(range(head_end)) + list(range(tail_start, row_count))
+    sampled_columns = list(fieldnames[:_ROW_SAMPLE_MAX_COLUMNS])
+    samples: list[dict[str, Any]] = []
+    for idx in sampled_indices:
+        row = rows[idx]
+        values = {
+            col: _truncate_cell(row.get(col, ""))
+            for col in sampled_columns
+            if row.get(col, "") not in (None, "")
+        }
+        samples.append({"row": idx, "values": values})
+    return samples
+
+
+def _truncate_cell(value: Any) -> str:
+    text = str(value).replace("\r", " ").replace("\n", " ").strip()
+    if len(text) <= _ROW_SAMPLE_MAX_CHARS:
+        return text
+    return text[: _ROW_SAMPLE_MAX_CHARS - 1].rstrip() + "…"
 
 
 def _detect_dialect(sample: str) -> csv.Dialect:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 import shutil
 import time
@@ -759,6 +760,85 @@ def _dsl_builder_total_tokens(record: dict[str, Any]) -> int:
     return int(usage.get("total_tokens", 0) or 0)
 
 
+def _max_input_tokens_in_obj(obj: Any) -> int:
+    """Recursively find the max input_tokens in any token_usage dict."""
+    result = 0
+    if isinstance(obj, dict):
+        tu = obj.get("token_usage")
+        if isinstance(tu, dict):
+            inp = int(tu.get("input_tokens") or 0)
+            if inp > result:
+                result = inp
+        for value in obj.values():
+            inner = _max_input_tokens_in_obj(value)
+            if inner > result:
+                result = inner
+    elif isinstance(obj, list):
+        for value in obj:
+            inner = _max_input_tokens_in_obj(value)
+            if inner > result:
+                result = inner
+    return result
+
+
+def _ctx_stats(values: list[int]) -> dict[str, Any]:
+    if not values:
+        return {"count": 0, "mean": 0.0, "max": 0, "min": 0, "sum": 0}
+    return {
+        "count": len(values),
+        "mean": sum(values) / len(values),
+        "max": max(values),
+        "min": min(values),
+        "sum": sum(values),
+    }
+
+
+def _per_case_max_context_tokens(
+    records: list[dict[str, Any]], output_dir: Path
+) -> dict[str, list[int]]:
+    """Extract per-case max input_tokens for remote and local models.
+
+    Reads decompose.json/synthesis.json for remote (supervisor) tokens and
+    execution.json for local SLM (edge agent) tokens. ``combined`` is the
+    element-wise max of remote and local per case.
+    """
+    remote_max: list[int] = []
+    local_max: list[int] = []
+    for record in records:
+        runtime_case_id = record.get("runtime_case_id")
+        if not runtime_case_id:
+            remote_max.append(0)
+            local_max.append(0)
+            continue
+        case_dir = output_dir / "cases" / runtime_case_id
+        r_max = 0
+        l_max = 0
+        for trace_file in ("decompose.json", "synthesis.json"):
+            trace_path = case_dir / trace_file
+            if not trace_path.exists():
+                continue
+            try:
+                trace_data = json.loads(trace_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            for round_item in trace_data.get("rounds", []) or []:
+                tu = round_item.get("token_usage") or {}
+                inp = int(tu.get("input_tokens") or 0)
+                if inp > r_max:
+                    r_max = inp
+        exec_path = case_dir / "execution.json"
+        if exec_path.exists():
+            try:
+                exec_data = json.loads(exec_path.read_text(encoding="utf-8"))
+                l_max = _max_input_tokens_in_obj(exec_data)
+            except Exception:
+                pass
+        remote_max.append(r_max)
+        local_max.append(l_max)
+    combined = [max(r, l) for r, l in zip(remote_max, local_max)]
+    return {"remote": remote_max, "local": local_max, "combined": combined}
+
+
 def build_summary(
     *,
     records: list[dict[str, Any]],
@@ -950,6 +1030,18 @@ def build_summary(
         "failure_cases": display_path(failure_cases),
     }
     summary["brief_summary"] = build_brief_summary(summary)
+    ctx_tokens = _per_case_max_context_tokens(records, output_dir)
+    summary["max_context_tokens_per_case"] = ctx_tokens
+    summary["max_context_tokens_stats"] = {
+        "remote": _ctx_stats(ctx_tokens["remote"]),
+        "local": _ctx_stats(ctx_tokens["local"]),
+        "combined": _ctx_stats(ctx_tokens["combined"]),
+    }
+    summary["avg_max_context_tokens_per_query"] = (
+        sum(ctx_tokens["combined"]) / len(ctx_tokens["combined"])
+        if ctx_tokens["combined"]
+        else 0.0
+    )
     return summary
 
 

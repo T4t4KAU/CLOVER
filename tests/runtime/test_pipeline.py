@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from clover.runtime.pipeline import (
     GroupedPriorityQueue,
@@ -9,6 +10,9 @@ from clover.runtime.pipeline import (
 )
 from clover.runtime.round_loop import RuntimeLoop
 from clover.runtime.table_reasoning.pipeline import _merge_batch_hints
+from clover.runtime.table_reasoning.pipeline import _normalize_answer_for_task
+from clover.runtime.table_reasoning.pipeline import _parse_single_table_command
+from clover.runtime.table_reasoning.pipeline import _RemoteDecomposeJob
 
 
 class GroupedPriorityQueueTest(unittest.TestCase):
@@ -151,6 +155,60 @@ class TableReasoningBatchHintsTest(unittest.TestCase):
                 }
             ],
         )
+
+
+class TableReasoningNormalizationTest(unittest.TestCase):
+    def test_first_released_numeric_range_uses_start_year(self) -> None:
+        task = SimpleNamespace(
+            answer_type="number",
+            question="in what date was the kodachrome 8mm daylight film first released?",
+        )
+
+        self.assertEqual(_normalize_answer_for_task(task, "1936–1962"), 1936)
+
+    def test_plain_numeric_answer_still_parses(self) -> None:
+        task = SimpleNamespace(answer_type="number", question="how many rows?")
+
+        self.assertEqual(_normalize_answer_for_task(task, "1,936"), 1936.0)
+
+    def test_boolean_answer_accepts_numeric_flags(self) -> None:
+        task = SimpleNamespace(answer_type="boolean", question="is the statement true?")
+
+        self.assertIs(_normalize_answer_for_task(task, 1), True)
+        self.assertIs(_normalize_answer_for_task(task, 0), False)
+
+
+class TableReasoningRemoteCommandTest(unittest.TestCase):
+    def test_promotes_answer_misplaced_inside_acts(self) -> None:
+        job = _RemoteDecomposeJob(
+            batch=[],
+            remote_dsl={"task_type": "table_reasoning.analyze"},
+        )
+
+        command = _parse_single_table_command(
+            '{"acts":[{"op":"answer","a":false}]}',
+            job,
+        )
+
+        self.assertEqual(command.op, "answer")
+        self.assertFalse(command.answer)
+
+    def test_ignores_inline_answer_when_sql_actions_are_present(self) -> None:
+        job = _RemoteDecomposeJob(
+            batch=[],
+            remote_dsl={"task_type": "table_reasoning.analyze"},
+        )
+
+        command = _parse_single_table_command(
+            '{"acts":['
+            '{"op":"sql","q":"SELECT COUNT(*) FROM table_1"},'
+            '{"op":"answer","a":true}'
+            "]}",
+            job,
+        )
+
+        self.assertEqual(command.op, "acts")
+        self.assertEqual(command.sqls, ("SELECT COUNT(*) FROM table_1",))
 
 
 class _FakePipelineHooks:

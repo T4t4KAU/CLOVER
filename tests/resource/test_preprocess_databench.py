@@ -143,6 +143,9 @@ class DatabenchPreprocessTest(unittest.TestCase):
 
         self.assertEqual(schema["shape"], {"rows": 2, "columns": 4})
         self.assertEqual(schema["columns"], ["rank", "name", "finalWorth", "bio"])
+        self.assertEqual(len(schema["row_samples"]), 2)
+        self.assertEqual(schema["row_samples"][0]["values"]["name"], "Alice")
+        self.assertIn("second line", schema["row_samples"][0]["values"]["bio"])
 
     def test_table_startup_preprocess_reuses_same_table_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -26,7 +26,7 @@ def analyze_predicate_mismatch(
     Returns a dict with:
         sql: rendered SQL fragment of the predicate
         roots: per-column mismatch analysis (sql_lit, actual, mismatch)
-        candidates: columns whose values partially match a literal (max 3)
+        candidates: columns whose values partially match a literal (max 5)
     """
     from clover.executor.node_views.table import _expr_sql
 
@@ -121,7 +121,7 @@ def find_candidate_columns(
     """Find columns whose values partially match any SQL literal.
 
     Used to suggest alternative columns when the predicate column is wrong.
-    Returns at most 3 candidates with top-3 sample values.
+    Returns at most 5 candidates with top-5 sample values.
     """
     all_literals: list[str] = []
     for col_lits in literals.values():
@@ -148,16 +148,16 @@ def find_candidate_columns(
             mask = col_values.str.contains(lit_clean, case=False, regex=False)
             if mask.any():
                 matched_literal = lit
-                matched_values = col_values[mask].drop_duplicates().head(3).tolist()
+                matched_values = col_values[mask].drop_duplicates().head(5).tolist()
                 break
         if matched_literal is not None:
             candidates.append({
                 "col": col_str,
                 "literal": matched_literal,
                 "matches": matched_values,
-                "sample": _top_values(frame[actual_col], limit=3),
+                "sample": _top_values(frame[actual_col], limit=5),
             })
-        if len(candidates) >= 3:
+        if len(candidates) >= 5:
             break
     return candidates
 

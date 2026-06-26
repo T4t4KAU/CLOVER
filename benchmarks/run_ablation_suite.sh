@@ -9,33 +9,32 @@ set -euo pipefail
 # Command-line arguments and environment variables still override these values.
 # =============================================================================
 USER_DATASET="wikitq"  # wikitq | tablebench | tablefact
-USER_PYTHON_BIN="python"  # Use the python from the active conda environment
-USER_EDGE_MODEL_PATH="/path/to/Qwen2.5-3B-Instruct"
-USER_DEEPSEEK_API_KEY=""
+USER_PYTHON_BIN="python"  # Use the python from the active conda/uv environment
+USER_EDGE1_MODEL_PATH="/root/autodl-tmp/models/Qwen2.5-3B-Instruct"
+USER_EDGE2_MODEL_PATH=""  # Empty: reuse EDGE1 model/server
 
 # vLLM settings for the local Edge model.
 USER_VLLM_GPUS="0"                 # Examples: "0" or "0,1"
 USER_VLLM_HOST="127.0.0.1"
 USER_VLLM_PORT="8000"
+USER_VLLM_EDGE2_PORT=""            # Empty + same model: share EDGE1 server
 USER_VLLM_TENSOR_PARALLEL_SIZE=""  # Empty: infer from USER_VLLM_GPUS
-USER_VLLM_MAX_MODEL_LEN=""         # Example: "16384"; empty: model default
-USER_VLLM_GPU_MEMORY_UTILIZATION="0.88"
+USER_VLLM_MAX_MODEL_LEN="8192"
+USER_VLLM_GPU_MEMORY_UTILIZATION="0.90"
 USER_VLLM_SERVER_ARGS=""           # Example: "--max-num-seqs 32"
 USER_VLLM_WARMUP="true"            # Warm up before each timed variant
 USER_EDGE_REVIEW_PROACTIVE="true"  # Review bounded semantic risks before static finalization
 
-# Cloud model configs and experiment output.
-USER_REMOTE_LLM_CONFIG="model_config/deepseek_remote_llm_config.json"
-USER_SYNTHESIZE_LLM_CONFIG="model_config/deepseek_remote_llm_config.json"
+# Local-only experiment output.
 USER_OUTPUT_ROOT=""                # Empty: benchmark/runs/<dataset>_ablation_<time>
 USER_ABLATION_SIZE="100"
 USER_ABLATION_SEED="20260619"
 USER_ABLATION_SELECTION_POLICY="edge_opportunity"  # representative | edge_opportunity | full_eval
 USER_ABLATION_FULL_EVAL="false"                    # true: use the full dataset (all eligible cases) instead of a fixed-size subset
-USER_MAX_RETRIES="1"
+USER_MAX_RETRIES="3"
 USER_VALIDATE_ONLY="false"         # true: validate settings/cases without running
 USER_VARIANT_ORDER=""              # Empty: deterministic shuffle using the seed
-                                    # Or: full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static
+                                    # Or: full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static,no_closure_checker
 
 # Optional explicit case IDs. Leave this empty to use the bundled fixed
 # 100-case manifest in benchmarks/ablation_cases.
@@ -54,13 +53,13 @@ cd "${REPO_ROOT}"
 usage() {
   cat <<'EOF'
 Usage:
-  bash benchmarks/run_ablation_suite.sh [DATASET] [EDGE_MODEL_PATH] [eval options...]
+  bash benchmarks/run_ablation_suite.sh [DATASET] [EDGE1_MODEL_PATH] [eval options...]
 
 DATASET:
   tablebench | wikitq | tablefact
 
-This runs ten variants on one fixed manifest:
-  full, all_edge, no_edge, static, no_contract, end_review, one_shot, cloud_finalize, static_only, no_static
+This runs eleven variants on one fixed manifest:
+  full, all_edge, no_edge, static, no_contract, end_review, one_shot, cloud_finalize, static_only, no_static, no_closure_checker
 
 The internal names map to:
   all_edge       = All-Edge Routing / w/o Static Fast Path
@@ -71,6 +70,7 @@ The internal names map to:
   cloud_finalize = force final synthesis through Cloud
   static_only    = w/o Edge Agent + w/o Cloud Replan/Synthesis (Static upper bound)
   no_static      = w/o Static Fast Path + w/o Static Finalization (Edge-only finalization)
+  no_closure_checker = w/o Observable Closure Checker (looser static finalization)
 
 Set CLOVER_ABLATION_FULL_EVAL=true to run on the full dataset instead of a
 fixed-size subset.
@@ -94,8 +94,9 @@ Useful environment variables:
   CLOVER_ABLATION_SELECTION_POLICY=edge_opportunity
   CLOVER_ABLATION_REGENERATE_MANIFEST=1
   CLOVER_ABLATION_OUTPUT_ROOT=/path/to/output
-  CLOVER_EDGE_MODEL_PATH=/path/to/model
-  CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static
+  CLOVER_EDGE1_MODEL_PATH=/path/to/model
+  CLOVER_EDGE2_MODEL_PATH=/path/to/model  # optional; empty/default reuses EDGE1
+  CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static,no_closure_checker
   CLOVER_VLLM_WARMUP=true
   CLOVER_EDGE_REVIEW_PROACTIVE=true
 EOF
@@ -127,14 +128,18 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-EDGE_MODEL_PATH="${CLOVER_EDGE_MODEL_PATH:-${USER_EDGE_MODEL_PATH}}"
+EDGE1_MODEL_PATH="${CLOVER_EDGE1_MODEL_PATH:-${CLOVER_EDGE_MODEL_PATH:-${USER_EDGE1_MODEL_PATH}}}"
 if [[ "${1:-}" != "" && "${1:-}" != --* ]]; then
-  EDGE_MODEL_PATH="$1"
+  EDGE1_MODEL_PATH="$1"
   shift
 fi
-if [[ -z "${EDGE_MODEL_PATH}" || "${EDGE_MODEL_PATH}" == /path/to/* ]]; then
-  echo "Set USER_EDGE_MODEL_PATH at the top of this script." >&2
-  echo "Alternatively pass EDGE_MODEL_PATH as the second argument." >&2
+EDGE2_MODEL_PATH="${CLOVER_EDGE2_MODEL_PATH:-${USER_EDGE2_MODEL_PATH:-}}"
+if [[ -z "${EDGE2_MODEL_PATH}" ]]; then
+  EDGE2_MODEL_PATH="${EDGE1_MODEL_PATH}"
+fi
+if [[ -z "${EDGE1_MODEL_PATH}" || "${EDGE1_MODEL_PATH}" == /path/to/* ]]; then
+  echo "Set USER_EDGE1_MODEL_PATH at the top of this script." >&2
+  echo "Alternatively pass EDGE1_MODEL_PATH as the second argument." >&2
   exit 2
 fi
 EXTRA_EVAL_ARGS=("$@")
@@ -148,38 +153,24 @@ if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
-DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-${USER_DEEPSEEK_API_KEY}}"
-if [[ -z "${DEEPSEEK_API_KEY}" ]]; then
-  echo "Set USER_DEEPSEEK_API_KEY at the top of this script." >&2
-  echo "Alternatively export DEEPSEEK_API_KEY before running." >&2
-  exit 2
-fi
-export DEEPSEEK_API_KEY
-
-export CLOVER_VLLM_GPUS="${CLOVER_VLLM_GPUS:-${USER_VLLM_GPUS}}"
 export CLOVER_VLLM_HOST="${CLOVER_VLLM_HOST:-${USER_VLLM_HOST}}"
-export CLOVER_VLLM_PORT="${CLOVER_VLLM_PORT:-${USER_VLLM_PORT}}"
-export CLOVER_VLLM_GPU_MEMORY_UTILIZATION="${CLOVER_VLLM_GPU_MEMORY_UTILIZATION:-${USER_VLLM_GPU_MEMORY_UTILIZATION}}"
+export CLOVER_EDGE1_GPUS="${CLOVER_EDGE1_GPUS:-${CLOVER_VLLM_GPUS:-${USER_VLLM_GPUS}}}"
+export CLOVER_EDGE1_PORT="${CLOVER_EDGE1_PORT:-${CLOVER_VLLM_PORT:-${USER_VLLM_PORT}}}"
+export CLOVER_EDGE1_GPU_MEM_UTIL="${CLOVER_EDGE1_GPU_MEM_UTIL:-${CLOVER_VLLM_GPU_MEMORY_UTILIZATION:-${USER_VLLM_GPU_MEMORY_UTILIZATION}}}"
 export CLOVER_VLLM_SERVER_ARGS="${CLOVER_VLLM_SERVER_ARGS:-${USER_VLLM_SERVER_ARGS}}"
 export CLOVER_VLLM_WARMUP="${CLOVER_VLLM_WARMUP:-${USER_VLLM_WARMUP}}"
 export CLOVER_EDGE_REVIEW_PROACTIVE="${CLOVER_EDGE_REVIEW_PROACTIVE:-${USER_EDGE_REVIEW_PROACTIVE}}"
 if [[ -n "${USER_VLLM_TENSOR_PARALLEL_SIZE}" \
-    && -z "${CLOVER_VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
-  export CLOVER_VLLM_TENSOR_PARALLEL_SIZE="${USER_VLLM_TENSOR_PARALLEL_SIZE}"
+    && -z "${CLOVER_EDGE1_TENSOR_PARALLEL_SIZE:-}" ]]; then
+  export CLOVER_EDGE1_TENSOR_PARALLEL_SIZE="${USER_VLLM_TENSOR_PARALLEL_SIZE}"
 fi
 if [[ -n "${USER_VLLM_MAX_MODEL_LEN}" \
-    && -z "${CLOVER_VLLM_MAX_MODEL_LEN:-}" ]]; then
-  export CLOVER_VLLM_MAX_MODEL_LEN="${USER_VLLM_MAX_MODEL_LEN}"
+    && -z "${CLOVER_EDGE1_MAX_MODEL_LEN:-}" ]]; then
+  export CLOVER_EDGE1_MAX_MODEL_LEN="${USER_VLLM_MAX_MODEL_LEN}"
 fi
-
-REMOTE_LLM_CONFIG="${CLOVER_REMOTE_LLM_CONFIG:-${USER_REMOTE_LLM_CONFIG}}"
-SYNTHESIZE_LLM_CONFIG="${CLOVER_SYNTHESIZE_LLM_CONFIG:-${USER_SYNTHESIZE_LLM_CONFIG}}"
-[[ "${REMOTE_LLM_CONFIG}" == /* ]] \
-  || REMOTE_LLM_CONFIG="${REPO_ROOT}/${REMOTE_LLM_CONFIG}"
-[[ "${SYNTHESIZE_LLM_CONFIG}" == /* ]] \
-  || SYNTHESIZE_LLM_CONFIG="${REPO_ROOT}/${SYNTHESIZE_LLM_CONFIG}"
-export CLOVER_REMOTE_LLM_CONFIG="${REMOTE_LLM_CONFIG}"
-export CLOVER_SYNTHESIZE_LLM_CONFIG="${SYNTHESIZE_LLM_CONFIG}"
+if [[ -n "${USER_VLLM_EDGE2_PORT}" && -z "${CLOVER_EDGE2_PORT:-}" ]]; then
+  export CLOVER_EDGE2_PORT="${USER_VLLM_EDGE2_PORT}"
+fi
 
 DATASETS_ROOT="${CLOVER_DATASETS_ROOT:-${REPO_ROOT}/datasets}"
 DATASET_ROOT="${DATASETS_ROOT}/${DATASET}"
@@ -360,9 +351,10 @@ case "$(printf '%s' "${VALIDATE_ONLY}" | tr '[:upper:]' '[:lower:]')" in
   1|true|yes|y|on)
     echo "Ablation settings are valid." >&2
     echo "  dataset: ${DATASET}" >&2
-    echo "  edge model: ${EDGE_MODEL_PATH}" >&2
-    echo "  GPUs: ${CLOVER_VLLM_GPUS}" >&2
-    echo "  vLLM endpoint: ${CLOVER_VLLM_HOST}:${CLOVER_VLLM_PORT}" >&2
+    echo "  edge1 model: ${EDGE1_MODEL_PATH}" >&2
+    echo "  edge2 model: ${EDGE2_MODEL_PATH}" >&2
+    echo "  GPUs: ${CLOVER_EDGE1_GPUS}" >&2
+    echo "  vLLM endpoint: ${CLOVER_VLLM_HOST}:${CLOVER_EDGE1_PORT}" >&2
     echo "  cases: ${#SELECTED_CASE_IDS[@]}" >&2
     echo "  full eval: ${FULL_EVAL}" >&2
     echo "  selection policy: ${SELECTION_POLICY}" >&2
@@ -400,6 +392,7 @@ run_variant() {
   local cloud_synthesis="$8"
   local static_fast_path="$9"
   local static_finalization="${10}"
+  local closure_checker="${11:-true}"
   local edge_review_mode="safe"
   if [[ "${edge_agent}" != "true" || "${terminal_edge_review}" != "true" ]]; then
     edge_review_mode="off"
@@ -417,16 +410,19 @@ run_variant() {
   CLOVER_ENABLE_CLOUD_SYNTHESIS="${cloud_synthesis}" \
   CLOVER_ENABLE_STATIC_FAST_PATH="${static_fast_path}" \
   CLOVER_ENABLE_STATIC_FINALIZATION="${static_finalization}" \
+  CLOVER_ENABLE_OBSERVABLE_CLOSURE_CHECKER="${closure_checker}" \
   CLOVER_EDGE_REVIEW_MODE="${edge_review_mode}" \
+  CLOVER_EDGE1_MODEL_PATH="${EDGE1_MODEL_PATH}" \
+  CLOVER_EDGE2_MODEL_PATH="${EDGE2_MODEL_PATH}" \
+  CLOVER_EDGE2_MAX_RETRIES="${MAX_RETRIES}" \
+  CLOVER_TABLEFACT_DIRECT_VERIFIER=false \
+  CLOVER_WIKITQ_DIRECT_ADJUDICATION=false \
   CLOVER_VLLM_PERSIST_SERVER=true \
-  CLOVER_VLLM_PID_FILE="${PID_FILE}" \
   OUTPUT_ROOT="${SUITE_ROOT}" \
   RUN_NAME="${DATASET}_${variant}" \
-  bash "${SCRIPT_DIR}/run_vllm_eval.sh" \
+  bash "${SCRIPT_DIR}/run_vllm_eval_clover.sh" \
     "${DATASET}" \
-    "${EDGE_MODEL_PATH}" \
     --validation-mode remote_supervisor \
-    --max-retries "${MAX_RETRIES}" \
     --seed "${SEED}" \
     "${CASE_ARGS[@]}" \
     "${EXTRA_EVAL_ARGS[@]}"
@@ -475,6 +471,12 @@ run_named_variant() {
       # Static is unavailable.
       run_variant no_static true true true true true true true false false
       ;;
+    no_closure_checker)
+      # Observable-closure checker ablation: keep all routing/finalization
+      # components enabled, but allow loose static finalization that does not
+      # require an unambiguous observed scalar. This measures the checker.
+      run_variant no_closure_checker true true true true true true true true true false
+      ;;
     *)
       echo "Unknown ablation variant: $1" >&2
       exit 2
@@ -511,6 +513,7 @@ variants = [
     "cloud_finalize",
     "static_only",
     "no_static",
+    "no_closure_checker",
 ]
 random.Random(int(sys.argv[1])).shuffle(variants)
 print("\n".join(variants))
@@ -532,6 +535,7 @@ expected = {
     "cloud_finalize",
     "static_only",
     "no_static",
+    "no_closure_checker",
 }
 actual = sys.argv[1:]
 if len(actual) != len(expected) or set(actual) != expected:
