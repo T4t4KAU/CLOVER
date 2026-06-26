@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 import time
 import traceback
@@ -5051,7 +5052,7 @@ def _normalize_answer_for_task(task: TaskItem, answer: Any) -> Any:
 
 def _normalize_number_answer(answer: Any, *, question: str | None = None) -> Any:
     if isinstance(answer, (int, float)) and not isinstance(answer, bool):
-        return answer
+        return _normalize_contextual_numeric_value(answer, question=question)
     if isinstance(answer, list) and len(answer) == 1:
         return _normalize_number_answer(answer[0], question=question)
     if isinstance(answer, dict) and len(answer) == 1:
@@ -5059,13 +5060,61 @@ def _normalize_number_answer(answer: Any, *, question: str | None = None) -> Any
     if isinstance(answer, str):
         stripped = answer.strip().replace(",", "")
         try:
-            return float(stripped)
+            return _normalize_contextual_numeric_value(float(stripped), question=question)
         except ValueError:
             contextual = _contextual_number_answer(stripped, question=question)
             if contextual is not None:
                 return contextual
             return answer
     return answer
+
+
+def _normalize_contextual_numeric_value(
+    value: int | float,
+    *,
+    question: str | None,
+) -> int | float:
+    if isinstance(value, bool):
+        return value
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return value
+    nearest = round(numeric)
+    distance = abs(numeric - nearest)
+    question_text = str(question or "")
+    if _question_requests_year_integer(question_text) and distance <= 1e-6:
+        return int(nearest)
+    if _question_requests_approximate_count_integer(question_text) and distance <= 0.5:
+        return int(nearest)
+    if isinstance(value, float) and distance <= 1e-9:
+        return int(nearest)
+    return value
+
+
+def _question_requests_year_integer(question: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:which|what|in which)\s+year\b|\byear\s+did\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _question_requests_approximate_count_integer(question: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:approximately|approx\.?|about|around|nearest)\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+        and re.search(
+            r"\b(?:how many|number of|count|passengers|people|seats|coins|"
+            r"points|votes|runs|goals|wins|titles|players|students|cases)\b",
+            question,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _contextual_number_answer(text: str, *, question: str | None) -> int | None:

@@ -34,6 +34,9 @@ For WikiTableQuestions-style string answers:
   and year), return a flat array of those values rather than a keyed object.
 For `who`/`which` questions, answer with the requested entity value, not the
 numeric/date evidence used to choose it.
+If evidence contains helper columns used only for ranking/sorting/filtering,
+omit those helper values from the final answer unless the question explicitly
+asks for them.
 If `ty` is boolean, `a` must be true or false:
 - If `ev` contains a boolean/0/1 answer column, copy that value directly.
 - If SQL returned rows specifically checking all constraints in the statement,
@@ -43,8 +46,14 @@ If `ty` is boolean, `a` must be true or false:
 - Do not invert supported evidence; e.g. evidence containing both requested
   values means true for a "both values are listed" statement.
 Return final answers only: no explanations, full sentences, or extra values.
+Never answer with a sentence such as "the answer is ..."; return only the
+atomic value(s) requested by the question.
+For approximate integer-count questions such as "approximately how many",
+round the final numeric answer to the nearest integer.
 For list answers, return a JSON array of atomic answer values. Do not collapse multiple rows into one sentence.
 For multi-column answers, return an array of row arrays, for example `[["name", 3], ["other", 4]]`, not `"name, 3; other, 4"`.
+If the question asks for a single entity plus a numeric difference/percentage,
+return both requested values and omit unrequested helper values.
 For date, numeric, and boolean values, preserve the table value exactly unless the question asks for a normalized form.
 If the evidence contains the requested values exactly, copy those values instead of paraphrasing them.
 When `repair` is present, treat it as the complete compact failure report:
@@ -67,6 +76,14 @@ Do not change columns based on a guessed candidate. A candidate column is usable
 For `relative_row_semantic_error`, implement the previous/next relation; do not return the anchor row.
 For `sql_execution_error`, replace unsupported syntax with SQLite-compatible SQL.
 For `predicate_mismatch`, make the smallest predicate change supported by actual values: prefer LOWER/LIKE, punctuation/date normalization, or a literal seen in `column_values` before changing columns.
+For temporal/range repairs, preserve arithmetic direction: `from A to B` means
+value_at_B - value_at_A; `increase compared to previous` means current -
+previous; `decrease compared to previous` means the most negative current -
+previous change. For top/bottom-N aggregate repairs, select the N rows in a CTE
+or derived table before aggregating them.
+For ranking repairs, preserve ties unless exactly one row is requested. For
+comparison repairs between two named entities, compute each entity's scalar
+value separately before subtracting/comparing.
 Preserve the requested answer projection and answer type.
 {% if force_final_answer %}
 No more execution rounds are available. Return an answer object using the current evidence. If it is insufficient, return `{"op":"answer","a":null}`. Do not return an action.

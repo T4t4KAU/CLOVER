@@ -13,7 +13,10 @@ from clover.executor.slm_dispatcher import LocalSlmSequenceDispatcher
 from clover.optimizer import SqlParseError
 from clover.runtime import TableReasoningCaseSpec, run_table_reasoning_system
 from clover.runtime.table_reasoning import pipeline as table_pipeline
-from clover.runtime.table_reasoning.pipeline import _load_json_object
+from clover.runtime.table_reasoning.pipeline import (
+    _load_json_object,
+    _normalize_number_answer,
+)
 
 
 class TableReasoningRuntimeTest(unittest.TestCase):
@@ -70,6 +73,26 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(
             payload,
             {"sql": "SELECT COUNT(*) AS answer_1 FROM table_1;"},
+        )
+
+    def test_number_normalizer_rounds_approximate_counts(self) -> None:
+        self.assertEqual(
+            _normalize_number_answer(
+                10115086.049999999,
+                question=(
+                    "Approximately how many passengers would the airport handle?"
+                ),
+            ),
+            10115086,
+        )
+
+    def test_number_normalizer_preserves_non_approximate_decimals(self) -> None:
+        self.assertEqual(
+            _normalize_number_answer(
+                48.25,
+                question="What is the average annual increase in points?",
+            ),
+            48.25,
         )
 
     def test_table_action_parser_accepts_wrapped_seed_sql(self) -> None:

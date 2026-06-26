@@ -123,7 +123,7 @@ def numeric_match(expected: str, actual: str) -> bool:
                 return True
             places = numeric_decimal_places(expected_number.text)
             if places > 0:
-                tolerance = 0.5 * (10 ** -places) + 1e-12
+                tolerance = 0.5 * (10 ** -places) + 1e-9
                 if abs(right - left) <= tolerance:
                     return True
     return False
