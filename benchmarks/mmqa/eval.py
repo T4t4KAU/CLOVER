@@ -169,7 +169,9 @@ def run_mmqa_eval(
                     profile_baseline=profile_baseline,
                     progress_bar=progress_bar,
                 )
-                system_profile = _compact_system_profile_for_merge(system_profile)
+                system_profile = _merge_system_profiles(
+                    [_compact_system_profile_for_merge(system_profile)]
+                )
         finally:
             if progress_bar is not None:
                 progress_bar.close()

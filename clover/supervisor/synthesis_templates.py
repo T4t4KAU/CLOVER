@@ -738,7 +738,7 @@ def _repair_failure(
     if isinstance(node, dict):
         failure["node"] = {
             key: node.get(key)
-            for key in ("id", "op")
+            for key in ("id", "op", "output", "dependency", "input")
             if node.get(key) is not None
         }
     reason = evidence.get("reason")
@@ -1121,7 +1121,7 @@ def _compact_repair_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
     if isinstance(node, dict):
         output["node"] = {
             key: _short_repair_value(node.get(key))
-            for key in ("id", "op")
+            for key in ("id", "op", "output", "dependency", "input")
             if node.get(key) is not None
         }
     error = evidence.get("error")
@@ -1462,7 +1462,7 @@ def _compact_result_payload(value: Any) -> Any:
         return {
             str(key): _compact_result_payload(item)
             for key, item in list(value.items())[:20]
-            if key not in {"op", "ask", "need"}
+            if key not in {"ask", "need"}
         }
     if isinstance(value, list):
         return [_compact_result_payload(item) for item in value[:20]]

@@ -344,6 +344,58 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(evidence["route"], "edge_repair")
         self.assertNotIn("candidates", evidence["mismatch"])
 
+    def test_table_repair_packet_preserves_local_dag_node_context(self) -> None:
+        sql = 'SELECT "name" FROM "swimmer" WHERE "meter_400" < "3:54"'
+        observation = {
+            "ok": True,
+            "answer": None,
+            "obs": [
+                {
+                    "i": 0,
+                    "op": "sql",
+                    "ok": True,
+                    "q": sql,
+                    "res": {"n": 0, "cols": ["name"], "rows": []},
+                    "ev": {
+                        "route": "cloud_replan",
+                        "reason": "predicate_not_found",
+                        "node": {
+                            "id": "N2",
+                            "op": "Filter",
+                            "output": "T2",
+                            "dependency": ["T1"],
+                            "input": [],
+                        },
+                        "input_rows": 13,
+                        "output_rows": 0,
+                    },
+                }
+            ],
+        }
+        local_dsl = {
+            **_local_dsl(),
+            "question": "Which swimmer completed the first 400 meters faster than 3:54?",
+            "sources": [
+                {
+                    "id": "swimmer",
+                    "type": "table",
+                    "schema": {"columns": ["name", "meter_400"]},
+                }
+            ],
+            "answer": {"name": "answer", "type": "list[string]"},
+        }
+
+        payload = synthesis_payload(
+            local_dsl=local_dsl,
+            observation=observation,
+            current_command={"answer": sql},
+        )
+
+        node = payload["repair"]["failure"]["node"]
+        self.assertEqual(node["output"], "T2")
+        self.assertEqual(node["dependency"], ["T1"])
+        self.assertEqual(payload["repair"]["evidence"]["node"]["op"], "Filter")
+
     def test_table_repair_history_drops_execution_trace_payloads(self) -> None:
         local_dsl = {
             **_local_dsl(),

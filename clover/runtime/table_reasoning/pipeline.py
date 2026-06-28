@@ -2604,6 +2604,10 @@ def _extract_filter_evidence_from_traces(
                 evidence = verdict.get("evidence")
                 if isinstance(evidence, dict):
                     packet.update(_compact_verification_evidence(evidence))
+                node = packet.setdefault("node", {})
+                if isinstance(node, dict):
+                    for key, value in _compact_trace_node(trace).items():
+                        node.setdefault(key, value)
 
         agent_loop = trace.get("agent_loop")
         if not isinstance(agent_loop, dict):
@@ -2636,7 +2640,75 @@ def _extract_filter_evidence_from_traces(
         packet["local_attempt"] = local_attempt
     if packet:
         packet["fault"] = _fault_from_verification_packet(packet)
-    return packet or None
+        return packet
+    return _generic_zero_row_filter_evidence(execution_traces)
+
+
+def _generic_zero_row_filter_evidence(
+    execution_traces: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Locate a Filter node that turns non-empty upstream rows into zero rows."""
+
+    rows_by_output: dict[str, int] = {}
+    for trace in execution_traces:
+        if not isinstance(trace, dict):
+            continue
+        output = trace.get("output")
+        rows = _trace_output_rows(trace)
+        if isinstance(output, str) and isinstance(rows, int):
+            rows_by_output[output] = rows
+
+    for trace in execution_traces:
+        if not isinstance(trace, dict) or trace.get("op") != "Filter":
+            continue
+        output_rows = _trace_output_rows(trace)
+        if output_rows != 0:
+            continue
+        dependencies = trace.get("dependency")
+        if not isinstance(dependencies, list):
+            dependencies = []
+        input_rows = max(
+            (
+                rows_by_output.get(dep, 0)
+                for dep in dependencies
+                if isinstance(dep, str)
+            ),
+            default=None,
+        )
+        if not isinstance(input_rows, int) or input_rows <= 0:
+            continue
+        return {
+            "route": "cloud_replan",
+            "reason": "predicate_not_found",
+            "fault": "predicate_mismatch",
+            "dialect": "sqlite",
+            "node": _compact_trace_node(trace),
+            "input_rows": input_rows,
+            "output_rows": output_rows,
+            "requirements": [
+                "repair the predicate or literal that made this Filter empty",
+                "use only real columns and table ids",
+                "preserve answer type",
+            ],
+        }
+    return None
+
+
+def _compact_trace_node(trace: dict[str, Any]) -> dict[str, Any]:
+    node: dict[str, Any] = {}
+    node_id = trace.get("node_id") or trace.get("id")
+    if node_id is not None:
+        node["id"] = node_id
+    for source_key, target_key in (
+        ("op", "op"),
+        ("output", "output"),
+        ("dependency", "dependency"),
+        ("input", "input"),
+    ):
+        value = trace.get(source_key)
+        if value is not None:
+            node[target_key] = json_ready(value)
+    return node
 
 
 def _extract_join_evidence_from_traces(
@@ -2681,10 +2753,7 @@ def _extract_join_evidence_from_traces(
             "reason": "join_zero_rows",
             "fault": "join_semantic_error",
             "dialect": "sqlite",
-            "node": {
-                "id": trace.get("node_id"),
-                "op": trace.get("op"),
-            },
+            "node": _compact_trace_node(trace),
             "input_rows": left_rows,
             "output_rows": output_rows,
             "join": {
@@ -4548,6 +4617,98 @@ def _maybe_add_table_direct_probe(
     return _observation_with_direct_probe(observation, probe)
 
 
+def _maybe_add_empty_execution_repair_evidence(
+    *,
+    task: TaskItem,
+    observation: Any,
+    current_command: Any,
+) -> Any:
+    """Turn an empty successful DAG execution into localized repair evidence."""
+
+    if not isinstance(observation, ExecutionResult) or not observation.ok:
+        return observation
+    if not _execution_answer_is_empty_for_task(task=task, result=observation):
+        return observation
+    evidence = _extract_join_evidence_from_traces(observation.traces)
+    if evidence is None:
+        evidence = _extract_filter_evidence_from_traces(observation.traces)
+    if evidence is None:
+        return observation
+    answer_value = _execution_answer_value_for_task(task=task, result=observation)
+    return {
+        "ok": True,
+        "answer": json_ready(observation.answer),
+        "outputs": {task.answer_key: json_ready(answer_value)},
+        "obs": [
+            {
+                "i": 0,
+                "op": "sql",
+                "ok": True,
+                "q": _current_command_sql_for_task(
+                    current_command=current_command,
+                    task=task,
+                ),
+                "res": _empty_repair_result_payload(answer_value),
+                "ev": evidence,
+            }
+        ],
+    }
+
+
+def _execution_answer_is_empty_for_task(
+    *,
+    task: TaskItem,
+    result: ExecutionResult,
+) -> bool:
+    value = _execution_answer_value_for_task(task=task, result=result)
+    if value is None:
+        return False
+    if isinstance(value, (list, tuple, set, dict, str)):
+        return len(value) == 0
+    return False
+
+
+def _execution_answer_value_for_task(
+    *,
+    task: TaskItem,
+    result: ExecutionResult,
+) -> Any:
+    if task.answer_key in result.outputs:
+        return result.outputs.get(task.answer_key)
+    if isinstance(result.answer, dict) and task.answer_key in result.answer:
+        return result.answer.get(task.answer_key)
+    return result.answer
+
+
+def _current_command_sql_for_task(
+    *,
+    current_command: Any,
+    task: TaskItem,
+) -> str:
+    if isinstance(current_command, dict):
+        value = current_command.get(task.answer_key)
+        if isinstance(value, str):
+            return value
+        for key in ("q", "sql", "seed"):
+            value = current_command.get(key)
+            if isinstance(value, str):
+                return value
+    if isinstance(current_command, str):
+        return current_command
+    return ""
+
+
+def _empty_repair_result_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        rows = value.get("rows")
+        if isinstance(rows, list):
+            return {"n": len(rows), "rows": json_ready(rows[:5])}
+    if isinstance(value, (list, tuple, set)):
+        rows = list(value)
+        return {"n": len(rows), "rows": json_ready(rows[:5])}
+    return {"n": 0, "rows": []}
+
+
 def _table_direct_probe_enabled(config: dict[str, Any] | None) -> bool:
     if not isinstance(config, dict):
         return False
@@ -4903,9 +5064,14 @@ def _run_supervisor_synthesis(
         current_command = _sql_map(batch)
         synthesis_observation = observation
         if len(batch) == 1:
+            synthesis_observation = _maybe_add_empty_execution_repair_evidence(
+                task=batch[0].task,
+                observation=synthesis_observation,
+                current_command=current_command,
+            )
             synthesis_observation = _maybe_add_table_direct_probe(
                 task=batch[0].task,
-                observation=observation,
+                observation=synthesis_observation,
                 current_command=current_command,
                 supervisor=supervisor,
                 local_slm_config=local_slm_config,

@@ -2366,6 +2366,35 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
             "Rnd",
         )
 
+    def test_extract_merges_trace_node_context_into_verdict(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _extract_filter_evidence_from_traces,
+        )
+
+        traces = [
+            {
+                "node_id": "N1",
+                "op": "Filter",
+                "output": "T1",
+                "dependency": ["T0"],
+                "input": [],
+                "verification_verdict": {
+                    "route": "cloud_replan",
+                    "reason": "predicate_not_found",
+                    "evidence": {
+                        "node": {"id": "N1", "op": "Filter"},
+                        "input_rows": 8,
+                        "output_rows": 0,
+                    },
+                },
+            }
+        ]
+
+        result = _extract_filter_evidence_from_traces(traces)
+
+        self.assertEqual(result["node"]["output"], "T1")
+        self.assertEqual(result["node"]["dependency"], ["T0"])
+
     def test_extract_records_failed_local_attempt(self) -> None:
         from clover.runtime.table_reasoning.pipeline import (
             _extract_filter_evidence_from_traces,
@@ -2431,7 +2460,10 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         self.assertEqual(result["route"], "cloud_replan")
         self.assertEqual(result["reason"], "join_zero_rows")
         self.assertEqual(result["fault"], "join_semantic_error")
-        self.assertEqual(result["node"], {"id": "N1", "op": "Join"})
+        self.assertEqual(result["node"]["id"], "N1")
+        self.assertEqual(result["node"]["op"], "Join")
+        self.assertEqual(result["node"]["output"], "T1")
+        self.assertEqual(result["node"]["dependency"], ["T0"])
         self.assertEqual(result["input_rows"], 3)
         self.assertEqual(result["output_rows"], 0)
         self.assertEqual(result["join"]["right_sources"], ["election"])
@@ -2497,6 +2529,58 @@ class FilterEvidenceExtractionTest(unittest.TestCase):
         }
 
         self.assertTrue(_observation_requests_cloud_replan(observation))
+
+    def test_empty_execution_result_becomes_localized_repair_observation(self) -> None:
+        from clover.runtime.table_reasoning.pipeline import (
+            _maybe_add_empty_execution_repair_evidence,
+        )
+
+        task = SimpleNamespace(answer_key="answer_1")
+        result = ExecutionResult(
+            ok=True,
+            answer={"answer_1": []},
+            outputs={"answer_1": []},
+            traces=[
+                {
+                    "node_id": "N0",
+                    "op": "Scan",
+                    "output": "T0",
+                    "output_summary": {"type": "table", "rows": 5},
+                },
+                {
+                    "node_id": "N1",
+                    "op": "Filter",
+                    "output": "T1",
+                    "dependency": ["T0"],
+                    "input": [],
+                    "output_summary": {"type": "table", "rows": 0},
+                },
+                {
+                    "node_id": "N2",
+                    "op": "FormatAnswer",
+                    "output": "answer_1",
+                    "dependency": ["T1"],
+                    "output_summary": {"type": "list", "length": 0},
+                },
+            ],
+            output_summaries={},
+        )
+
+        observation = _maybe_add_empty_execution_repair_evidence(
+            task=task,  # type: ignore[arg-type]
+            observation=result,
+            current_command={"answer_1": "SELECT name FROM swimmer WHERE event_id = 3"},
+        )
+
+        self.assertIsInstance(observation, dict)
+        item = observation["obs"][0]
+        self.assertEqual(item["q"], "SELECT name FROM swimmer WHERE event_id = 3")
+        self.assertEqual(item["ev"]["route"], "cloud_replan")
+        self.assertEqual(item["ev"]["reason"], "predicate_not_found")
+        self.assertEqual(item["ev"]["node"]["id"], "N1")
+        self.assertEqual(item["ev"]["node"]["dependency"], ["T0"])
+        self.assertEqual(item["ev"]["input_rows"], 5)
+        self.assertEqual(item["ev"]["output_rows"], 0)
 
     def test_extract_caps_to_top_8_values_per_column(self) -> None:
         from clover.runtime.table_reasoning.pipeline import (
