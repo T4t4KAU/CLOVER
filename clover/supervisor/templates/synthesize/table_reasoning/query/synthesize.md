@@ -21,6 +21,15 @@ Rules: JSON only. Answer if `ev` supports the answer; else ask exactly one actio
 Never return `acts`, `actions`, `sqls`, arrays, or multiple SQL statements.
 Never output placeholders, angle-bracket text, or ellipsis characters; output
 executable SQL only.
+If `direct_probe` is present, treat it as advisory semantic self-check evidence:
+- It must never automatically override executable evidence.
+- If `direct_probe.verdict` is `agree` and `ev` supports the same answer, return
+  the answer.
+- If `direct_probe.verdict` is `disagree` with high or medium confidence, prefer
+  one corrected SQL action that tests the reported `issue`/`repair_hint` unless
+  current `ev` already gives direct row-level support for the final answer.
+- If `ev` is insufficient but `direct_probe` has concrete row/cell evidence and
+  a high-confidence answer, you may answer from that evidence; otherwise replan.
 If several evidence checks are needed, fold them into one SELECT using joins,
 CTEs, derived tables, aggregates, or `EXISTS`.
 Use sql for exact data. Use analyze only when SQL cannot express the statistic.

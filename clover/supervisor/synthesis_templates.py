@@ -413,6 +413,8 @@ def _table_evidence_payload(
     actions = _current_actions_list(current_command)
     if actions:
         payload["cmd"] = actions
+    if isinstance(observation, dict) and isinstance(observation.get("direct_probe"), dict):
+        payload["direct_probe"] = _compact_result_payload(observation.get("direct_probe"))
     repair = _table_repair_packet(
         source=source,
         observation=observation,

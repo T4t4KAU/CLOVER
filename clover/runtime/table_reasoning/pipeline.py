@@ -84,6 +84,7 @@ from clover.supervisor import (
     SupervisorAgent,
     SupervisorDecision,
     extract_token_usage,
+    generate_remote_text,
 )
 
 VALIDATION_NONE = "none"
@@ -101,7 +102,10 @@ _DECOMPOSE_TRACE_KEY = "decompose_trace"
 _SYNTHESIS_TRACE_KEY = "synthesis_trace"
 _EDGE_REVIEW_TRACE_KEY = "edge_review_trace"
 _AGENT_LOOP_TRACE_KEY = "agent_loop_trace"
+_TABLE_DIRECT_PROBE_TRACE_KEY = "table_direct_probe_trace"
 _CACHE_MISSING = object()
+_DEFAULT_TABLE_DIRECT_PROBE_MAX_TOKENS = 384
+_DEFAULT_TABLE_DIRECT_TABLE_CHAR_LIMIT = 20000
 
 # Maps normalised SQL text to the (evidence_key, DataFrame) produced by a
 # preceding sql action within the same action group. Used to avoid
@@ -4511,6 +4515,373 @@ def _execution_answer_map(
     return answer_map
 
 
+def _maybe_add_table_direct_probe(
+    *,
+    task: TaskItem,
+    observation: Any,
+    current_command: Any,
+    supervisor: SupervisorAgent,
+    local_slm_config: dict[str, Any] | None,
+    profiler: PipelineProfiler,
+) -> Any:
+    """Attach an integrated table semantic probe to synthesis evidence.
+
+    The probe is deliberately not a post-hoc answer override. It is a compact
+    semantic self-check supplied to the normal Supervisor synthesis prompt so
+    the Supervisor still chooses between ``op=answer`` and ``op=sql``.
+    """
+
+    if not _table_direct_probe_enabled(local_slm_config):
+        return observation
+    if not _table_direct_probe_applicable(task):
+        return observation
+    probe = _run_table_direct_probe(
+        task=task,
+        observation=observation,
+        current_command=current_command,
+        supervisor=supervisor,
+        local_slm_config=local_slm_config,
+        profiler=profiler,
+    )
+    if not probe:
+        return observation
+    return _observation_with_direct_probe(observation, probe)
+
+
+def _table_direct_probe_enabled(config: dict[str, Any] | None) -> bool:
+    if not isinstance(config, dict):
+        return False
+    mode = str(config.get("table_direct_probe_mode") or "").strip().lower()
+    if mode in {"off", "false", "disabled", "none"}:
+        return False
+    if mode in {"runtime", "integrated", "inline", "probe"}:
+        return True
+    for key in ("enable_table_direct_probe", "table_direct_probe"):
+        if key in config:
+            return bool(config.get(key))
+    return False
+
+
+def _table_direct_probe_applicable(task: TaskItem) -> bool:
+    sources = task.local_dsl.get("sources")
+    if isinstance(sources, list) and len(sources) != 1:
+        return False
+    return Path(task.source_file).is_file()
+
+
+def _run_table_direct_probe(
+    *,
+    task: TaskItem,
+    observation: Any,
+    current_command: Any,
+    supervisor: SupervisorAgent,
+    local_slm_config: dict[str, Any] | None,
+    profiler: PipelineProfiler,
+) -> dict[str, Any] | None:
+    table_csv, table_chars, truncated = _table_direct_probe_table_csv(
+        task,
+        local_slm_config=local_slm_config,
+    )
+    if not table_csv:
+        return None
+    prompt = _table_direct_probe_prompt(
+        task=task,
+        table_csv=table_csv,
+        table_truncated=truncated,
+        observation=observation,
+        current_command=current_command,
+    )
+    remote_config = _table_direct_probe_config(
+        supervisor=supervisor,
+        local_slm_config=local_slm_config,
+    )
+    client = (
+        supervisor.synthesize_client
+        if supervisor.synthesize_config is not None
+        else supervisor.client
+    )
+    trace: dict[str, Any] = {
+        "mode": "runtime_integrated",
+        "table_chars": table_chars,
+        "table_truncated": truncated,
+        "prompt_chars": len(prompt),
+        "parsed": None,
+        "raw_output_preview": None,
+        "token_usage": {},
+        "error": None,
+    }
+    try:
+        with profiler.measure("table_direct_probe", items=1):
+            result = generate_remote_text(
+                prompt=prompt,
+                remote_config=remote_config,
+                client=client,
+            )
+        profiler.increment("table_direct_probe_calls")
+        _record_remote_token_usage(
+            profiler,
+            stage_name="table_direct_probe",
+            response_payload=result.response_payload,
+        )
+        parsed = _parse_table_direct_probe_json(result.text)
+        public_probe = _table_direct_probe_public(parsed)
+        trace.update(
+            {
+                "parsed": public_probe,
+                "raw_output_preview": _truncate_text(result.text, 1200),
+                "token_usage": extract_token_usage(result.response_payload),
+                "response_id": result.response_id,
+                "response_status": result.response_status,
+                "api_type": result.api_type,
+            }
+        )
+        _record_table_direct_probe_trace(task, trace)
+        return public_probe
+    except Exception as exc:  # noqa: BLE001 - direct probe must not break runtime.
+        profiler.increment("table_direct_probe_failures")
+        trace["error"] = _error_payload(exc)
+        _record_table_direct_probe_trace(task, trace)
+        return None
+
+
+def _table_direct_probe_table_csv(
+    task: TaskItem,
+    *,
+    local_slm_config: dict[str, Any] | None,
+) -> tuple[str | None, int, bool]:
+    limit = _config_int(
+        local_slm_config,
+        "table_direct_probe_table_char_limit",
+        default=_DEFAULT_TABLE_DIRECT_TABLE_CHAR_LIMIT,
+    )
+    path = Path(task.source_file)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None, 0, False
+    if limit <= 0 or len(text) <= limit:
+        return text, len(text), False
+    return text[:limit].rstrip() + "\n...[table truncated]", len(text), True
+
+
+def _table_direct_probe_config(
+    *,
+    supervisor: SupervisorAgent,
+    local_slm_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    selected = dict(supervisor.synthesize_config or supervisor.remote_config)
+    selected["temperature"] = _config_float(
+        local_slm_config,
+        "table_direct_probe_temperature",
+        default=0.0,
+    )
+    selected["top_p"] = _config_float(
+        local_slm_config,
+        "table_direct_probe_top_p",
+        default=1.0,
+    )
+    max_tokens = _config_int(
+        local_slm_config,
+        "table_direct_probe_max_tokens",
+        default=_DEFAULT_TABLE_DIRECT_PROBE_MAX_TOKENS,
+    )
+    if selected.get("api_type", "chat_completions") == "responses":
+        selected["max_output_tokens"] = max_tokens
+    else:
+        selected["max_tokens"] = max_tokens
+    return selected
+
+
+def _table_direct_probe_prompt(
+    *,
+    task: TaskItem,
+    table_csv: str,
+    table_truncated: bool,
+    observation: Any,
+    current_command: Any,
+) -> str:
+    candidate = _direct_probe_candidate_answer(task=task, observation=observation)
+    evidence = _direct_probe_evidence_summary(task=task, observation=observation)
+    return (
+        "You are an integrated semantic probe inside CLOVER for table reasoning. "
+        "Use only the CSV table and the question, but also inspect the current "
+        "CLOVER candidate. Your output is advisory evidence "
+        "for the Supervisor; do not add explanation outside JSON.\n"
+        "Return exactly one JSON object with this schema:\n"
+        '{"answer": VALUE_OR_NULL, "confidence": "high|medium|low", '
+        '"verdict": "agree|disagree|uncertain", '
+        '"issue": "none|wrong_column|missing_filter|wrong_aggregation|wrong_order|'
+        'type_mismatch|insufficient_evidence|other", '
+        '"evidence": "short row/cell evidence", "repair_hint": "short hint"}\n'
+        "Guidelines: compute counts, comparisons, dates, max/min, filters, and "
+        "row order exactly. If the table is truncated or the evidence is not "
+        "enough, use low confidence and verdict uncertain. Candidate SQL/evidence "
+        "may be wrong; mark disagree only when the table gives concrete contrary "
+        "evidence. Preserve table cell text for names.\n\n"
+        f"Table truncated: {json.dumps(table_truncated)}\n"
+        f"Table CSV:\n{table_csv}\n\n"
+        f"Question: {task.question}\n"
+        f"Answer type: {task.answer_type}\n"
+        f"Current command: {json.dumps(json_ready(current_command), ensure_ascii=False)}\n"
+        f"CLOVER candidate answer: {json.dumps(json_ready(candidate), ensure_ascii=False)}\n"
+        "CLOVER compact evidence: "
+        f"{json.dumps(json_ready(evidence), ensure_ascii=False)}"
+    )
+
+
+def _direct_probe_candidate_answer(*, task: TaskItem, observation: Any) -> Any:
+    if isinstance(observation, ExecutionResult):
+        if task.answer_key in observation.outputs:
+            return observation.outputs.get(task.answer_key)
+        return observation.answer
+    if isinstance(observation, dict):
+        if task.answer_key in observation:
+            return observation.get(task.answer_key)
+        outputs = observation.get("outputs")
+        if isinstance(outputs, dict) and task.answer_key in outputs:
+            return outputs.get(task.answer_key)
+        if observation.get("answer") is not None:
+            return observation.get("answer")
+        obs = observation.get("obs")
+        if isinstance(obs, list) and len(obs) == 1:
+            item = obs[0]
+            if isinstance(item, dict):
+                for key in ("answer", "res", "ev"):
+                    if key in item:
+                        return item.get(key)
+    return None
+
+
+def _direct_probe_evidence_summary(*, task: TaskItem, observation: Any) -> Any:
+    if isinstance(observation, ExecutionResult):
+        outputs: dict[str, Any] = {}
+        if task.answer_key in observation.outputs:
+            outputs[task.answer_key] = observation.outputs.get(task.answer_key)
+        elif observation.outputs:
+            for key, value in list(observation.outputs.items())[:3]:
+                outputs[str(key)] = value
+        payload: dict[str, Any] = {
+            "ok": observation.ok,
+            "answer": observation.answer,
+            "outputs": outputs,
+        }
+        if observation.error:
+            payload["error"] = observation.error
+        return _compact_direct_probe_value(payload)
+    return _compact_direct_probe_value(observation)
+
+
+def _compact_direct_probe_value(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        return _truncate_text(json.dumps(json_ready(value), ensure_ascii=False), 500)
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in list(value.items())[:20]:
+            if key in {"prompt", "raw_output", "traces"}:
+                continue
+            output[str(key)] = _compact_direct_probe_value(item, depth=depth + 1)
+        return output
+    if isinstance(value, list):
+        return [_compact_direct_probe_value(item, depth=depth + 1) for item in value[:8]]
+    if isinstance(value, str):
+        return _truncate_text(value, 800)
+    return json_ready(value)
+
+
+def _parse_table_direct_probe_json(text: str) -> dict[str, Any] | None:
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _table_direct_probe_public(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "answer": None,
+            "confidence": "low",
+            "verdict": "uncertain",
+            "issue": "parse_error",
+            "evidence": "",
+            "repair_hint": "",
+        }
+    confidence = str(payload.get("confidence") or "medium").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+    verdict = str(payload.get("verdict") or "uncertain").strip().lower()
+    if verdict not in {"agree", "disagree", "uncertain"}:
+        verdict = "uncertain"
+    issue = str(payload.get("issue") or "none").strip().lower() or "none"
+    return {
+        "ok": True,
+        "answer": json_ready(payload.get("answer")),
+        "confidence": confidence,
+        "verdict": verdict,
+        "issue": _truncate_text(issue, 80),
+        "evidence": _truncate_text(str(payload.get("evidence") or ""), 500),
+        "repair_hint": _truncate_text(str(payload.get("repair_hint") or ""), 300),
+    }
+
+
+def _observation_with_direct_probe(observation: Any, probe: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(observation, ExecutionResult):
+        payload = observation.to_dict(include_outputs=True)
+    elif isinstance(observation, dict):
+        payload = copy.deepcopy(observation)
+    else:
+        payload = {"ok": True, "answer": json_ready(observation)}
+    payload["direct_probe"] = json_ready(probe)
+    return payload
+
+
+def _record_table_direct_probe_trace(
+    task: TaskItem,
+    trace: dict[str, Any],
+) -> None:
+    rounds = task.metadata.setdefault(_TABLE_DIRECT_PROBE_TRACE_KEY, [])
+    if isinstance(rounds, list):
+        rounds.append(json_ready(trace))
+
+
+def _config_int(
+    config: dict[str, Any] | None,
+    key: str,
+    *,
+    default: int,
+) -> int:
+    if not isinstance(config, dict):
+        return default
+    try:
+        return int(config.get(key, default) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _config_float(
+    config: dict[str, Any] | None,
+    key: str,
+    *,
+    default: float,
+) -> float:
+    if not isinstance(config, dict):
+        return default
+    try:
+        return float(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit].rstrip() + "...<truncated>"
+
+
 def _run_supervisor_synthesis(
     *,
     batch: list[LogicDagItem],
@@ -4529,12 +4900,23 @@ def _run_supervisor_synthesis(
         item.task.status = TASK_SUPERVISOR_REVIEW
     try:
         observation = execution_result
+        current_command = _sql_map(batch)
+        synthesis_observation = observation
+        if len(batch) == 1:
+            synthesis_observation = _maybe_add_table_direct_probe(
+                task=batch[0].task,
+                observation=observation,
+                current_command=current_command,
+                supervisor=supervisor,
+                local_slm_config=local_slm_config,
+                profiler=profiler,
+            )
         with profiler.measure("supervisor_synthesis", items=len(batch)):
             supervisor_result = supervisor.synthesize(
                 local_dsl=_synthesis_local_dsl(batch),
                 logic_dag=logic_dag,
-                observation=observation,
-                current_command=_sql_map(batch),
+                observation=synthesis_observation,
+                current_command=current_command,
                 force_final_answer=(
                     not allow_replan or all(item.task.retry_count >= max_retries for item in batch)
                 ),
@@ -4637,6 +5019,7 @@ def _run_supervisor_action_reports_batch(
                 supervisor=supervisor,
                 max_retries=max_retries,
                 allow_replan=allow_replan,
+                local_slm_config=local_slm_config,
             )
             for index, item, observation in runnable
         ]
@@ -4652,6 +5035,7 @@ def _run_supervisor_action_reports_batch(
                     supervisor=supervisor,
                     max_retries=max_retries,
                     allow_replan=allow_replan,
+                    local_slm_config=local_slm_config,
                 )
                 for index, item, observation in runnable
             ]
@@ -4737,15 +5121,25 @@ def _run_one_supervisor_action_report_for_batch(
     supervisor: SupervisorAgent,
     max_retries: int,
     allow_replan: bool,
+    local_slm_config: dict[str, Any] | None,
 ) -> _ActionReportRunResult:
     local_profiler = PipelineProfiler()
     try:
+        current_command = _action_command_payload(item.actions)
+        synthesis_observation = _maybe_add_table_direct_probe(
+            task=item.task,
+            observation=observation,
+            current_command=current_command,
+            supervisor=supervisor,
+            local_slm_config=local_slm_config,
+            profiler=local_profiler,
+        )
         with local_profiler.measure("supervisor_synthesis", items=1):
             supervisor_result = supervisor.synthesize(
                 local_dsl=_query_local_dsl(item.task),
                 logic_dag={"task_type": item.task.task_type, "query_plans": []},
-                observation=observation,
-                current_command=_action_command_payload(item.actions),
+                observation=synthesis_observation,
+                current_command=current_command,
                 force_final_answer=(not allow_replan or item.task.retry_count >= max_retries),
             )
             local_profiler.increment("supervisor_synthesis_calls")
@@ -4759,7 +5153,7 @@ def _run_one_supervisor_action_report_for_batch(
         return _ActionReportRunResult(
             order_index=order_index,
             item=item,
-            observation=observation,
+            observation=synthesis_observation,
             supervisor_result=supervisor_result,
             profiler=local_profiler,
         )
@@ -5564,7 +5958,8 @@ def _profile_with_summary(
     summary = {
         "validation_mode": validation_mode,
         "remote_calls": profile.get("counters", {}).get("supervisor_decompose_calls", 0)
-        + profile.get("counters", {}).get("supervisor_synthesis_calls", 0),
+        + profile.get("counters", {}).get("supervisor_synthesis_calls", 0)
+        + profile.get("counters", {}).get("table_direct_probe_calls", 0),
         "local_slm_calls": profile.get("counters", {}).get("local_slm_calls", 0),
         "edge_local_review_calls": profile.get("counters", {}).get(
             "edge_local_review_calls",
@@ -5588,6 +5983,10 @@ def _profile_with_summary(
         "supervisor_synthesis_token_usage": _remote_stage_token_usage_summary(
             profile.get("counters", {}),
             "supervisor_synthesis",
+        ),
+        "table_direct_probe_token_usage": _remote_stage_token_usage_summary(
+            profile.get("counters", {}),
+            "table_direct_probe",
         ),
         "local_slm_token_usage": _local_slm_token_usage_summary(profile.get("counters", {})),
     }

@@ -110,6 +110,28 @@ class SupervisorTest(unittest.TestCase):
         self.assertNotIn("hints", json.dumps(payload))
         self.assertNotIn("/home/user/private/table.csv", json.dumps(payload))
 
+    def test_table_synthesis_payload_keeps_generic_direct_probe(self) -> None:
+        payload = synthesis_payload(
+            local_dsl=_local_dsl(),
+            observation={
+                "ok": True,
+                "answer": 2,
+                "outputs": {"answer": 2},
+                "direct_probe": {
+                    "answer": 2,
+                    "confidence": "high",
+                    "verdict": "agree",
+                    "issue": "none",
+                    "evidence": "two rows in the table",
+                    "repair_hint": "",
+                },
+            },
+        )
+
+        self.assertEqual(payload["ev"][0]["answer"], 2)
+        self.assertEqual(payload["direct_probe"]["verdict"], "agree")
+        self.assertEqual(payload["direct_probe"]["confidence"], "high")
+
     def test_table_synthesis_payload_builds_compact_repair_packet(self) -> None:
         observation = {
             "ok": True,

@@ -121,6 +121,18 @@ class TableReasoningRuntimeTest(unittest.TestCase):
                 }
             )
 
+    def test_table_direct_probe_uses_generic_feature_flag_only(self) -> None:
+        self.assertTrue(
+            table_pipeline._table_direct_probe_enabled(  # noqa: SLF001
+                {"enable_table_direct_probe": True}
+            )
+        )
+        self.assertFalse(
+            table_pipeline._table_direct_probe_enabled(  # noqa: SLF001
+                {"table_direct_probe_mode": "off"}
+            )
+        )
+
     def test_table_action_parser_rejects_batch_protocol_keys(self) -> None:
         for payload in (
             {"sqls": ['SELECT "x" FROM "table_1";']},
@@ -587,6 +599,62 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         diagnostics = case_result.metadata["table_diagnostics"]
         self.assertEqual(diagnostics[-1]["stage"], "sql_execution")
         self.assertIs(diagnostics[-1]["finalization"]["bypass_synthesis"], True)
+
+    def test_table_direct_probe_is_integrated_into_supervisor_synthesis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = _write_people_table(Path(tmpdir))
+            client = _StatefulChatClient(
+                [
+                    json.dumps(
+                        {
+                            "answer": "United States",
+                            "confidence": "high",
+                            "verdict": "agree",
+                            "issue": "none",
+                            "evidence": "row with finalWorth 200 has country United States",
+                            "repair_hint": "",
+                        }
+                    ),
+                    json.dumps({"op": "answer", "a": "United States"}),
+                ],
+            )
+
+            result = run_table_reasoning_system(
+                case_specs=[
+                    TableReasoningCaseSpec(
+                        case_id="case_1",
+                        base_dir=Path(tmpdir),
+                        task_dsl={
+                            "task_type": "table_reasoning.query",
+                            "question": (
+                                "What is the country of the person with the highest net worth?"
+                            ),
+                            "sources": [{"type": "table", "file": str(table_path)}],
+                            "answer": {"name": "answer", "type": "string"},
+                            "sql": _country_sql("answer_1"),
+                        },
+                    )
+                ],
+                remote_config={"api_type": "chat_completions", "model": "fake-model"},
+                local_slm_config={
+                    "enable_static_finalization": False,
+                    "edge_review_mode": "off",
+                    "enable_table_direct_probe": True,
+                },
+                validation_mode="remote_supervisor",
+                client=client,
+            )
+
+        self.assertEqual(result.case_results[0].answer, "United States")
+        self.assertEqual(result.profile["counters"]["table_direct_probe_calls"], 1)
+        self.assertEqual(result.profile["counters"]["supervisor_synthesis_calls"], 1)
+        self.assertEqual(result.profile["summary"]["remote_calls"], 2)
+        self.assertEqual(len(client.chat.completions.requests), 2)
+        probe_prompt = client.chat.completions.requests[0]["messages"][0]["content"]
+        synthesis_prompt = client.chat.completions.requests[1]["messages"][0]["content"]
+        self.assertIn("integrated semantic probe inside CLOVER for table reasoning", probe_prompt)
+        self.assertIn('"direct_probe"', synthesis_prompt)
+        self.assertIn('"verdict":"agree"', synthesis_prompt)
 
     def test_supervisor_reports_single_query_answers_after_unbatched_decompose(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -109,13 +109,14 @@ TABLEFACT_DIRECT_TOP_P="${CLOVER_TABLEFACT_DIRECT_TOP_P:-1.0}"
 TABLEFACT_SECOND_PASS_VERIFIER="${CLOVER_TABLEFACT_SECOND_PASS_VERIFIER:-true}"
 TABLEFACT_SECOND_PASS_MAX_TOKENS="${CLOVER_TABLEFACT_SECOND_PASS_MAX_TOKENS:-1024}"
 
-# --- WikiTQ direct QA + adjudicator ---
-WIKITQ_DIRECT_ADJUDICATION="${CLOVER_WIKITQ_DIRECT_ADJUDICATION:-true}"
-WIKITQ_DIRECT_QA_MAX_TOKENS="${CLOVER_WIKITQ_DIRECT_QA_MAX_TOKENS:-192}"
-WIKITQ_ADJUDICATOR_MAX_TOKENS="${CLOVER_WIKITQ_ADJUDICATOR_MAX_TOKENS:-1024}"
-WIKITQ_DIRECT_TABLE_CHAR_LIMIT="${CLOVER_WIKITQ_DIRECT_TABLE_CHAR_LIMIT:-20000}"
-WIKITQ_DIRECT_TEMPERATURE="${CLOVER_WIKITQ_DIRECT_TEMPERATURE:-0.0}"
-WIKITQ_DIRECT_TOP_P="${CLOVER_WIKITQ_DIRECT_TOP_P:-1.0}"
+# --- Generic table direct semantic probe ---
+# Integrated into Supervisor synthesis as advisory evidence for answer/replan
+# decisions. It is not a dataset-specific post-processing override.
+TABLE_DIRECT_PROBE="${CLOVER_TABLE_DIRECT_PROBE:-true}"
+TABLE_DIRECT_PROBE_MAX_TOKENS="${CLOVER_TABLE_DIRECT_PROBE_MAX_TOKENS:-384}"
+TABLE_DIRECT_PROBE_TABLE_CHAR_LIMIT="${CLOVER_TABLE_DIRECT_PROBE_TABLE_CHAR_LIMIT:-20000}"
+TABLE_DIRECT_PROBE_TEMPERATURE="${CLOVER_TABLE_DIRECT_PROBE_TEMPERATURE:-0.0}"
+TABLE_DIRECT_PROBE_TOP_P="${CLOVER_TABLE_DIRECT_PROBE_TOP_P:-1.0}"
 
 # --- Edge review / ablation ---
 EDGE_REVIEW_MODE="${CLOVER_EDGE_REVIEW_MODE:-safe}"               # off | shadow | safe
@@ -327,7 +328,7 @@ ENABLE_OBSERVABLE_CLOSURE_CHECKER="$(normalize_bool "${ENABLE_OBSERVABLE_CLOSURE
 EDGE_REVIEW_PROACTIVE="$(normalize_bool "${EDGE_REVIEW_PROACTIVE}")"
 TABLEFACT_DIRECT_VERIFIER="$(normalize_bool "${TABLEFACT_DIRECT_VERIFIER}")"
 TABLEFACT_SECOND_PASS_VERIFIER="$(normalize_bool "${TABLEFACT_SECOND_PASS_VERIFIER}")"
-WIKITQ_DIRECT_ADJUDICATION="$(normalize_bool "${WIKITQ_DIRECT_ADJUDICATION}")"
+TABLE_DIRECT_PROBE="$(normalize_bool "${TABLE_DIRECT_PROBE}")"
 
 if [[ ! "${EDGE_REVIEW_MODE}" =~ ^(off|shadow|safe)$ ]]; then
   echo "Invalid CLOVER_EDGE_REVIEW_MODE: ${EDGE_REVIEW_MODE}" >&2
@@ -572,9 +573,9 @@ write_local_config() {
     "${TABLEFACT_DIRECT_TABLE_CHAR_LIMIT}" "${TABLEFACT_DIRECT_TEMPERATURE}" \
     "${TABLEFACT_DIRECT_TOP_P}" \
     "${TABLEFACT_SECOND_PASS_VERIFIER}" "${TABLEFACT_SECOND_PASS_MAX_TOKENS}" \
-    "${WIKITQ_DIRECT_ADJUDICATION}" "${WIKITQ_DIRECT_QA_MAX_TOKENS}" \
-    "${WIKITQ_ADJUDICATOR_MAX_TOKENS}" "${WIKITQ_DIRECT_TABLE_CHAR_LIMIT}" \
-    "${WIKITQ_DIRECT_TEMPERATURE}" "${WIKITQ_DIRECT_TOP_P}" \
+    "${TABLE_DIRECT_PROBE}" "${TABLE_DIRECT_PROBE_MAX_TOKENS}" \
+    "${TABLE_DIRECT_PROBE_TABLE_CHAR_LIMIT}" \
+    "${TABLE_DIRECT_PROBE_TEMPERATURE}" "${TABLE_DIRECT_PROBE_TOP_P}" \
     "${DISABLE_THINKING}" <<'PY'
 import json, sys
 from pathlib import Path
@@ -617,12 +618,11 @@ payload = {
     "tablefact_direct_top_p": float(sys.argv[27]),
     "enable_tablefact_second_pass_verifier": sys.argv[28] == "true",
     "tablefact_second_pass_max_tokens": int(sys.argv[29]),
-    "enable_wikitq_direct_adjudication": sys.argv[30] == "true",
-    "wikitq_direct_qa_max_tokens": int(sys.argv[31]),
-    "wikitq_adjudicator_max_tokens": int(sys.argv[32]),
-    "wikitq_direct_table_char_limit": int(sys.argv[33]),
-    "wikitq_direct_temperature": float(sys.argv[34]),
-    "wikitq_direct_top_p": float(sys.argv[35]),
+    "enable_table_direct_probe": sys.argv[30] == "true",
+    "table_direct_probe_max_tokens": int(sys.argv[31]),
+    "table_direct_probe_table_char_limit": int(sys.argv[32]),
+    "table_direct_probe_temperature": float(sys.argv[33]),
+    "table_direct_probe_top_p": float(sys.argv[34]),
     "edge_review_max_actions": 6,
     "edge_review_max_rows": 8,
     "edge_review_max_columns": 8,
@@ -631,7 +631,7 @@ payload = {
     "tptt_prefix_tokens": 200,
     "max_tptt_leaf_sequences_per_tree": 128,
 }
-if sys.argv[36] == "true":
+if sys.argv[35] == "true":
     payload["extra_body"] = {
         "chat_template_kwargs": {
             "enable_thinking": False,
@@ -714,7 +714,7 @@ echo " EDGE2 max retries:    ${EDGE2_MAX_RETRIES}" >&2
 echo " Closure checker:      ${ENABLE_OBSERVABLE_CLOSURE_CHECKER}" >&2
 echo " TableFact direct:     ${TABLEFACT_DIRECT_VERIFIER} (max_tokens=${TABLEFACT_DIRECT_MAX_TOKENS}, table_chars=${TABLEFACT_DIRECT_TABLE_CHAR_LIMIT})" >&2
 echo " TableFact 2nd pass:   ${TABLEFACT_SECOND_PASS_VERIFIER} (max_tokens=${TABLEFACT_SECOND_PASS_MAX_TOKENS})" >&2
-echo " WikiTQ direct judge:  ${WIKITQ_DIRECT_ADJUDICATION} (qa_tokens=${WIKITQ_DIRECT_QA_MAX_TOKENS}, judge_tokens=${WIKITQ_ADJUDICATOR_MAX_TOKENS})" >&2
+echo " Table direct probe:   ${TABLE_DIRECT_PROBE} (max_tokens=${TABLE_DIRECT_PROBE_MAX_TOKENS}, table_chars=${TABLE_DIRECT_PROBE_TABLE_CHAR_LIMIT})" >&2
 echo " FlashInfer sampler:   ${VLLM_USE_FLASHINFER_SAMPLER}" >&2
 echo "=========================================" >&2
 
