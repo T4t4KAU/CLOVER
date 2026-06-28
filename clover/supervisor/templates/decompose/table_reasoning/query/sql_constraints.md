@@ -17,6 +17,10 @@ SQL rules:
   and what is the difference"), return all requested fields. For string answer
   types, prefer one concatenated answer expression such as
   `city || ', ' || difference` aliased as the answer name.
+- Never project one requested output field as an unaliased helper while aliasing
+  only another requested output field as the answer; that drops part of the
+  answer. Either concatenate all requested fields into the answer alias or
+  project all requested output fields with explicit aliases.
 - Avoid scalar subqueries in the SELECT list; write a flat SELECT with explicit FROM/JOIN clauses, or use derived tables in FROM when a subquery is necessary.
 - Avoid `INTERSECT` and `EXCEPT`; express set intersections with joins, `EXISTS`,
   or `GROUP BY` with `HAVING COUNT(DISTINCT column)`.

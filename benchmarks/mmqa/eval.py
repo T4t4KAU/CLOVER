@@ -35,6 +35,7 @@ from benchmarks.tablebench.eval import (
 )
 from benchmarks.utils import (
     build_brief_summary,
+    compact_run_summary,
     display_path,
     json_ready,
     preview,
@@ -43,6 +44,8 @@ from benchmarks.utils import (
 )
 from benchmarks.warnings import suppress_benchmark_warnings
 from clover.runtime import CaseResult, TableReasoningCaseSpec
+
+DEFAULT_MMQA_EVAL_BATCH_SIZE = 50
 
 
 def run_mmqa_eval(
@@ -60,7 +63,7 @@ def run_mmqa_eval(
     seed: int = 20260528,
     max_workers: int | None = 64,
     max_retries: int = 1,
-    validation_mode: str = "none",
+    validation_mode: str = "remote_supervisor",
     remote_batch_size: int = 64,
     remote_concurrency: int = 64,
     max_parallel_execution_units: int = 64,
@@ -109,6 +112,8 @@ def run_mmqa_eval(
                 "MMQA eval requires local_slm_config for local SLM repair/synthesis"
             )
         validation_mode = str(validation_mode or "none").strip().lower()
+        if eval_batch_size is None and len(selected_cases) > DEFAULT_MMQA_EVAL_BATCH_SIZE:
+            eval_batch_size = DEFAULT_MMQA_EVAL_BATCH_SIZE
         progress_bar = progress_factory(len(selected_cases)) if progress_factory else None
         try:
             if eval_batch_size is not None and eval_batch_size < len(selected_cases):
@@ -138,7 +143,7 @@ def run_mmqa_eval(
                     )
                     records.extend(_compact_record_for_summary(record) for record in chunk_records)
                     chunk_records.clear()
-                    profiles.append(chunk_profile)
+                    profiles.append(_compact_system_profile_for_merge(chunk_profile))
                     if progress_bar is not None:
                         progress_bar.update(records)
                     gc.collect()
@@ -164,6 +169,7 @@ def run_mmqa_eval(
                     profile_baseline=profile_baseline,
                     progress_bar=progress_bar,
                 )
+                system_profile = _compact_system_profile_for_merge(system_profile)
         finally:
             if progress_bar is not None:
                 progress_bar.close()
@@ -225,6 +231,22 @@ def _compact_record_for_summary(record: dict[str, Any]) -> dict[str, Any]:
     compact.pop("table_diagnostics", None)
     compact.pop("rounds", None)
     return compact
+
+
+def _compact_system_profile_for_merge(profile: dict[str, Any]) -> dict[str, Any]:
+    """Keep only profile fields required for aggregate counters/token usage."""
+
+    if not isinstance(profile, dict):
+        return {}
+    summary = profile.get("summary") if isinstance(profile.get("summary"), dict) else {}
+    compact_summary = {}
+    if summary.get("validation_mode"):
+        compact_summary["validation_mode"] = summary.get("validation_mode")
+    return {
+        "stages": dict(profile.get("stages") or {}),
+        "counters": dict(profile.get("counters") or {}),
+        "summary": compact_summary,
+    }
 
 
 def _run_mmqa_cases(
@@ -756,7 +778,7 @@ def build_summary(
         "failure_cases": display_path(failure_cases),
     }
     summary["brief_summary"] = build_brief_summary(summary)
-    return summary
+    return compact_run_summary(summary)
 
 
 def mismatch_record(record: dict[str, Any]) -> dict[str, Any]:

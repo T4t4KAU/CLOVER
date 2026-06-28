@@ -66,6 +66,23 @@ TABLEFACT_EDGE_OPPORTUNITY_WEIGHTS = {
     "deterministic_control": 30,
 }
 
+MMQA_WEIGHTS = {
+    "two_table/string": 20,
+    "two_table/number": 15,
+    "two_table/list": 15,
+    "three_table/string": 20,
+    "three_table/number": 15,
+    "three_table/list": 15,
+}
+
+MMQA_EDGE_OPPORTUNITY_WEIGHTS = {
+    "multitable_join": 35,
+    "field_selection": 20,
+    "value_normalization": 10,
+    "list_assembly": 15,
+    "deterministic_control": 20,
+}
+
 SELECTION_POLICIES = frozenset({"representative", "edge_opportunity", "full_eval"})
 
 _DETERMINISTIC_OPERATION_RE = re.compile(
@@ -141,6 +158,22 @@ def build_ablation_subset(
         else:
             assign = _tablebench_stratum
             weights = TABLEFACT_WEIGHTS
+    elif normalized == "mmqa":
+        case_id_counts = Counter(str(case.get("case_id") or "") for case in cases)
+        cases = [
+            case
+            for case in cases
+            if case_id_counts[str(case.get("case_id") or "")] == 1
+        ]
+        if policy == "edge_opportunity":
+            assign = lambda case: _edge_opportunity_stratum(  # noqa: E731
+                case,
+                dataset=normalized,
+            )
+            weights = MMQA_EDGE_OPPORTUNITY_WEIGHTS
+        else:
+            assign = _mmqa_stratum
+            weights = MMQA_WEIGHTS
     else:
         if policy == "edge_opportunity":
             assign = lambda case: _edge_opportunity_stratum(  # noqa: E731
@@ -381,6 +414,25 @@ def _tablebench_stratum(case: dict[str, Any]) -> str:
     )
 
 
+def _mmqa_stratum(case: dict[str, Any]) -> str:
+    split = str(case.get("split") or "").strip()
+    if split not in {"two_table", "three_table"}:
+        table_count = int(case.get("table_count") or 0)
+        split = "three_table" if table_count >= 3 else "two_table"
+    return f"{split}/{_answer_group(case.get('type'))}"
+
+
+def _answer_group(answer_type: Any) -> str:
+    normalized = str(answer_type or "").strip().lower()
+    if normalized.startswith("list"):
+        return "list"
+    if normalized in {"number", "float", "integer", "int"}:
+        return "number"
+    if normalized in {"boolean", "bool"}:
+        return "boolean"
+    return "string"
+
+
 def _manifest_record(
     case: dict[str, Any],
     *,
@@ -399,6 +451,7 @@ def _manifest_record(
                 "matched_body_cells",
                 "matched_format_risk_cells",
                 "requires_deterministic_operation",
+                "table_count",
             )
             if key in features
         }
@@ -417,7 +470,7 @@ def _manifest_record(
         ),
         "selection_features": public_features,
     }
-    for field in ("qtype", "qsubtype", "split"):
+    for field in ("qtype", "qsubtype", "split", "table_count"):
         if case.get(field) is not None:
             record[field] = case[field]
     return record
@@ -430,33 +483,62 @@ def _mechanism_tags(
     selection_policy: str,
 ) -> list[str]:
     if selection_policy == "edge_opportunity":
-        mapping = {
-            "field_selection": [
-                "edge_local_review",
-                "field_selection",
-                "static_fallback",
-            ],
-            "value_normalization": [
-                "edge_local_review",
-                "value_normalization",
-                "contract_gate",
-            ],
-            "list_assembly": [
-                "edge_local_review",
-                "list_assembly",
-                "contract_gate",
-            ],
-            "candidate_selection": [
-                "edge_local_review",
-                "candidate_selection",
-                "node_review",
-            ],
-            "deterministic_control": [
-                "static_finalization",
-                "cloud_recovery",
-                "negative_control",
-            ],
-        }
+        if dataset == "mmqa":
+            mapping = {
+                "multitable_join": [
+                    "multitable_join",
+                    "join_candidate_selection",
+                    "cloud_recovery",
+                ],
+                "field_selection": [
+                    "edge_local_review",
+                    "field_selection",
+                    "static_fallback",
+                ],
+                "value_normalization": [
+                    "edge_local_review",
+                    "value_normalization",
+                    "contract_gate",
+                ],
+                "list_assembly": [
+                    "edge_local_review",
+                    "list_assembly",
+                    "cloud_synthesis",
+                ],
+                "deterministic_control": [
+                    "static_finalization",
+                    "cloud_recovery",
+                    "negative_control",
+                ],
+            }
+        else:
+            mapping = {
+                "field_selection": [
+                    "edge_local_review",
+                    "field_selection",
+                    "static_fallback",
+                ],
+                "value_normalization": [
+                    "edge_local_review",
+                    "value_normalization",
+                    "contract_gate",
+                ],
+                "list_assembly": [
+                    "edge_local_review",
+                    "list_assembly",
+                    "contract_gate",
+                ],
+                "candidate_selection": [
+                    "edge_local_review",
+                    "candidate_selection",
+                    "node_review",
+                ],
+                "deterministic_control": [
+                    "static_finalization",
+                    "cloud_recovery",
+                    "negative_control",
+                ],
+            }
         return mapping[stratum]
     if dataset == "tablebench":
         if stratum == "FactChecking/MatchBased":
@@ -475,6 +557,13 @@ def _mechanism_tags(
         if stratum == "FactChecking/complex":
             return ["edge_local_review", "cloud_recovery"]
         return ["contract_gate", "cloud_recovery"]
+    if dataset == "mmqa":
+        answer_group = stratum.partition("/")[2]
+        if answer_group == "list":
+            return ["multitable_join", "list_assembly", "cloud_synthesis"]
+        if answer_group == "number":
+            return ["multitable_join", "deterministic_control", "contract_gate"]
+        return ["multitable_join", "field_selection", "cloud_recovery"]
     mapping = {
         "aggregation": ["static_finalization", "contract_gate"],
         "boolean": ["contract_gate", "edge_local_review"],
@@ -489,8 +578,8 @@ def _mechanism_tags(
 
 def _load_cases(root: Path) -> list[dict[str, Any]]:
     cases: list[dict[str, Any]] = []
-    for path in sorted(root.expanduser().resolve().glob("*/cases.jsonl")):
-        table_profile = _load_table_profile(path.parent / "table.csv")
+    for path in sorted(root.expanduser().resolve().glob("**/cases.jsonl")):
+        table_profile = _load_table_profile(path.parent)
         for record in _read_jsonl(path):
             payload = dict(record)
             payload.setdefault("dataset_id", path.parent.name)
@@ -504,26 +593,39 @@ def _load_cases(root: Path) -> list[dict[str, Any]]:
     return cases
 
 
-def _load_table_profile(path: Path) -> dict[str, Any]:
-    if not path.is_file():
+def _load_table_profile(dataset_dir: Path) -> dict[str, Any]:
+    csv_paths: list[Path]
+    single_table = dataset_dir / "table.csv"
+    if single_table.is_file():
+        csv_paths = [single_table]
+    else:
+        csv_paths = sorted(dataset_dir.glob("table_*.csv"))
+    if not csv_paths:
         return {
             "table_rows": 0,
             "table_columns": 0,
             "body_values": (),
+            "table_count": 0,
         }
-    with path.open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.reader(handle))
-    columns = max((len(row) for row in rows), default=0)
-    body_values = tuple(
-        str(value).strip()
-        for row in rows[1:]
-        for value in row
-        if str(value).strip()
-    )
+    total_rows = 0
+    max_columns = 0
+    body_values: list[str] = []
+    for path in csv_paths:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.reader(handle))
+        total_rows += max(0, len(rows) - 1)
+        max_columns = max(max_columns, max((len(row) for row in rows), default=0))
+        body_values.extend(
+            str(value).strip()
+            for row in rows[1:]
+            for value in row
+            if str(value).strip()
+        )
     return {
-        "table_rows": max(0, len(rows) - 1),
-        "table_columns": columns,
-        "body_values": body_values,
+        "table_rows": total_rows,
+        "table_columns": max_columns,
+        "body_values": tuple(body_values),
+        "table_count": len(csv_paths),
     }
 
 
@@ -552,6 +654,9 @@ def _selection_features(
         "matched_format_risk_cells": len(format_risk_values),
         "requires_deterministic_operation": bool(
             _DETERMINISTIC_OPERATION_RE.search(question)
+        ),
+        "table_count": int(
+            case.get("table_count") or table_profile.get("table_count") or 0
         ),
     }
 
@@ -588,6 +693,17 @@ def _edge_opportunity_stratum(case: dict[str, Any], *, dataset: str) -> str:
         ):
             return "candidate_selection"
         return "deterministic_control"
+
+    if dataset == "mmqa":
+        if answer_type.startswith("list") and not deterministic:
+            return "list_assembly"
+        if deterministic:
+            return "deterministic_control"
+        if int(features.get("matched_format_risk_cells", 0) or 0) > 0:
+            return "value_normalization"
+        if int(features.get("matched_body_cells", 0) or 0) > 0:
+            return "field_selection"
+        return "multitable_join"
 
     if answer_type.startswith("list") and not deterministic:
         return "list_assembly"
@@ -652,6 +768,8 @@ def _normalize_dataset(value: str) -> str:
         return normalized
     if normalized in {"tablefact", "tabfact"}:
         return "tablefact"
+    if normalized == "mmqa":
+        return "mmqa"
     raise ValueError(f"Unsupported ablation dataset: {value!r}")
 
 
@@ -679,7 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         required=True,
-        choices=("tablebench", "wikitq", "tablefact"),
+        choices=("tablebench", "wikitq", "tablefact", "mmqa"),
     )
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

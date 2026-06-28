@@ -26,6 +26,7 @@ from benchmarks.tablebench.download import TABLEBENCH_REASONING_QTYPES
 from benchmarks.tablebench.metrics import score_tablebench_answer, tablebench_metric_name
 from benchmarks.utils import (
     build_brief_summary,
+    compact_run_summary,
     display_path,
     format_error,
     json_ready,
@@ -67,7 +68,7 @@ def run_tablebench_eval(
     seed: int = 20260528,
     max_workers: int | None = 64,
     max_retries: int = 1,
-    validation_mode: str = "none",
+    validation_mode: str = "remote_supervisor",
     remote_batch_size: int = 64,
     remote_concurrency: int = 64,
     max_parallel_execution_units: int = 64,
@@ -1042,7 +1043,7 @@ def build_summary(
         if ctx_tokens["combined"]
         else 0.0
     )
-    return summary
+    return compact_run_summary(summary)
 
 
 def _score_groups(records: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:

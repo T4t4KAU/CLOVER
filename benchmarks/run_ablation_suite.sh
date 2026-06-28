@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Command-line arguments and environment variables still override these values.
 # =============================================================================
-USER_DATASET="wikitq"  # wikitq | tablebench | tablefact
+USER_DATASET="wikitq"  # wikitq | tablebench | tablefact | mmqa
 USER_PYTHON_BIN="python"  # Use the python from the active conda/uv environment
 USER_EDGE1_MODEL_PATH="/root/autodl-tmp/models/Qwen2.5-3B-Instruct"
 USER_EDGE2_MODEL_PATH=""  # Empty: reuse EDGE1 model/server
@@ -56,7 +56,7 @@ Usage:
   bash benchmarks/run_ablation_suite.sh [DATASET] [EDGE1_MODEL_PATH] [eval options...]
 
 DATASET:
-  tablebench | wikitq | tablefact
+  tablebench | wikitq | tablefact | mmqa
 
 This runs eleven variants on one fixed manifest:
   full, all_edge, no_edge, static, no_contract, end_review, one_shot, cloud_finalize, static_only, no_static, no_closure_checker
@@ -83,6 +83,7 @@ Examples:
   bash benchmarks/run_ablation_suite.sh wikitq /models/Qwen2.5-3B-Instruct
   bash benchmarks/run_ablation_suite.sh tablebench /models/Qwen2.5-3B-Instruct
   bash benchmarks/run_ablation_suite.sh tablefact /models/Qwen2.5-3B-Instruct
+  MMQA_SPLIT=two_table bash benchmarks/run_ablation_suite.sh mmqa /models/Qwen2.5-3B-Instruct
 
   # Full-dataset ablation (TableBench 493 / WikiTQ 4344 / TableFact 1998):
   CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablebench /models/Qwen2.5-3B-Instruct
@@ -114,7 +115,7 @@ if [[ "${1:-}" != "" && "${1:-}" != --* ]]; then
 fi
 DATASET="$(printf '%s' "${DATASET}" | tr '[:upper:]' '[:lower:]')"
 case "${DATASET}" in
-  tablebench|wikitq|tablefact) ;;
+  tablebench|wikitq|tablefact|mmqa) ;;
   wikitablequestions) DATASET="wikitq" ;;
   tabfact) DATASET="tablefact" ;;
   *)
@@ -164,7 +165,23 @@ if [[ -n "${USER_VLLM_TENSOR_PARALLEL_SIZE}" \
     && -z "${CLOVER_EDGE1_TENSOR_PARALLEL_SIZE:-}" ]]; then
   export CLOVER_EDGE1_TENSOR_PARALLEL_SIZE="${USER_VLLM_TENSOR_PARALLEL_SIZE}"
 fi
-if [[ -n "${USER_VLLM_MAX_MODEL_LEN}" \
+if [[ "${DATASET}" == "mmqa" ]]; then
+  if [[ -z "${CLOVER_EDGE1_MAX_MODEL_LEN+x}" && -z "${CLOVER_EDGE_MAX_MODEL_LEN+x}" ]]; then
+    export CLOVER_EDGE1_MAX_MODEL_LEN="16384"
+  fi
+  if [[ -z "${CLOVER_EDGE2_MAX_MODEL_LEN+x}" && -z "${CLOVER_EDGE_MAX_MODEL_LEN+x}" ]]; then
+    export CLOVER_EDGE2_MAX_MODEL_LEN="16384"
+  fi
+  if [[ -z "${CLOVER_EDGE1_MAX_TOKENS+x}" && -z "${CLOVER_EDGE_MAX_TOKENS+x}" ]]; then
+    export CLOVER_EDGE1_MAX_TOKENS="2048"
+  fi
+  if [[ -z "${CLOVER_EDGE2_MAX_TOKENS+x}" && -z "${CLOVER_EDGE_MAX_TOKENS+x}" ]]; then
+    export CLOVER_EDGE2_MAX_TOKENS="2048"
+  fi
+  if [[ -z "${CLOVER_VLLM_MAX_NUM_SEQS+x}" ]]; then
+    export CLOVER_VLLM_MAX_NUM_SEQS="64"
+  fi
+elif [[ -n "${USER_VLLM_MAX_MODEL_LEN}" \
     && -z "${CLOVER_EDGE1_MAX_MODEL_LEN:-}" ]]; then
   export CLOVER_EDGE1_MAX_MODEL_LEN="${USER_VLLM_MAX_MODEL_LEN}"
 fi
@@ -240,7 +257,7 @@ if any(count != 1 for count in requested_counts.values()):
 
 found = {}
 ambiguous = set()
-for cases_path in sorted(dataset_root.glob("*/cases.jsonl")):
+for cases_path in sorted(dataset_root.glob("**/cases.jsonl")):
     with cases_path.open("r", encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():

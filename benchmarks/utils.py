@@ -72,13 +72,17 @@ def _model_ref(config: dict[str, Any] | None) -> str:
     return str(model)
 
 
-def _token_total(usage: dict[str, Any] | None) -> int:
+def _token_value(usage: dict[str, Any] | None, key: str) -> int:
     if not isinstance(usage, dict):
         return 0
     try:
-        return int(usage.get("total_tokens", 0) or 0)
+        return int(usage.get(key, 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _token_total(usage: dict[str, Any] | None) -> int:
+    return _token_value(usage, "total_tokens")
 
 
 def _cost_total(cost_estimate: dict[str, Any] | None) -> float:
@@ -93,58 +97,168 @@ def _cost_total(cost_estimate: dict[str, Any] | None) -> float:
         return 0.0
 
 
-def build_brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    """Extract the 11 key metrics from a run summary.
+def _combined_token_value(summary: dict[str, Any], key: str) -> int:
+    root_value = summary.get(key)
+    if root_value is not None:
+        try:
+            return int(root_value or 0)
+        except (TypeError, ValueError):
+            pass
+    return _token_value(summary.get("remote_token_usage"), key) + _token_value(
+        summary.get("local_slm_token_usage"),
+        key,
+    )
 
-    Fields: benchmark, cloud_model, edge_model, accuracy_pct, cloud_tokens,
-    edge_tokens, api_cost_usd, cloud_tokens_per_q, edge_tokens_per_q,
-    calls_per_q, api_cost_per_q_usd.
-    """
+
+def build_brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Extract the compact metrics shown in benchmark summaries."""
 
     total_cases = int(summary.get("total_cases", 0) or 0)
     accuracy = summary.get("accuracy_on_all_cases")
     accuracy_pct = round(float(accuracy) * 100.0, 2) if accuracy is not None else None
-
-    cloud_tokens = _token_total(summary.get("remote_token_usage"))
-    edge_tokens = _token_total(summary.get("local_slm_token_usage"))
-    api_cost_usd = round(_cost_total(summary.get("remote_cost_estimate")), 6)
-
-    cloud_calls = int(summary.get("remote_calls", 0) or 0)
-    edge_calls = int(summary.get("local_slm_calls", 0) or 0)
-    total_calls = cloud_calls + edge_calls
 
     def _per_q(value: float | int) -> float | None:
         if total_cases <= 0:
             return None
         return round(float(value) / total_cases, 4)
 
-    return {
+    input_tokens = _combined_token_value(summary, "input_tokens")
+    output_tokens = _combined_token_value(summary, "output_tokens")
+    total_tokens = _combined_token_value(summary, "total_tokens")
+    if total_tokens == 0 and (input_tokens or output_tokens):
+        total_tokens = input_tokens + output_tokens
+    remote_tokens = _token_total(summary.get("remote_token_usage"))
+    local_tokens = _token_total(summary.get("local_slm_token_usage"))
+    remote_calls = int(summary.get("remote_calls", 0) or 0)
+    local_calls = int(summary.get("local_slm_calls", 0) or 0)
+    api_cost_usd = round(_cost_total(summary.get("remote_cost_estimate")), 6)
+
+    # Keep a few legacy aliases so older CSV aggregators keep working, but the
+    # formatted stdout only prints the compact fields in _BRIEF_LABELS below.
+    brief = {
         "benchmark": summary.get("stage", "unknown"),
+        "total_cases": total_cases,
+        "correct": summary.get("correct"),
+        "acc_pct": accuracy_pct,
+        "accuracy_percent": accuracy_pct,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "avg_input_tokens_per_query": _per_q(input_tokens),
+        "avg_output_tokens_per_query": _per_q(output_tokens),
+        "avg_total_tokens_per_query": _per_q(total_tokens),
         "cloud_model": _model_ref(summary.get("remote_llm")),
         "edge_model": _model_ref(summary.get("local_slm")),
-        "acc_pct": accuracy_pct,
-        "cloud_tokens": cloud_tokens,
-        "edge_tokens": edge_tokens,
+        "cloud_tokens": remote_tokens,
+        "edge_tokens": local_tokens,
         "api_cost_usd": api_cost_usd,
-        "cloud_tokens_per_q": _per_q(cloud_tokens),
-        "edge_tokens_per_q": _per_q(edge_tokens),
-        "calls_per_q": _per_q(total_calls),
+        "cloud_tokens_per_q": _per_q(remote_tokens),
+        "edge_tokens_per_q": _per_q(local_tokens),
+        "calls_per_q": _per_q(remote_calls + local_calls),
         "api_cost_per_q_usd": _per_q(api_cost_usd),
     }
+    brief["Acc. (%)"] = accuracy_pct
+    brief["Input Tokens"] = input_tokens
+    brief["Output Tokens"] = output_tokens
+    brief["Total Tokens"] = total_tokens
+    brief["Avg Input Tok / Query"] = brief["avg_input_tokens_per_query"]
+    brief["Avg Output Tok / Query"] = brief["avg_output_tokens_per_query"]
+    brief["Avg Total Tok / Query"] = brief["avg_total_tokens_per_query"]
+    return brief
+
+
+def compact_run_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact run summary while keeping ablation-critical counters."""
+
+    brief = build_brief_summary(summary)
+    total_cases = int(summary.get("total_cases", 0) or 0)
+    elapsed_seconds = float(summary.get("elapsed_seconds", 0.0) or 0.0)
+    system_profile = summary.get("system_profile") if isinstance(summary, dict) else {}
+    counters = {}
+    if isinstance(system_profile, dict):
+        counters = dict(system_profile.get("counters") or {})
+    existing_counters = summary.get("system_counters")
+    if isinstance(existing_counters, dict):
+        counters.update(existing_counters)
+
+    compact_keys = (
+        "run_name",
+        "stage",
+        "created_at",
+        "workflow",
+        "tablebench_standard",
+        "wikitq_standard",
+        "tablefact_standard",
+        "mmqa_standard",
+        "sample_size",
+        "requested_sample_size",
+        "seed",
+        "parallel_workers",
+        "max_retries",
+        "validation_mode",
+        "eval_batch_size",
+        "profile_baseline",
+        "remote_llm",
+        "synthesize_llm",
+        "local_slm",
+        "remote_calls",
+        "local_slm_calls",
+        "edge_local_review_calls",
+        "edge_local_review_hits",
+        "edge_local_review_escalations",
+        "total_cases",
+        "parse_successes",
+        "parse_failures",
+        "runtime_successes",
+        "runtime_failures",
+        "correct",
+        "mismatches",
+        "failures",
+        "accuracy_on_all_cases",
+        "accuracy_on_successes",
+        "retry_cases",
+        "total_retry_rounds",
+        "remote_token_usage",
+        "local_slm_token_usage",
+        "elapsed_seconds",
+        "run_dir",
+        "cases_index",
+        "answer_mismatch_cases",
+        "failure_cases",
+        "avg_max_context_tokens_per_query",
+        "max_context_tokens_stats",
+    )
+    compact = {key: summary[key] for key in compact_keys if key in summary}
+    compact.update(
+        {
+            "acc_pct": brief["acc_pct"],
+            "input_tokens": brief["input_tokens"],
+            "output_tokens": brief["output_tokens"],
+            "total_tokens": brief["total_tokens"],
+            "avg_input_tokens_per_query": brief["avg_input_tokens_per_query"],
+            "avg_output_tokens_per_query": brief["avg_output_tokens_per_query"],
+            "avg_total_tokens_per_query": brief["avg_total_tokens_per_query"],
+            "avg_seconds_per_query": (
+                round(elapsed_seconds / total_cases, 4) if total_cases else None
+            ),
+            "system_counters": counters,
+            "brief_summary": brief,
+        }
+    )
+    return compact
 
 
 _BRIEF_LABELS = (
     ("Benchmark", "benchmark"),
-    ("Cloud Model", "cloud_model"),
-    ("Edge Model", "edge_model"),
+    ("Total Cases", "total_cases"),
+    ("Correct", "correct"),
     ("Acc. (%)", "acc_pct"),
-    ("Cloud Tokens", "cloud_tokens"),
-    ("Edge Tokens", "edge_tokens"),
-    ("API Cost (USD)", "api_cost_usd"),
-    ("Cloud Tok/Q", "cloud_tokens_per_q"),
-    ("Edge Tok/Q", "edge_tokens_per_q"),
-    ("Calls/Q", "calls_per_q"),
-    ("API Cost/Q (USD)", "api_cost_per_q_usd"),
+    ("Input Tokens", "input_tokens"),
+    ("Output Tokens", "output_tokens"),
+    ("Total Tokens", "total_tokens"),
+    ("Avg Input Tok / Query", "avg_input_tokens_per_query"),
+    ("Avg Output Tok / Query", "avg_output_tokens_per_query"),
+    ("Avg Total Tok / Query", "avg_total_tokens_per_query"),
 )
 
 

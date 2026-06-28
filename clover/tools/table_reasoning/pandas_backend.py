@@ -575,6 +575,11 @@ class PandasTableReasoningExecutor:
             }
         if frame.empty:
             return [] if answer_type.startswith("list") else None
+        if frame.shape[1] > 1 and _answer_type_accepts_text_rows(answer_type):
+            row_texts = _format_multi_column_answer_rows(frame)
+            if answer_type.startswith("list"):
+                return row_texts
+            return row_texts[0] if row_texts else None
         if answer_name and answer_name in frame.columns:
             series = frame[answer_name]
         else:
@@ -2587,6 +2592,28 @@ def _as_list(value: Any) -> list[Any]:
     if isinstance(value, tuple):
         return list(value)
     return [value]
+
+
+def _answer_type_accepts_text_rows(answer_type: str) -> bool:
+    return answer_type.startswith("list") or answer_type in {
+        "string",
+        "category",
+        "entity",
+        "json",
+    }
+
+
+def _format_multi_column_answer_rows(frame: pd.DataFrame) -> list[str]:
+    rows: list[str] = []
+    for raw_row in frame.itertuples(index=False, name=None):
+        parts = [
+            str(value).strip()
+            for value in (_to_python_scalar(cell) for cell in raw_row)
+            if value is not None and str(value).strip()
+        ]
+        if parts:
+            rows.append(", ".join(parts))
+    return rows
 
 
 def _to_python_scalar(value: Any) -> Any:

@@ -505,7 +505,10 @@ def _build_row(
     static_answers = sum(source_counts[source] for source in static_sources)
     terminal_answers = source_counts["edge_local_review"]
     cloud_answers = source_counts["synthesis"]
-    counters = summary.get("system_profile", {}).get("counters", {})
+    counters = summary.get("system_counters") or summary.get(
+        "system_profile",
+        {},
+    ).get("counters", {})
     remote_usage = summary.get("remote_token_usage") or {}
     local_usage = summary.get("local_slm_token_usage") or {}
     cost = summary.get("remote_cost_estimate", {}).get("cost_usd", {}).get("total")

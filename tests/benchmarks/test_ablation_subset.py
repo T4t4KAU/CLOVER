@@ -192,6 +192,64 @@ class AblationSubsetTest(unittest.TestCase):
             all(record["selection_policy"] == "full_eval" for record in records)
         )
 
+    def test_mmqa_subset_supports_nested_multitable_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "mmqa"
+            _write_mmqa_cases(root)
+            manifest = Path(tmpdir) / "mmqa_subset.jsonl"
+
+            summary = build_ablation_subset(
+                dataset="mmqa",
+                dataset_root=root,
+                output_path=manifest,
+                size=8,
+                seed=19,
+            )
+            records = _read_jsonl(manifest)
+
+        self.assertEqual(summary["dataset"], "mmqa")
+        self.assertEqual(summary["size"], 8)
+        self.assertEqual(len({record["case_id"] for record in records}), 8)
+        self.assertTrue({"two_table", "three_table"}.issubset(
+            {str(record.get("split")) for record in records}
+        ))
+        self.assertTrue(all("table_count" in record for record in records))
+        self.assertTrue(any(record["stratum"].startswith("two_table/") for record in records))
+        self.assertTrue(any(record["stratum"].startswith("three_table/") for record in records))
+        self.assertTrue(
+            all("multitable_join" in record["mechanism_tags"] for record in records)
+        )
+
+    def test_mmqa_edge_opportunity_policy_is_outcome_blind(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "mmqa"
+            _write_mmqa_edge_opportunity_cases(root)
+            manifest = Path(tmpdir) / "mmqa_edge.jsonl"
+
+            summary = build_ablation_subset(
+                dataset="mmqa",
+                dataset_root=root,
+                output_path=manifest,
+                size=10,
+                seed=23,
+                selection_policy="edge_opportunity",
+            )
+            records = _read_jsonl(manifest)
+
+        self.assertEqual(summary["selection_policy"], "edge_opportunity_outcome_blind")
+        self.assertFalse(summary["uses_model_predictions"])
+        self.assertFalse(summary["uses_answer_correctness"])
+        self.assertEqual(len(records), 10)
+        self.assertTrue(
+            {
+                "multitable_join",
+                "field_selection",
+                "value_normalization",
+                "list_assembly",
+                "deterministic_control",
+            }.issubset({record["stratum"] for record in records})
+        )
+
 
 def _write_tablebench_cases(root: Path) -> None:
     strata = [
@@ -437,6 +495,97 @@ def _write_tablefact_edge_opportunity_cases(root: Path) -> None:
                 encoding="utf-8",
             )
             (dataset_dir / "table.csv").write_text(table, encoding="utf-8")
+            case_index += 1
+
+
+def _write_mmqa_cases(root: Path) -> None:
+    templates = [
+        ("Which artist is listed?", "string", "Ada"),
+        ("How many artists are listed?", "number", ["1"]),
+        ("Which artists are listed?", "list[string]", ["Ada", "Ben"]),
+    ]
+    case_index = 0
+    for split, table_count in (("two_table", 2), ("three_table", 3)):
+        for repeat in range(2):
+            for question, answer_type, answer in templates:
+                dataset_dir = root / split / f"mmqa_{split}_{case_index:02d}"
+                dataset_dir.mkdir(parents=True)
+                record = {
+                    "case_id": f"mmqa-{case_index}",
+                    "dataset_id": dataset_dir.name,
+                    "question": question,
+                    "answer": answer,
+                    "type": answer_type,
+                    "split": split,
+                    "table_count": table_count,
+                    "source_files": [f"table_{index}.csv" for index in range(1, table_count + 1)],
+                }
+                (dataset_dir / "cases.jsonl").write_text(
+                    json.dumps(record) + "\n",
+                    encoding="utf-8",
+                )
+                for table_index in range(1, table_count + 1):
+                    (dataset_dir / f"table_{table_index}.csv").write_text(
+                        "id,name\n1,Ada\n2,Ben\n",
+                        encoding="utf-8",
+                    )
+                case_index += 1
+
+
+def _write_mmqa_edge_opportunity_cases(root: Path) -> None:
+    templates = [
+        (
+            "Which album is connected through the artist table?",
+            "string",
+            "album,artist_id\nBlue,1\n",
+        ),
+        (
+            "Which artist is Adaline?",
+            "string",
+            "artist,artist_id\nAdaline,1\n",
+        ),
+        (
+            "Which artist is Artist (A)?",
+            "string",
+            "artist,artist_id\nArtist (A),1\n",
+        ),
+        (
+            "Which artists are linked?",
+            "list[string]",
+            "artist,artist_id\nAda,1\nBen,2\n",
+        ),
+        (
+            "How many artists are linked?",
+            "number",
+            "artist,artist_id\nAda,1\nBen,2\n",
+        ),
+    ]
+    case_index = 0
+    for repeat in range(2):
+        for question, answer_type, first_table in templates:
+            split = "three_table" if case_index % 2 else "two_table"
+            table_count = 3 if split == "three_table" else 2
+            dataset_dir = root / split / f"mmqa_edge_{case_index:02d}"
+            dataset_dir.mkdir(parents=True)
+            record = {
+                "case_id": f"mmqa-edge-{case_index}",
+                "dataset_id": dataset_dir.name,
+                "question": question,
+                "answer": ["Ada"],
+                "type": answer_type,
+                "split": split,
+                "table_count": table_count,
+            }
+            (dataset_dir / "cases.jsonl").write_text(
+                json.dumps(record) + "\n",
+                encoding="utf-8",
+            )
+            (dataset_dir / "table_1.csv").write_text(first_table, encoding="utf-8")
+            for table_index in range(2, table_count + 1):
+                (dataset_dir / f"table_{table_index}.csv").write_text(
+                    "artist_id,country\n1,US\n2,UK\n",
+                    encoding="utf-8",
+                )
             case_index += 1
 
 

@@ -163,7 +163,10 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
             all(features.get(key) is value for key, value in expected_flags.items()),
             {"expected": expected_flags, "actual": features},
         )
-        counters = summary.get("system_profile", {}).get("counters", {})
+        counters = summary.get("system_counters") or summary.get(
+            "system_profile",
+            {},
+        ).get("counters", {})
         if variant == "no_edge":
             no_edge_activity = {
                 "local_slm_calls": int(summary.get("local_slm_calls", 0) or 0),

@@ -18,6 +18,7 @@ from typing import Any
 from benchmarks.costing import estimate_openai_text_cost, normalize_remote_token_usage
 from benchmarks.utils import (
     build_brief_summary,
+    compact_run_summary,
     format_error,
     json_ready,
     preview,
@@ -60,7 +61,7 @@ def run_tablefact_eval(
     seed: int = 20260528,
     max_workers: int | None = 64,
     max_retries: int = 1,
-    validation_mode: str = "none",
+    validation_mode: str = "remote_supervisor",
     remote_batch_size: int = 64,
     remote_concurrency: int = 64,
     max_parallel_execution_units: int = 64,
@@ -390,6 +391,7 @@ def _run_tablefact_direct_eval(
         pricing_model=remote_cost_model,
     )
     summary["brief_summary"] = build_brief_summary(summary)
+    summary = compact_run_summary(summary)
     write_json(output_dir / "run_summary.json", summary)
     return summary
 
@@ -1244,6 +1246,7 @@ def _normalize_tablefact_outputs(
         for label, count in sorted(label_counts.items())
     }
     normalized["brief_summary"] = build_brief_summary(normalized)
+    normalized = compact_run_summary(normalized)
     write_json(output_dir / "run_summary.json", normalized)
     return normalized
 

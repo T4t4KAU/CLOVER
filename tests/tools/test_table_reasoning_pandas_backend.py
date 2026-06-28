@@ -137,6 +137,47 @@ class TableReasoningPandasBackendTest(unittest.TestCase):
 
         self.assertEqual(outputs["answer"], [51])
 
+    def test_format_answer_preserves_multi_column_list_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "people.csv"
+            table_path.write_text(
+                "name,city\n"
+                "Ada,Paris\n"
+                "Ben,Rome\n",
+                encoding="utf-8",
+            )
+            plan = parse_remote_sql_to_logic_dag(
+                'SELECT "name", "city" AS answer FROM "table_1" ORDER BY "name";',
+                _remote_dsl("list[string]", ["name", "city"]),
+            )
+
+            outputs = execute_table_reasoning_plan(
+                plan,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], ["Ada, Paris", "Ben, Rome"])
+
+    def test_format_answer_preserves_multi_column_string_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table_path = Path(tmpdir) / "people.csv"
+            table_path.write_text(
+                "name,nationality\n"
+                "Ada,France\n",
+                encoding="utf-8",
+            )
+            plan = parse_remote_sql_to_logic_dag(
+                'SELECT "name", "nationality" AS answer FROM "table_1" LIMIT 1;',
+                _remote_dsl("string", ["name", "nationality"]),
+            )
+
+            outputs = execute_table_reasoning_plan(
+                plan,
+                resources={"table_1": _resource(table_path)},
+            )
+
+        self.assertEqual(outputs["answer"], "Ada, France")
+
     def test_self_join_preserves_qualified_join_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             authors_path = Path(tmpdir) / "authors.csv"

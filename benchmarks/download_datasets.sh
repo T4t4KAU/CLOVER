@@ -8,14 +8,17 @@ cd "${REPO_ROOT}"
 PYTHON_BIN="${PYTHON_BIN:-${CONDA_PREFIX:+${CONDA_PREFIX}/bin/python}}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DATASETS_ROOT="${CLOVER_DATASETS_ROOT:-${REPO_ROOT}/datasets}"
-DATASETS="${CLOVER_DATASETS:-tablebench,wikitq,tablefact}"
+DATASETS="${CLOVER_DATASETS:-tablebench,wikitq,tablefact,mmqa}"
 TABLEBENCH_SOURCE="${CLOVER_TABLEBENCH_SOURCE:-huggingface}"
 WIKITQ_REPO="${WIKITQ_REPO:-https://github.com/ppasupat/WikiTableQuestions.git}"
 TABLEFACT_REPO="${TABLEFACT_REPO:-https://github.com/wenhuchen/Table-Fact-Checking.git}"
 WIKITQ_SOURCE_ROOT="${WIKITQ_SOURCE_ROOT:-${DATASETS_ROOT}/WikiTableQuestions}"
 TABLEFACT_SOURCE_ROOT="${TABLEFACT_SOURCE_ROOT:-${DATASETS_ROOT}/Table-Fact-Checking}"
+MMQA_SOURCE_ROOT="${MMQA_SOURCE_ROOT:-${DATASETS_ROOT}/mmqa_source}"
 WIKITQ_SPLIT="${WIKITQ_SPLIT:-pristine-unseen-tables}"
 TABLEFACT_SPLITS="${TABLEFACT_SPLITS:-test}"
+MMQA_SPLITS="${MMQA_SPLITS:-two_table,three_table}"
+MMQA_DRIVE_FOLDER_URL="${MMQA_DRIVE_FOLDER_URL:-https://drive.google.com/drive/folders/1XQ9djKSK4yjxLWAmHMzsyPAKMqdCIpXo}"
 OVERWRITE="${CLOVER_DATASET_OVERWRITE:-0}"
 DOWNLOAD_OVERWRITE="${CLOVER_DOWNLOAD_OVERWRITE:-0}"
 
@@ -23,11 +26,11 @@ usage() {
   cat <<'EOF'
 Usage: bash benchmarks/download_datasets.sh [options]
 
-Download and convert TableBench, WikiTableQuestions, and TableFact.
+Download and convert TableBench, WikiTableQuestions, TableFact, and MMQA.
 
 Options:
   --dataset NAME       Dataset to prepare; repeatable. Supported:
-                       tablebench, wikitq, tablefact, all
+                       tablebench, wikitq, tablefact, mmqa, all
   --datasets-root DIR  Raw and converted dataset root (default: datasets)
   --overwrite          Replace converted dataset directories
   --download-overwrite Redownload/reclone raw sources
@@ -35,8 +38,8 @@ Options:
 
 Environment:
   PYTHON_BIN, CLOVER_DATASETS, CLOVER_DATASETS_ROOT
-  WIKITQ_SOURCE_ROOT, TABLEFACT_SOURCE_ROOT
-  WIKITQ_SPLIT, TABLEFACT_SPLITS
+  WIKITQ_SOURCE_ROOT, TABLEFACT_SOURCE_ROOT, MMQA_SOURCE_ROOT
+  WIKITQ_SPLIT, TABLEFACT_SPLITS, MMQA_SPLITS, MMQA_DRIVE_FOLDER_URL
 EOF
 }
 
@@ -60,6 +63,7 @@ while [[ "$#" -gt 0 ]]; do
       DATASETS_ROOT="$2"
       WIKITQ_SOURCE_ROOT="${DATASETS_ROOT}/WikiTableQuestions"
       TABLEFACT_SOURCE_ROOT="${DATASETS_ROOT}/Table-Fact-Checking"
+      MMQA_SOURCE_ROOT="${DATASETS_ROOT}/mmqa_source"
       shift 2
       ;;
     --overwrite)
@@ -91,7 +95,8 @@ normalize_dataset() {
     tablebench) printf '%s\n' tablebench ;;
     wikitq|wikitablequestions) printf '%s\n' wikitq ;;
     tablefact|tabfact) printf '%s\n' tablefact ;;
-    all) printf '%s\n' tablebench wikitq tablefact ;;
+    mmqa) printf '%s\n' mmqa ;;
+    all) printf '%s\n' tablebench wikitq tablefact mmqa ;;
     "") ;;
     *)
       echo "Unsupported dataset: $1" >&2
@@ -115,7 +120,8 @@ if [[ ! -x "${PYTHON_BIN}" ]] && ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; t
   echo "Python not found: ${PYTHON_BIN}" >&2
   exit 1
 fi
-if ! command -v git >/dev/null 2>&1; then
+if { printf '%s\n' "${DATASET_LIST[@]}" | grep -Eq '^(wikitq|tablefact)$'; } \
+    && ! command -v git >/dev/null 2>&1; then
   echo "git is required to download WikiTableQuestions and TableFact." >&2
   exit 1
 fi
@@ -221,6 +227,27 @@ if contains_dataset tablefact; then
     truthy "${OVERWRITE}" && TABLEFACT_ARGS+=(--overwrite)
     run_converter "${TABLEFACT_ARGS[@]}" \
       >"${DATASETS_ROOT}/tablefact_conversion_summary.json"
+  fi
+fi
+
+if contains_dataset mmqa; then
+  if find "${DATASETS_ROOT}/mmqa" -mindepth 2 -maxdepth 3 \
+      -name cases.jsonl -print -quit 2>/dev/null | grep -q . \
+      && ! truthy "${OVERWRITE}"; then
+    echo "MMQA is already converted: ${DATASETS_ROOT}/mmqa" >&2
+  else
+    echo "Preparing MMQA (${MMQA_SPLITS})" >&2
+    MMQA_ARGS=(
+      -m benchmarks.mmqa.download
+      --source-root "${MMQA_SOURCE_ROOT}"
+      --output-root "${DATASETS_ROOT}/mmqa"
+      --drive-folder-url "${MMQA_DRIVE_FOLDER_URL}"
+      --splits "${MMQA_SPLITS}"
+    )
+    truthy "${OVERWRITE}" && MMQA_ARGS+=(--overwrite)
+    truthy "${DOWNLOAD_OVERWRITE}" && MMQA_ARGS+=(--download-overwrite)
+    run_converter "${MMQA_ARGS[@]}" \
+      >"${DATASETS_ROOT}/mmqa_download_summary.json"
   fi
 fi
 

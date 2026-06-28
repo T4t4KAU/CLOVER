@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--validation-mode",
         choices=("none", "remote_supervisor"),
-        default="none",
+        default=os.environ.get("CLOVER_VALIDATION_MODE", "remote_supervisor"),
     )
     parser.add_argument("--remote-batch-size", type=int, default=1)
     parser.add_argument("--remote-concurrency", type=int, default=8)

@@ -147,6 +147,9 @@ tablebench_full_eval.jsonl
 tablefact_representative_100_seed20260619.jsonl
 tablefact_edge_opportunity_100_seed20260619.jsonl
 tablefact_full_eval.jsonl
+mmqa_representative_100_seed20260619.jsonl
+mmqa_edge_opportunity_100_seed20260619.jsonl
+mmqa_full_eval.jsonl
 ```
 
 TableBench download/conversion is also fixed to keep only the two reasoning types. To regenerate from previously converted data:
@@ -161,6 +164,25 @@ TableFact download/conversion defaults to the `test` split only (the `simple` an
 ```bash
 CLOVER_DATASET_OVERWRITE=1 \
 bash benchmarks/download_datasets.sh --dataset tablefact --overwrite
+```
+
+MMQA download/conversion fetches the public Google Drive multi-table release
+(`Synthesized_two_table.json` and `Synthesized_three_table.json`) and writes the
+nested `split/table-set/cases.jsonl` layout used by the evaluator. If the
+network requires a proxy, set the standard `https_proxy`/`HTTPS_PROXY`
+environment variables before running:
+
+```bash
+https_proxy=127.0.0.1:7890 HTTPS_PROXY=127.0.0.1:7890 \
+CLOVER_DATASET_OVERWRITE=1 \
+bash benchmarks/download_datasets.sh --dataset mmqa --overwrite
+```
+
+MMQA ablations use the same runner:
+
+```bash
+MMQA_SPLIT=two_table \
+bash benchmarks/run_ablation_suite.sh mmqa /path/to/edge-model
 ```
 
 ## Cost-Accuracy Pareto (P0-2)

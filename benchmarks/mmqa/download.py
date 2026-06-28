@@ -1,23 +1,30 @@
-"""Convert a local MMQA multi-table release into CLOVER's table layout."""
+"""Download/convert the MMQA multi-table release into CLOVER's table layout."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import hashlib
+import html
 import json
 import re
 import shutil
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from benchmarks.mmqa.metrics import flatten_mmqa_answer, parse_number
 
 
 DEFAULT_SOURCE_ROOT = Path("datasets") / "mmqa_source"
 DEFAULT_OUTPUT_ROOT = Path("datasets") / "mmqa"
+DEFAULT_GOOGLE_DRIVE_FOLDER_URL = (
+    "https://drive.google.com/drive/folders/1XQ9djKSK4yjxLWAmHMzsyPAKMqdCIpXo"
+)
 
 # Map source file names to split labels. MMQA's multi-table subset ships as
 # Synthesized_two_table.json / Synthesized_three_table.json.
@@ -26,6 +33,14 @@ SPLIT_FILE_MAP = {
     "three_table": "Synthesized_three_table.json",
 }
 DEFAULT_SPLITS = ("two_table", "three_table")
+DEFAULT_GOOGLE_DRIVE_FILE_IDS = {
+    # Public file IDs observed in the official multi_table_data Drive folder.
+    # The downloader still tries to rediscover IDs from the folder page first,
+    # so this mapping is a stable fallback rather than a per-case shortcut.
+    "two_table": "1PWq95gk_8Fs46XiSFl9d7JckWBDvpcEc",
+    "three_table": "1MkArlHyNSZ5rnHBl0117T6BJ6tIl5C_d",
+}
+DriveDownloader = Callable[[str, Path], None]
 
 
 def download_and_convert_mmqa(
@@ -36,8 +51,13 @@ def download_and_convert_mmqa(
     case_ids: Sequence[int] | None = None,
     limit_cases: int | None = None,
     overwrite: bool = False,
+    download: bool = True,
+    download_overwrite: bool = False,
+    drive_folder_url: str = DEFAULT_GOOGLE_DRIVE_FOLDER_URL,
+    drive_file_ids: dict[str, str] | None = None,
+    downloader: DriveDownloader | None = None,
 ) -> dict[str, Any]:
-    """Convert an existing MMQA multi-table release into CLOVER-ready folders.
+    """Download and convert the MMQA multi-table release into CLOVER-ready folders.
 
     Each unique table-set becomes one dataset directory holding the shared
     ``table_1.csv``/``table_2.csv``/... files plus a ``cases.jsonl`` of every
@@ -48,12 +68,19 @@ def download_and_convert_mmqa(
 
     source_path = _resolve_path(source_root)
     output_path = _resolve_path(output_root)
-    if not source_path.is_dir():
-        raise FileNotFoundError(f"MMQA source root not found: {source_path}")
     if limit_cases is not None and limit_cases <= 0:
         raise ValueError("limit_cases must be positive")
 
     normalized_splits = _normalize_splits(splits)
+    download_summary = _ensure_source_files(
+        source_path=source_path,
+        splits=normalized_splits,
+        download=download,
+        download_overwrite=download_overwrite,
+        drive_folder_url=drive_folder_url,
+        drive_file_ids=drive_file_ids,
+        downloader=downloader,
+    )
     selected_case_ids = set(case_ids) if case_ids is not None else None
 
     output_path.mkdir(parents=True, exist_ok=True)
@@ -150,10 +177,13 @@ def download_and_convert_mmqa(
         )
 
     summary = {
-        "stage": "mmqa_local_conversion",
+        "stage": "mmqa_google_drive_download_and_conversion"
+        if download_summary.get("download_enabled")
+        else "mmqa_local_conversion",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_root": _portable_path(source_path),
         "output_root": _portable_path(output_path),
+        "download": download_summary,
         "splits": normalized_splits,
         "dataset_count": total_datasets,
         "case_count": total_cases,
@@ -167,10 +197,15 @@ def download_and_convert_mmqa(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert a local MMQA multi-table release for CLOVER eval."
+        description="Download/convert the MMQA multi-table release for CLOVER eval."
     )
     parser.add_argument("--source-root", default=str(DEFAULT_SOURCE_ROOT))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    parser.add_argument(
+        "--drive-folder-url",
+        default=DEFAULT_GOOGLE_DRIVE_FOLDER_URL,
+        help="Public Google Drive folder URL for the MMQA multi_table_data release.",
+    )
     parser.add_argument(
         "--splits",
         default=",".join(DEFAULT_SPLITS),
@@ -184,6 +219,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--limit-cases", type=int, default=None)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--download-overwrite",
+        action="store_true",
+        help="Redownload raw Google Drive files even when they already exist.",
+    )
+    parser.add_argument(
+        "--no-download",
+        action="store_true",
+        help="Only convert existing files under --source-root.",
+    )
+    parser.add_argument(
+        "--drive-file-id",
+        action="append",
+        default=None,
+        metavar="SPLIT=FILE_ID",
+        help=(
+            "Override a Google Drive file id for a split. "
+            "May be repeated, e.g. --drive-file-id two_table=..."
+        ),
+    )
     return parser
 
 
@@ -196,6 +251,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         case_ids=_expand_int_values(args.case_id),
         limit_cases=args.limit_cases,
         overwrite=args.overwrite,
+        download=not args.no_download,
+        download_overwrite=args.download_overwrite,
+        drive_folder_url=args.drive_folder_url,
+        drive_file_ids=_expand_drive_file_ids(args.drive_file_id),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
@@ -216,6 +275,264 @@ def _normalize_splits(splits: Sequence[str]) -> list[str]:
     if not normalized:
         raise ValueError("MMQA conversion requires at least one split")
     return normalized
+
+
+def _ensure_source_files(
+    *,
+    source_path: Path,
+    splits: Sequence[str],
+    download: bool,
+    download_overwrite: bool,
+    drive_folder_url: str,
+    drive_file_ids: dict[str, str] | None,
+    downloader: DriveDownloader | None,
+) -> dict[str, Any]:
+    source_path.mkdir(parents=True, exist_ok=True)
+    expected_files = {split: source_path / SPLIT_FILE_MAP[split] for split in splits}
+    missing = [
+        split
+        for split, path in expected_files.items()
+        if download_overwrite or not path.is_file()
+    ]
+    if not missing:
+        summary = {
+            "stage": "mmqa_source_files",
+            "download_enabled": bool(download),
+            "source": "existing",
+            "source_root": _portable_path(source_path),
+            "splits": list(splits),
+            "downloaded_files": [],
+            "skipped_files": [
+                _portable_path(path)
+                for path in expected_files.values()
+                if path.is_file()
+            ],
+        }
+        _write_json(source_path / "download_summary.json", summary)
+        return summary
+    if not download:
+        missing_paths = ", ".join(_portable_path(expected_files[split]) for split in missing)
+        raise FileNotFoundError(
+            "MMQA source files are missing and --no-download was set: "
+            f"{missing_paths}"
+        )
+
+    file_ids = dict(DEFAULT_GOOGLE_DRIVE_FILE_IDS)
+    discovered_ids = _discover_google_drive_file_ids(
+        drive_folder_url=drive_folder_url,
+        filenames=[SPLIT_FILE_MAP[split] for split in missing],
+    )
+    for filename, file_id in discovered_ids.items():
+        split = _split_for_filename(filename)
+        if split is not None:
+            file_ids[split] = file_id
+    if drive_file_ids:
+        file_ids.update(drive_file_ids)
+
+    active_downloader = downloader or _download_google_drive_file
+    downloaded_files: list[str] = []
+    skipped_files: list[str] = []
+    used_file_ids: dict[str, str] = {}
+    for split in splits:
+        target = expected_files[split]
+        if split not in missing:
+            skipped_files.append(_portable_path(target))
+            continue
+        file_id = file_ids.get(split)
+        if not file_id:
+            raise ValueError(
+                f"No Google Drive file id is known for MMQA split {split!r}. "
+                "Pass --drive-file-id SPLIT=FILE_ID."
+            )
+        active_downloader(file_id, target)
+        _validate_downloaded_json(target)
+        downloaded_files.append(_portable_path(target))
+        used_file_ids[split] = file_id
+
+    summary = {
+        "stage": "mmqa_google_drive_source_download",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "download_enabled": True,
+        "source": "google_drive",
+        "drive_folder_url": drive_folder_url,
+        "source_root": _portable_path(source_path),
+        "splits": list(splits),
+        "downloaded_files": downloaded_files,
+        "skipped_files": skipped_files,
+        "file_ids": used_file_ids,
+    }
+    _write_json(source_path / "download_summary.json", summary)
+    return summary
+
+
+def _discover_google_drive_file_ids(
+    *,
+    drive_folder_url: str,
+    filenames: Sequence[str],
+) -> dict[str, str]:
+    """Best-effort discovery of file IDs from a public Drive folder page."""
+
+    if not drive_folder_url:
+        return {}
+    url = _drive_folder_page_url(drive_folder_url)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (CLOVER MMQA downloader)"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            page = response.read().decode("utf-8", errors="ignore")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return {}
+    page = html.unescape(page)
+    discovered: dict[str, str] = {}
+    for filename in filenames:
+        index = page.find(filename)
+        if index < 0:
+            continue
+        window = page[max(0, index - 1600) : index + 1600]
+        candidates = re.findall(r"\b[0-9A-Za-z_-]{20,}\b", window)
+        for candidate in candidates:
+            if candidate == _drive_folder_id(drive_folder_url):
+                continue
+            if candidate.startswith("1"):
+                discovered[filename] = candidate
+                break
+    return discovered
+
+
+def _drive_folder_page_url(value: str) -> str:
+    folder_id = _drive_folder_id(value)
+    if not folder_id:
+        return value
+    return f"https://drive.google.com/drive/folders/{folder_id}?usp=sharing"
+
+
+def _drive_folder_id(value: str) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"/folders/([0-9A-Za-z_-]+)", text)
+    if match:
+        return match.group(1)
+    if re.fullmatch(r"[0-9A-Za-z_-]{20,}", text):
+        return text
+    return ""
+
+
+def _download_google_drive_file(file_id: str, destination: Path) -> None:
+    """Download one Google Drive file, using gdown when available."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import gdown  # type: ignore[import-not-found]
+    except ImportError:
+        _download_google_drive_file_with_urllib(file_id, destination)
+        return
+    url = f"https://drive.google.com/uc?id={urllib.parse.quote(file_id)}"
+    result = gdown.download(url=url, output=str(destination), quiet=False, fuzzy=True)
+    if not result:
+        raise RuntimeError(f"gdown failed to download Google Drive file: {file_id}")
+
+
+def _download_google_drive_file_with_urllib(file_id: str, destination: Path) -> None:
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
+    base_url = "https://drive.google.com/uc?export=download"
+    first_url = f"{base_url}&id={urllib.parse.quote(file_id)}"
+    with opener.open(_drive_request(first_url), timeout=120) as response:
+        payload = response.read()
+        confirm = _drive_confirm_token(response, payload)
+        form_url = _drive_download_form_url(payload)
+        if confirm is None and not _looks_like_drive_html(payload):
+            destination.write_bytes(payload)
+            return
+    if form_url is not None:
+        second_url = form_url
+    elif confirm is not None:
+        second_url = (
+            f"{base_url}&confirm={urllib.parse.quote(confirm)}"
+            f"&id={urllib.parse.quote(file_id)}"
+        )
+    else:
+        second_url = None
+    if second_url is None:
+        raise RuntimeError(
+            f"Google Drive did not return a downloadable JSON file for id {file_id}."
+        )
+    with opener.open(_drive_request(second_url), timeout=120) as response:
+        destination.write_bytes(response.read())
+
+
+def _drive_download_form_url(payload: bytes) -> str | None:
+    text = payload[:300000].decode("utf-8", errors="ignore")
+    form_match = re.search(
+        r'<form[^>]+id="download-form"[^>]+action="([^"]+)"',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not form_match:
+        return None
+    action = html.unescape(form_match.group(1))
+    params: dict[str, str] = {}
+    for input_match in re.finditer(r"<input\b[^>]*>", text, flags=re.IGNORECASE):
+        tag = input_match.group(0)
+        name_match = re.search(r'\bname="([^"]+)"', tag, flags=re.IGNORECASE)
+        value_match = re.search(r'\bvalue="([^"]*)"', tag, flags=re.IGNORECASE)
+        if name_match and value_match:
+            params[html.unescape(name_match.group(1))] = html.unescape(
+                value_match.group(1)
+            )
+    if not params:
+        return None
+    return f"{action}?{urllib.parse.urlencode(params)}"
+
+
+def _drive_request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (CLOVER MMQA downloader)"},
+    )
+
+
+def _drive_confirm_token(response: Any, payload: bytes) -> str | None:
+    cookies = response.headers.get_all("Set-Cookie") or []
+    for cookie in cookies:
+        match = re.search(r"download_warning[^=]*=([^;]+)", cookie)
+        if match:
+            return urllib.parse.unquote(match.group(1))
+    text = payload[:200000].decode("utf-8", errors="ignore")
+    for pattern in (
+        r"confirm=([0-9A-Za-z_-]+)",
+        r'name="confirm"\s+value="([^"]+)"',
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return html.unescape(match.group(1))
+    return None
+
+
+def _looks_like_drive_html(payload: bytes) -> bool:
+    prefix = payload[:4096].lstrip().lower()
+    return prefix.startswith(b"<!doctype html") or prefix.startswith(b"<html")
+
+
+def _validate_downloaded_json(path: Path) -> None:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError as exc:
+        preview = path.read_text(encoding="utf-8", errors="ignore")[:300]
+        raise ValueError(
+            f"Downloaded MMQA file is not JSON: {_portable_path(path)}. "
+            f"Preview: {preview!r}"
+        ) from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"Downloaded MMQA file is not a JSON list: {_portable_path(path)}")
+
+
+def _split_for_filename(filename: str) -> str | None:
+    for split, expected in SPLIT_FILE_MAP.items():
+        if filename == expected:
+            return split
+    return None
 
 
 def _split_short(split: str) -> str:
@@ -370,6 +687,23 @@ def _expand_int_values(values: Sequence[str] | None) -> list[int] | None:
         except ValueError as exc:
             raise ValueError(f"MMQA case id must be an integer: {value!r}") from exc
     return result
+
+
+def _expand_drive_file_ids(values: Sequence[str] | None) -> dict[str, str] | None:
+    if not values:
+        return None
+    overrides: dict[str, str] = {}
+    for value in values:
+        split, sep, file_id = str(value).partition("=")
+        if not sep:
+            raise ValueError(f"--drive-file-id must use SPLIT=FILE_ID: {value!r}")
+        split = split.strip()
+        file_id = file_id.strip()
+        _normalize_splits([split])
+        if not file_id:
+            raise ValueError(f"Google Drive file id is empty for split {split!r}")
+        overrides[split] = file_id
+    return overrides
 
 
 def _resolve_path(path: str | Path) -> Path:

@@ -97,6 +97,7 @@ SLM_SCHEDULER="${CLOVER_SLM_SCHEDULER:-tptt}"                  # tptt | fifo
 # --- Agent retry budgets ---
 AGENT_LOOP_MAX_ITERATIONS="${CLOVER_AGENT_LOOP_MAX_ITERATIONS:-4}"  # edge agent max iterations
 EDGE2_MAX_RETRIES="${CLOVER_EDGE2_MAX_RETRIES:-3}"                 # EDGE2 agent max retries (--max-retries)
+VALIDATION_MODE="${CLOVER_VALIDATION_MODE:-remote_supervisor}"     # remote_supervisor enables global repair; set none to disable
 
 # --- TableFact direct verifier ---
 # Only consumed by the TableFact evaluator. It keeps the full binary fact
@@ -276,11 +277,20 @@ if [[ -z "${CLOVER_EDGE2_TOP_P+x}" ]]; then
     mmqa) EDGE2_TOP_P="0.9" ;;
   esac
 fi
+if [[ "${DATASET}" == "mmqa" && -z "${CLOVER_EDGE1_MAX_MODEL_LEN+x}" && -z "${CLOVER_EDGE_MAX_MODEL_LEN+x}" ]]; then
+  EDGE1_MAX_MODEL_LEN="16384"
+fi
+if [[ "${DATASET}" == "mmqa" && -z "${CLOVER_EDGE2_MAX_MODEL_LEN+x}" && -z "${CLOVER_EDGE_MAX_MODEL_LEN+x}" ]]; then
+  EDGE2_MAX_MODEL_LEN="16384"
+fi
 if [[ "${DATASET}" == "mmqa" && -z "${CLOVER_EDGE1_MAX_TOKENS+x}" && -z "${CLOVER_EDGE_MAX_TOKENS+x}" ]]; then
-  EDGE1_MAX_TOKENS="4096"
+  EDGE1_MAX_TOKENS="2048"
 fi
 if [[ "${DATASET}" == "mmqa" && -z "${CLOVER_EDGE2_MAX_TOKENS+x}" && -z "${CLOVER_EDGE_MAX_TOKENS+x}" ]]; then
-  EDGE2_MAX_TOKENS="4096"
+  EDGE2_MAX_TOKENS="2048"
+fi
+if [[ "${DATASET}" == "mmqa" && -z "${CLOVER_VLLM_MAX_NUM_SEQS+x}" ]]; then
+  VLLM_MAX_NUM_SEQS="64"
 fi
 if [[ -z "${PYTHON_BIN}" || ! -x "${PYTHON_BIN}" ]]; then
   echo "No executable 'python' found. Activate the intended environment first." >&2
@@ -711,6 +721,7 @@ echo " vLLM max num seqs:    ${VLLM_MAX_NUM_SEQS}" >&2
 echo " Disable thinking:     ${DISABLE_THINKING}" >&2
 echo " Edge agent max iters: ${AGENT_LOOP_MAX_ITERATIONS}" >&2
 echo " EDGE2 max retries:    ${EDGE2_MAX_RETRIES}" >&2
+echo " Validation mode:      ${VALIDATION_MODE}" >&2
 echo " Closure checker:      ${ENABLE_OBSERVABLE_CLOSURE_CHECKER}" >&2
 echo " TableFact direct:     ${TABLEFACT_DIRECT_VERIFIER} (max_tokens=${TABLEFACT_DIRECT_MAX_TOKENS}, table_chars=${TABLEFACT_DIRECT_TABLE_CHAR_LIMIT})" >&2
 echo " TableFact 2nd pass:   ${TABLEFACT_SECOND_PASS_VERIFIER} (max_tokens=${TABLEFACT_SECOND_PASS_MAX_TOKENS})" >&2
@@ -764,6 +775,7 @@ EVAL_CMD=(
   --max-parallel-slm-sequences "${MAX_PARALLEL_SLM_SEQUENCES}"
   --max-pending-slm-sequences "${MAX_PENDING_SLM_SEQUENCES}"
   --max-retries "${EDGE2_MAX_RETRIES}"
+  --validation-mode "${VALIDATION_MODE}"
 )
 case "${DATASET}" in
   tablebench)
@@ -813,7 +825,7 @@ PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
 "${EVAL_CMD[@]}" || EVAL_EXIT=$?
 
 # -----------------------------------------------------------------------------
-# Print brief summary (including combined per-case max context tokens) to stdout
+# Print compact summary to stdout
 # -----------------------------------------------------------------------------
 SUMMARY_FILE="${OUTPUT_ROOT}/${RUN_NAME}/run_summary.json"
 if [[ -f "${SUMMARY_FILE}" ]]; then
@@ -824,39 +836,38 @@ from pathlib import Path
 
 summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 brief = summary.get("brief_summary") or {}
-ctx_stats = summary.get("max_context_tokens_stats") or {}
-remote_ctx = ctx_stats.get("remote") or {}
-local_ctx = ctx_stats.get("local") or {}
-combined_ctx = ctx_stats.get("combined") or {}
 
 remote_usage = summary.get("remote_token_usage") or {}
 local_usage = summary.get("local_slm_token_usage") or {}
-input_tokens = int(remote_usage.get("input_tokens", 0) or 0) + int(local_usage.get("input_tokens", 0) or 0)
-output_tokens = int(remote_usage.get("output_tokens", 0) or 0) + int(local_usage.get("output_tokens", 0) or 0)
-total_tokens = int(remote_usage.get("total_tokens", 0) or 0) + int(local_usage.get("total_tokens", 0) or 0)
+input_tokens = int(summary.get("input_tokens", 0) or 0)
+output_tokens = int(summary.get("output_tokens", 0) or 0)
+total_tokens = int(summary.get("total_tokens", 0) or 0)
+if not input_tokens:
+    input_tokens = int(remote_usage.get("input_tokens", 0) or 0) + int(local_usage.get("input_tokens", 0) or 0)
+if not output_tokens:
+    output_tokens = int(remote_usage.get("output_tokens", 0) or 0) + int(local_usage.get("output_tokens", 0) or 0)
+if not total_tokens:
+    total_tokens = int(remote_usage.get("total_tokens", 0) or 0) + int(local_usage.get("total_tokens", 0) or 0)
+    if not total_tokens:
+        total_tokens = input_tokens + output_tokens
 total_cases = int(summary.get("total_cases", 0) or 0)
+correct = summary.get("correct")
+acc = summary.get("acc_pct", brief.get("acc_pct"))
+avg_input_per_q = round(input_tokens / total_cases, 2) if total_cases else 0.0
+avg_output_per_q = round(output_tokens / total_cases, 2) if total_cases else 0.0
 avg_total_per_q = round(total_tokens / total_cases, 2) if total_cases else 0.0
 
 print("\n===== Brief Summary =====")
 print(f"{'Benchmark':<32}: {brief.get('benchmark') or summary.get('dataset')}")
-print(f"{'Cloud Model':<32}: {brief.get('cloud_model') or (summary.get('remote_llm') or {}).get('model')}")
-print(f"{'Edge Model':<32}: {brief.get('edge_model') or (summary.get('local_slm') or {}).get('model')}")
-print(f"{'Acc. (%)':<32}: {brief.get('acc_pct')}")
+print(f"{'Total Cases':<32}: {total_cases}")
+print(f"{'Correct':<32}: {correct}")
+print(f"{'Acc. (%)':<32}: {acc}")
 print(f"{'Input Tokens':<32}: {input_tokens}")
 print(f"{'Output Tokens':<32}: {output_tokens}")
 print(f"{'Total Tokens':<32}: {total_tokens}")
+print(f"{'Avg Input Tok / Query':<32}: {avg_input_per_q}")
+print(f"{'Avg Output Tok / Query':<32}: {avg_output_per_q}")
 print(f"{'Avg Total Tok / Query':<32}: {avg_total_per_q}")
-print(f"{'Cloud Tokens':<32}: {brief.get('cloud_tokens')}")
-print(f"{'Edge Tokens':<32}: {brief.get('edge_tokens')}")
-print(f"{'API Cost (USD)':<32}: {brief.get('api_cost_usd')}")
-print(f"{'Cloud Tok/Q':<32}: {brief.get('cloud_tokens_per_q')}")
-print(f"{'Edge Tok/Q':<32}: {brief.get('edge_tokens_per_q')}")
-print(f"{'Calls/Q':<32}: {brief.get('calls_per_q')}")
-print(f"{'API Cost/Q (USD)':<32}: {brief.get('api_cost_per_q_usd')}")
-print(f"{'Avg Max Ctx Tok / Query':<32}: {round(combined_ctx.get('mean', 0.0), 2)}")
-print(f"{'  remote  max/mean/min':<32}: {remote_ctx.get('max')} / {round(remote_ctx.get('mean', 0.0), 2)} / {remote_ctx.get('min')}")
-print(f"{'  local   max/mean/min':<32}: {local_ctx.get('max')} / {round(local_ctx.get('mean', 0.0), 2)} / {local_ctx.get('min')}")
-print(f"{'  combined max/mean/min':<32}: {combined_ctx.get('max')} / {round(combined_ctx.get('mean', 0.0), 2)} / {combined_ctx.get('min')}")
 print("=========================")
 PY
 else
