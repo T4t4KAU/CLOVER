@@ -4,12 +4,12 @@
 
 # CLOVER
 
-CLOVER is a cost-efficient cloud-edge collaborative multi-agent system for data reasoning. It separates global reasoning, local planning, local execution, and result review into coordinated agents so that expensive cloud reasoning is used only where it is most valuable.
+CLOVER is a cost-efficient global-edge collaborative multi-agent system for data reasoning. It separates global reasoning, local planning, local execution, and result review into coordinated agents. The global model can be served either by a cloud API or by a local vLLM endpoint; Edge refers to the local task-level model role, not necessarily a different machine.
 
 ## Highlights
 
-- Cloud-edge collaborative agent architecture.
-- Remote global reasoning with local task execution.
+- Global-edge collaborative agent architecture.
+- Global reasoning with local task execution; the global model may be cloud-hosted or local-hosted.
 - Modular workflow stages for planning, execution, reporting, and retry.
 - Extensible design for multiple data reasoning task types.
 
@@ -41,7 +41,7 @@ pip install '.[modelscope]'
 Configure models with JSON files. Public templates are committed under
 `model_config/`, but real API keys should stay in environment variables.
 
-Remote LLM config, for example `model_config/remote_llm_config.json`:
+Global LLM config, for example `model_config/remote_llm_config.json`:
 
 ```json
 {
@@ -57,7 +57,7 @@ Remote LLM config, for example `model_config/remote_llm_config.json`:
 }
 ```
 
-DeepSeek Remote LLM config, for example `model_config/deepseek_remote_llm_config.json`:
+DeepSeek Global LLM config, for example `model_config/deepseek_remote_llm_config.json`:
 
 ```json
 {
@@ -110,9 +110,12 @@ Then set the API keys and config paths:
 ```bash
 export OPENAI_API_KEY=...
 export DEEPSEEK_API_KEY=...
-export CLOVER_REMOTE_LLM_CONFIG=model_config/remote_llm_config.json
+export CLOVER_GLOBAL_LLM_CONFIG=model_config/remote_llm_config.json
 export CLOVER_LOCAL_SLM_CONFIG=model_config/local_slm_config.json
 ```
+
+`CLOVER_REMOTE_LLM_CONFIG` and `--remote-llm-config` remain supported as
+legacy aliases for the Global model config.
 
 ## Prepare Benchmark Datasets
 

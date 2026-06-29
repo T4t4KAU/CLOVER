@@ -27,8 +27,8 @@ VARIANT_DISPLAY_NAMES = {
     "static": "w/o Edge Repair",
     "no_contract": "w/o Contract Gate",
     "end_review": "End-only Review",
-    "one_shot": "w/o Cloud Replan",
-    "cloud_finalize": "Cloud Finalize",
+    "one_shot": "w/o Global Replan",
+    "cloud_finalize": "Global Finalize",
     "static_only": "Static-only",
     "no_static": "w/o Static",
 }
@@ -191,6 +191,7 @@ def _build_row(
         "local_slm_tokens": metrics["local_slm_tokens"],
         "total_tokens": metrics["total_tokens"],
         "estimated_cost_usd": metrics["estimated_cost_usd"],
+        "global_calls_per_query": _per_query(metrics["remote_calls"], total),
         "cloud_calls_per_query": _per_query(metrics["remote_calls"], total),
         "edge_calls_per_query": _per_query(metrics["local_slm_calls"], total),
         "total_tokens_per_query": _per_query(metrics["total_tokens"], total),
@@ -240,6 +241,7 @@ def write_outputs(
         "local_slm_tokens",
         "total_tokens",
         "estimated_cost_usd",
+        "global_calls_per_query",
         "cloud_calls_per_query",
         "edge_calls_per_query",
         "total_tokens_per_query",
@@ -262,7 +264,7 @@ def write_outputs(
     lines: list[str] = [
         "# Cost-Accuracy Pareto",
         "",
-        "| Method | Dataset | Accuracy | Cost / 1K queries | Cloud calls / query | Edge calls / query | Total tokens / query |",
+        "| Method | Dataset | Accuracy | Cost / 1K queries | Global calls / query | Edge calls / query | Total tokens / query |",
         "|---|---|---|---|---|---|---|",
     ]
     for row in sorted(rows, key=lambda r: (r["dataset"], -(r["accuracy"] or 0))):
@@ -272,7 +274,7 @@ def write_outputs(
                 dataset=row["dataset"],
                 acc=_format_percent(row["accuracy"]),
                 cost=_format_cost(row["cost_usd_per_1k_queries"]),
-                cloud=_format_float(row["cloud_calls_per_query"], 3),
+                cloud=_format_float(row["global_calls_per_query"], 3),
                 edge=_format_float(row["edge_calls_per_query"], 3),
                 tokens=_format_float(row["total_tokens_per_query"], 1),
             )

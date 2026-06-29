@@ -113,6 +113,7 @@ def collect_sweep_rows(sweep_root: Path) -> list[dict[str, Any]]:
             "variant": variant,
             "run_name": name,
             **metrics,
+            "global_calls_per_query": _per_query(metrics["remote_calls"], total),
             "cloud_calls_per_query": _per_query(metrics["remote_calls"], total),
             "edge_calls_per_query": _per_query(metrics["local_slm_calls"], total),
             "model_calls_per_query": _per_query(metrics["model_calls"], total),
@@ -145,6 +146,7 @@ def write_outputs(rows: list[dict[str, Any]], output_dir: Path) -> None:
         "total_tokens",
         "estimated_cost_usd",
         "elapsed_seconds",
+        "global_calls_per_query",
         "cloud_calls_per_query",
         "edge_calls_per_query",
         "model_calls_per_query",
@@ -170,7 +172,7 @@ def write_outputs(rows: list[dict[str, Any]], output_dir: Path) -> None:
         "",
         "## Full CLOVER",
         "",
-        "| Dataset | Edge model | Accuracy | Cost / 1K queries | Cloud calls / query | Edge calls / query | Model calls / query |",
+        "| Dataset | Edge model | Accuracy | Cost / 1K queries | Global calls / query | Edge calls / query | Model calls / query |",
         "|---|---|---|---|---|---|---|",
     ]
     for row in sorted(
@@ -185,7 +187,7 @@ def write_outputs(rows: list[dict[str, Any]], output_dir: Path) -> None:
                 em=row["edge_model"],
                 acc=_format_percent(row["accuracy"]),
                 cost=_format_cost(row["cost_usd_per_1k_queries"]),
-                cloud=_format_float(row["cloud_calls_per_query"], 3),
+                cloud=_format_float(row["global_calls_per_query"], 3),
                 edge=_format_float(row["edge_calls_per_query"], 3),
                 mc=_format_float(row["model_calls_per_query"], 3),
             )
@@ -194,7 +196,7 @@ def write_outputs(rows: list[dict[str, Any]], output_dir: Path) -> None:
         "",
         "## w/o Static (Edge-only finalization)",
         "",
-        "| Dataset | Edge model | Accuracy | Cost / 1K queries | Cloud calls / query | Edge calls / query | Model calls / query |",
+        "| Dataset | Edge model | Accuracy | Cost / 1K queries | Global calls / query | Edge calls / query | Model calls / query |",
         "|---|---|---|---|---|---|---|",
     ])
     for row in sorted(
@@ -209,7 +211,7 @@ def write_outputs(rows: list[dict[str, Any]], output_dir: Path) -> None:
                 em=row["edge_model"],
                 acc=_format_percent(row["accuracy"]),
                 cost=_format_cost(row["cost_usd_per_1k_queries"]),
-                cloud=_format_float(row["cloud_calls_per_query"], 3),
+                cloud=_format_float(row["global_calls_per_query"], 3),
                 edge=_format_float(row["edge_calls_per_query"], 3),
                 mc=_format_float(row["model_calls_per_query"], 3),
             )

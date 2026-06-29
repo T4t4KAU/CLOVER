@@ -4,6 +4,8 @@ Current ablation reporting is restricted to TableBench. MMQA should be used for
 ordinary ACC/regression evaluation only, not for ablation conclusions, unless a
 future experiment explicitly re-opens that scope.
 
+Terminology: `Global` denotes the planner/synthesizer/replan model role. It may be backed by a cloud API or by a local vLLM endpoint. Legacy config and counter names such as `remote_llm`, `remote_calls`, or `cloud_replan_calls` are retained for backward compatibility, but paper-facing reports should describe this role as Global rather than Cloud.
+
 The TableBench experiment can run on either a fixed-size subset (default 100 cases) or the full dataset:
 
 - `bash benchmarks/run_ablation_suite.sh tablebench`: TableBench, restricted to `FactChecking` and `NumericalReasoning`.
@@ -13,7 +15,7 @@ Sampling relies only on dataset metadata, question text, answer type, table shap
 The suite supports three selection policies:
 
 - `representative`: original task-type stratified subset, used to report overall ACC/cost trends.
-- `edge_opportunity`: Edge-mechanism-enriched subset, used to test whether local semantic processing improves ACC, reduces Cloud calls, and how much node repair and terminal review each contribute.
+- `edge_opportunity`: Edge-mechanism-enriched subset, used to test whether local semantic processing improves ACC, reduces Global calls, and how much node repair and terminal review each contribute.
 - `full_eval`: the full eligible TableBench dataset (493 cases), used for the final reported ablation numbers.
 
 For the final paper, use `full_eval` so the ablation ACC matches the main results table. The 100-case subsets remain useful for quick iteration and the `mechanism-focused, outcome-blind` analysis.
@@ -37,30 +39,30 @@ CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablebench 
 The default paper ablation runs the compact mechanism set:
 
 1. `full`: Full CLOVER.
-2. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family plus Cloud Synthesis as the terminal fallback.
-3. `static_only`: Disable the entire Edge family and Cloud Replan/Synthesis, leaving one Cloud planning pass plus Static Fast Path/Finalization.
-4. `no_retry`: Disable retry paths: node-level Edge Repair, Cloud Replan, and supervisor retry rounds (`max_retries=0`).
+2. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family plus Global Synthesis as the terminal fallback.
+3. `static_only`: Disable the entire Edge family and Global Replan/Synthesis, leaving one Global planning pass plus Static Fast Path/Finalization.
+4. `no_retry`: Disable retry paths: node-level Edge Repair, Global Replan, and supervisor retry rounds (`max_retries=0`).
 
 Exploratory variants remain available for appendix/debug runs:
 
 1. `full`: Full CLOVER.
 2. `all_edge`: Disable Static Fast Path and route every statically executable node to the Edge Agent.
-3. `no_edge`: Disable Edge Agent, node repair, node review, and terminal Edge Review; keep all other static and Cloud capabilities aligned with Full.
+3. `no_edge`: Disable Edge Agent, node repair, node review, and terminal Edge Review; keep all other static and Global capabilities aligned with Full.
 4. `static`: Disable only node-level Edge Repair; keep terminal Edge Review.
 5. `no_contract`: Disable Edge Agent output contract verification.
 6. `end_review`: Disable node-level Edge Repair and Node Review; keep only terminal Edge Review.
-7. `one_shot`: Keep Cloud final synthesis but forbid Cloud from emitting follow-up SQL/DAG actions. This is a narrower legacy probe; use `no_retry` for the paper retry-mechanism ablation.
-8. `no_retry`: Disable node-level Edge Repair, Cloud Replan, and supervisor retry rounds.
-9. `cloud_finalize`: Disable static and terminal Edge finalization; route everything to Cloud synthesis.
-10. `static_only`: Disable the entire Edge family and Cloud Replan/Synthesis, leaving one Cloud planning pass plus Static Fast Path/Finalization. Measures the upper bound of Static execution alone; cases that Static cannot finalize are expected to fail.
-11. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family (Agent/Repair/Review) plus Cloud Synthesis as the terminal fallback. Tests whether Edge can independently finalize when Static is unavailable.
+7. `one_shot`: Keep Global final synthesis but forbid Global model from emitting follow-up SQL/DAG actions. This is a narrower legacy probe; use `no_retry` for the paper retry-mechanism ablation.
+8. `no_retry`: Disable node-level Edge Repair, Global Replan, and supervisor retry rounds.
+9. `cloud_finalize`: Disable static and terminal Edge finalization; route everything to Global synthesis.
+10. `static_only`: Disable the entire Edge family and Global Replan/Synthesis, leaving one Global planning pass plus Static Fast Path/Finalization. Measures the upper bound of Static execution alone; cases that Static cannot finalize are expected to fail.
+11. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family (Agent/Repair/Review) plus Global Synthesis as the terminal fallback. Tests whether Edge can independently finalize when Static is unavailable.
 12. `no_closure_checker`: Keep all Full CLOVER routing/finalization components enabled but disable the Observable Closure Checker, measuring whether looser static finalization helps or hurts.
 
-In `all_edge`, Edge output flows directly into the downstream DAG; static execution results serve only as a shadow reference for agreement-rate computation and never replace Edge output on disagreement. The summary report additionally reports Accuracy, Cloud calls, Edge calls, Edge tokens, total runtime, runtime failures, and the agreement rate between Edge output and the static reference.
+In `all_edge`, Edge output flows directly into the downstream DAG; static execution results serve only as a shadow reference for agreement-rate computation and never replace Edge output on disagreement. The summary report additionally reports Accuracy, Global calls, Edge calls, Edge tokens, total runtime, runtime failures, and the agreement rate between Edge output and the static reference.
 
-`no_edge` is the unconfounded control for verifying whether Edge truly substitutes for Cloud. It keeps static finalization, Cloud synthesis, and Cloud replan, so the Cloud-call delta against Full can be attributed to whether the Edge path is enabled.
+`no_edge` is the unconfounded control for verifying whether Edge truly substitutes for the Global model. It keeps static finalization, Global synthesis, and Global replan, so the Global-call delta against Full can be attributed to whether the Edge path is enabled.
 
-`static_only` and `no_edge` are complementary: `no_edge` keeps Cloud Replan/Synthesis as fallback, while `static_only` further disables them, leaving only Static. Comparing the two separates the contributions of Static and Cloud fallback. `no_static` and `all_edge` are complementary: `all_edge` only disables Static Fast Path while keeping Static Finalization, whereas `no_static` further disables Static Finalization to test whether Edge can independently complete terminal finalization.
+`static_only` and `no_edge` are complementary: `no_edge` keeps Global Replan/Synthesis as fallback, while `static_only` further disables them, leaving only Static. Comparing the two separates the contributions of Static and Global fallback. `no_static` and `all_edge` are complementary: `all_edge` only disables Static Fast Path while keeping Static Finalization, whereas `no_static` further disables Static Finalization to test whether Edge can independently complete terminal finalization.
 
 Full CLOVER enables proactive local semantic review by default:
 
@@ -68,7 +70,7 @@ Full CLOVER enables proactive local semantic review by default:
 CLOVER_EDGE_REVIEW_PROACTIVE=true
 ```
 
-Static execution triggers only when evidence is closed and size-bounded, including single-row multi-field selection, candidate selection over at most five rows, simple boolean combinations, short-list assembly, and value normalization for percentages, units, quotes, labels, or trailing parentheses. Edge output must reference fact IDs and replay through deterministic operations; on review failure, execution falls back to the original static or Cloud path. List questions involving superlatives, ranking, counting, or cross-row comparison do not enter proactive Edge assembly and remain on the deterministic or Cloud path.
+Static execution triggers only when evidence is closed and size-bounded, including single-row multi-field selection, candidate selection over at most five rows, simple boolean combinations, short-list assembly, and value normalization for percentages, units, quotes, labels, or trailing parentheses. Edge output must reference fact IDs and replay through deterministic operations; on review failure, execution falls back to the original static or Global path. List questions involving superlatives, ranking, counting, or cross-row comparison do not enter proactive Edge assembly and remain on the deterministic or Global path.
 
 The default `USER_VARIANT_ORDER` is the compact paper set:
 
@@ -88,7 +90,7 @@ Each experiment starts the vLLM server only once. Before each variant, a local-m
 benchmark/runs/<dataset>_ablation_<timestamp>/
 ```
 
-The `sanity_check.json` in that directory validates the fixed case set, fine-grained feature flags, disabled retry activity for `w/o Retry`, and the terminal path for Cloud Finalization. After the variants finish, the script prints the summary table to the terminal and generates:
+The `sanity_check.json` in that directory validates the fixed case set, fine-grained feature flags, disabled retry activity for `w/o Retry`, and the terminal path for Global Finalization. After the variants finish, the script prints the summary table to the terminal and generates:
 
 ```text
 ablation_summary.md
@@ -101,9 +103,9 @@ The table includes:
 - Accuracy, percentage-point delta vs Full CLOVER, and the exact McNemar paired test.
 - Regression/recovery case counts vs Full.
 - Node Edge runs/successes/steps, node reviews, and contract rejections.
-- Terminal Edge calls/hits/escalations, proactive semantic opportunities/hits, and Cloud replan counts.
-- Final answer sources, Cloud/local model tokens, estimated cost, and runtime.
-- The direct Edge-to-Cloud substitution effect between `Full CLOVER` and `w/o Edge Agent`, including Cloud calls, synthesis, replan, tokens, cost, and per-query call delta.
+- Terminal Edge calls/hits/escalations, proactive semantic opportunities/hits, and Global replan counts.
+- Final answer sources, Global/Edge model tokens, estimated cost, and runtime.
+- The direct Edge-to-Global substitution effect between `Full CLOVER` and `w/o Edge Agent`, including Global calls, synthesis, replan, tokens, cost, and per-query call delta.
 - The terminal/proactive semantic review contribution of `End-only Review` vs `w/o Edge Agent`, and the node-repair contribution of `Full CLOVER` vs `End-only Review`.
 - Per-variant regression/recovery case IDs vs Full, retry-case accuracy, and runtime error types.
 
@@ -153,7 +155,7 @@ Run: `/root/autodl-tmp/CLOVER/benchmark/runs/tablebench_full_ablation_relaxed_co
 
 Static execution/finalization is the dominant contributor. Removing it drops ACC by `32.79 pp` and increases total token usage from `2.67M` to `7.51M`, showing that deterministic static paths are both more accurate and much cheaper than forcing the model to handle those operations.
 
-Static-only execution is strong but incomplete: it reaches `55.19%` ACC with the lowest token usage among the main variants, but still trails Full CLOVER by `11.81 pp`. This supports the design choice that static execution should be the backbone, while model-based Edge/Cloud recovery remains necessary for cases that static evidence cannot close.
+Static-only execution is strong but incomplete: it reaches `55.19%` ACC with the lowest token usage among the main variants, but still trails Full CLOVER by `11.81 pp`. This supports the design choice that static execution should be the backbone, while model-based Edge/Global recovery remains necessary for cases that static evidence cannot close.
 
 Retry is useful but secondary. Disabling retry reduces ACC by `3.46 pp` while also reducing token usage, so retry should remain enabled for final accuracy runs and can be disabled only for speed/cost-oriented debugging.
 
@@ -228,7 +230,7 @@ python -m benchmarks.summarize_cost_accuracy \
   --output-dir benchmark/runs/pareto_tablebench
 ```
 
-Output: `cost_accuracy_pareto.{csv,md,json}` with per-query and per-1K-query cost, accuracy, Cloud/Edge calls, and total tokens.
+Output: `cost_accuracy_pareto.{csv,md,json}` with per-query and per-1K-query cost, accuracy, Global/Edge calls, and total tokens.
 
 External baselines JSON format:
 
@@ -262,6 +264,6 @@ CLOVER_EDGE_MODELS=/models/Qwen2.5-3B-Instruct:/models/Qwen2.5-7B-Instruct:/mode
 bash benchmarks/run_edge_model_sweep.sh
 ```
 
-Output: `edge_model_sweep.{csv,md,json}` with accuracy, cost, Cloud/Edge calls, model calls (latency proxy), and tokens per query for each (Edge model, dataset, variant) combination.
+Output: `edge_model_sweep.{csv,md,json}` with accuracy, cost, Global/Edge calls, model calls (latency proxy), and tokens per query for each (Edge model, dataset, variant) combination.
 
 The `full` variant shows how Edge scale affects overall CLOVER performance. The `no_static` variant shows whether larger Edge models can independently finalize when Static is unavailable.

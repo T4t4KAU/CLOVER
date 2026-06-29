@@ -1232,6 +1232,7 @@ def _config_summary(config: dict[str, Any] | None) -> dict[str, Any] | None:
         "api_type": config.get("api_type"),
         "base_url": config.get("base_url"),
         "model": config.get("model"),
+        "deployment": _model_deployment(config),
         "agent_loop_max_iterations": config.get("agent_loop_max_iterations"),
         "disable_agent_loop": config.get("disable_agent_loop"),
         "ablation_variant": config.get("ablation_variant", "full"),
@@ -1246,3 +1247,26 @@ def _slm_scheduler_summary(config: dict[str, Any] | None) -> str:
     if not isinstance(config, dict):
         return "tptt"
     return str(config.get("slm_scheduler") or "tptt")
+
+
+def _model_deployment(config: dict[str, Any]) -> str:
+    """Classify where a model is served without conflating role and location."""
+
+    explicit = config.get("deployment")
+    if explicit:
+        return str(explicit)
+    provider = str(config.get("provider") or "").lower()
+    base_url = str(config.get("base_url") or "").lower()
+    model_path = str(config.get("model") or "")
+    if provider in {"local", "vllm", "llamacpp", "ollama"}:
+        return "local"
+    if (
+        "127.0.0.1" in base_url
+        or "localhost" in base_url
+        or base_url.startswith("http://0.0.0.0")
+        or model_path.startswith("/")
+    ):
+        return "local"
+    if base_url.startswith("http://") or base_url.startswith("https://"):
+        return "cloud"
+    return "unknown"

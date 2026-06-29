@@ -132,6 +132,8 @@ def build_brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
     remote_calls = int(summary.get("remote_calls", 0) or 0)
     local_calls = int(summary.get("local_slm_calls", 0) or 0)
     api_cost_usd = round(_cost_total(summary.get("remote_cost_estimate")), 6)
+    global_model = _model_ref(summary.get("remote_llm"))
+    edge_model = _model_ref(summary.get("local_slm"))
 
     # Keep a few legacy aliases so older CSV aggregators keep working, but the
     # formatted stdout only prints the compact fields in _BRIEF_LABELS below.
@@ -147,15 +149,19 @@ def build_brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "avg_input_tokens_per_query": _per_q(input_tokens),
         "avg_output_tokens_per_query": _per_q(output_tokens),
         "avg_total_tokens_per_query": _per_q(total_tokens),
-        "cloud_model": _model_ref(summary.get("remote_llm")),
-        "edge_model": _model_ref(summary.get("local_slm")),
-        "cloud_tokens": remote_tokens,
+        "global_model": global_model,
+        "edge_model": edge_model,
+        "global_tokens": remote_tokens,
         "edge_tokens": local_tokens,
         "api_cost_usd": api_cost_usd,
-        "cloud_tokens_per_q": _per_q(remote_tokens),
+        "global_tokens_per_q": _per_q(remote_tokens),
         "edge_tokens_per_q": _per_q(local_tokens),
         "calls_per_q": _per_q(remote_calls + local_calls),
         "api_cost_per_q_usd": _per_q(api_cost_usd),
+        # Legacy names: the global model may be cloud-hosted or local-hosted.
+        "cloud_model": global_model,
+        "cloud_tokens": remote_tokens,
+        "cloud_tokens_per_q": _per_q(remote_tokens),
     }
     brief["Acc. (%)"] = accuracy_pct
     brief["Input Tokens"] = input_tokens

@@ -110,15 +110,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-progress", action="store_true")
 
     parser.add_argument(
+        "--global-llm-config",
         "--remote-llm-config",
+        dest="remote_llm_config",
         type=Path,
         default=_env_path(
+            "CLOVER_GLOBAL_LLM_CONFIG",
             "CLOVER_REMOTE_LLM_CONFIG",
             "CLOVER_LLM_CONFIG",
             default=DEFAULT_REMOTE_CONFIG,
         ),
     )
-    parser.add_argument("--synthesize-llm-config", type=Path, default=None)
+    parser.add_argument(
+        "--global-synthesize-llm-config",
+        "--synthesize-llm-config",
+        dest="synthesize_llm_config",
+        type=Path,
+        default=None,
+    )
     parser.add_argument(
         "--local-slm-config",
         type=Path,
@@ -301,9 +310,9 @@ def preflight_model_api_checks(
 
     timeout = float(getattr(args, "model_api_check_timeout", 30.0) or 30.0)
     checks = [
-        ("remote", remote_config),
-        ("synthesize", synthesize_config),
-        ("local", local_slm_config),
+        ("global", remote_config),
+        ("global_synthesis", synthesize_config),
+        ("edge", local_slm_config),
     ]
     failures = []
     for label, config in checks:
@@ -352,10 +361,10 @@ def _print_startup(
     print("CLOVER table evaluation", file=sys.stderr)
     print(f"  dataset: {dataset}", file=sys.stderr)
     print(f"  output: {output_dir}", file=sys.stderr)
-    print(f"  remote: {_model_ref(remote_config)}", file=sys.stderr)
+    print(f"  global: {_model_ref(remote_config)}", file=sys.stderr)
     if synthesize_config is not None:
-        print(f"  synthesize: {_model_ref(synthesize_config)}", file=sys.stderr)
-    print(f"  local: {_model_ref(local_config)}", file=sys.stderr)
+        print(f"  global_synthesis: {_model_ref(synthesize_config)}", file=sys.stderr)
+    print(f"  edge: {_model_ref(local_config)}", file=sys.stderr)
 
 
 def _model_ref(config: dict[str, Any]) -> str:

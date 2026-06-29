@@ -17,9 +17,9 @@ VARIANTS = (
     ("static", "w/o Edge Repair"),
     ("no_contract", "w/o Contract Verification"),
     ("end_review", "End-only Review"),
-    ("one_shot", "w/o Cloud Replan"),
+    ("one_shot", "w/o Global Replan"),
     ("no_retry", "w/o Retry"),
-    ("cloud_finalize", "Cloud Finalization"),
+    ("cloud_finalize", "Global Finalization"),
     ("static_only", "Static-Only"),
     ("no_static", "w/o Static"),
     ("no_closure_checker", "w/o Observable Closure Checker"),
@@ -206,7 +206,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "| Experiment | Node Edge runs | Node Edge successes | Node Edge steps "
             "| Node reviews | Contract rejects | Terminal Edge calls "
             "| Terminal hits | Proactive opportunities | Proactive hits "
-            "| Terminal escalations | Cloud replans |",
+            "| Terminal escalations | Global replans |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
             "| ---: | ---: | ---: |",
         ]
@@ -257,7 +257,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "## Edge-to-Cloud substitution",
+                "## Edge-to-Global substitution",
                 "",
                 "| Metric | Full CLOVER | w/o Edge Agent | Change after disabling Edge |",
                 "| --- | ---: | ---: | ---: |",
@@ -271,37 +271,37 @@ def render_markdown(report: dict[str, Any]) -> str:
                 _format_pp(edge["accuracy_delta_pp"]),
             ),
             (
-                "Cloud calls",
+                "Global calls",
                 str(edge["full_cloud_calls"]),
                 str(edge["no_edge_cloud_calls"]),
                 _format_signed_integer(edge["cloud_call_increase"]),
             ),
             (
-                "Cloud calls/query",
+                "Global calls/query",
                 f"{edge['full_cloud_calls_per_query']:.3f}",
                 f"{edge['no_edge_cloud_calls_per_query']:.3f}",
                 _format_signed_float(edge["cloud_call_increase_per_query"], digits=3),
             ),
             (
-                "Cloud-call reduction from Edge",
+                "Global-call reduction from Edge",
                 _format_percent(edge["cloud_call_reduction_vs_no_edge"]),
                 "0.0%",
                 "Full vs w/o Edge",
             ),
             (
-                "Cloud synthesis calls",
+                "Global synthesis calls",
                 str(edge["full_cloud_synthesis_calls"]),
                 str(edge["no_edge_cloud_synthesis_calls"]),
                 _format_signed_integer(edge["cloud_synthesis_increase"]),
             ),
             (
-                "Cloud replan calls",
+                "Global replan calls",
                 str(edge["full_cloud_replan_calls"]),
                 str(edge["no_edge_cloud_replan_calls"]),
                 _format_signed_integer(edge["cloud_replan_increase"]),
             ),
             (
-                "Cloud tokens",
+                "Global tokens",
                 _format_integer(edge["full_remote_tokens"]),
                 _format_integer(edge["no_edge_remote_tokens"]),
                 _format_signed_integer(edge["remote_token_increase"]),
@@ -313,7 +313,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 _format_signed_cost(edge["remote_cost_increase_usd"]),
             ),
             (
-                "Local SLM calls",
+                "Edge calls",
                 str(edge["full_local_slm_calls"]),
                 str(edge["no_edge_local_slm_calls"]),
                 _format_signed_integer(edge["local_slm_call_change"]),
@@ -329,7 +329,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "Full CLOVER recorded "
                 f"{edge['full_terminal_edge_hits']} terminal Edge hits and "
                 f"{edge['full_node_edge_successes']} successful node-level Edge runs. "
-                "These counts need not equal the Cloud-call increase exactly because a "
+                "These counts need not equal the Global-call increase exactly because a "
                 "node repair can change later execution and replanning paths.",
             ]
         )
@@ -341,7 +341,7 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "## Edge role decomposition",
                 "",
                 "| Edge role | Compared variants | Accuracy contribution "
-                "| Cloud calls avoided |",
+                "| Global calls avoided |",
                 "| --- | --- | ---: | ---: |",
             ]
         )
@@ -385,7 +385,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             _format_pp(static_fast_path["accuracy_delta_pp"]),
         ),
         (
-            "Cloud calls",
+            "Global calls",
             str(static_fast_path["full_cloud_calls"]),
             str(static_fast_path["all_edge_cloud_calls"]),
             _format_signed_integer(static_fast_path["cloud_call_delta"]),
@@ -441,8 +441,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Calls and cost",
             "",
-            "| Experiment | Cloud calls | Δ Cloud calls | Cloud synthesis | Local SLM calls "
-            "| Cloud tokens | Local tokens | Est. cost | Time |",
+            "| Experiment | Global calls | Δ Global calls | Global synthesis | Edge calls "
+            "| Global tokens | Edge tokens | Est. cost | Time |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
@@ -473,7 +473,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Final answer sources",
             "",
-            "| Experiment | Static | Terminal Edge | Cloud synthesis | Other/failed |",
+            "| Experiment | Static | Terminal Edge | Global synthesis | Other/failed |",
             "| --- | ---: | ---: | ---: | ---: |",
         ]
     )
@@ -721,23 +721,23 @@ def _edge_substitution_summary(
     if cloud_call_increase > 0:
         reduction = _safe_divide(cloud_call_increase, no_edge["remote_calls"])
         interpretation = (
-            "**Observed direction: supported.** Disabling Edge increased Cloud "
+            "**Observed direction: supported.** Disabling Edge increased Global "
             f"calls by {cloud_call_increase} "
             f"({_safe_divide(cloud_call_increase, total):.3f} per query) in this run. "
             f"Equivalently, Full CLOVER avoided {reduction * 100:.1f}% of the "
-            "Cloud calls required by the no-Edge variant."
+            "Global calls required by the no-Edge variant."
         )
         status = "supported"
     elif cloud_call_increase == 0:
         interpretation = (
             "**Observed direction: inconclusive.** Disabling Edge did not change "
-            "the number of Cloud calls in this run; inspect Edge trigger and hit rates."
+            "the number of Global calls in this run; inspect Edge trigger and hit rates."
         )
         status = "inconclusive"
     else:
         interpretation = (
             "**Observed direction: contradicted in this run.** Disabling Edge reduced "
-            f"Cloud calls by {abs(cloud_call_increase)}; inspect routing and run variance."
+            f"Global calls by {abs(cloud_call_increase)}; inspect routing and run variance."
         )
         status = "contradicted"
     return {
