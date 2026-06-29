@@ -92,6 +92,18 @@ VARIANT_FLAGS = {
         "enable_static_fast_path": True,
         "enable_static_finalization": True,
     },
+    "no_retry": {
+        "enable_edge_agent": True,
+        "enable_edge_repair": False,
+        "enable_terminal_edge_review": True,
+        "enable_contract_gate": True,
+        "enable_node_review": True,
+        "enable_cloud_recovery": True,
+        "enable_cloud_replan": False,
+        "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
+        "enable_static_finalization": True,
+    },
     "cloud_finalize": {
         "enable_edge_agent": True,
         "enable_edge_repair": True,
@@ -258,6 +270,20 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
                 "edge_repair_disabled",
                 edge_steps == 0,
                 {"executor_local_slm_steps": edge_steps},
+            )
+        if variant == "no_retry":
+            retry_activity = {
+                "total_retry_rounds": int(summary.get("total_retry_rounds", 0) or 0),
+                "cloud_replan_calls": int(counters.get("cloud_replan_calls", 0) or 0),
+                "executor_local_slm_steps": int(counters.get("executor_local_slm_steps", 0) or 0),
+            }
+            _record_check(
+                checks,
+                failures,
+                variant,
+                "retry_paths_disabled",
+                all(value == 0 for value in retry_activity.values()),
+                retry_activity,
             )
         if variant == "end_review":
             node_reviews = int(counters.get("executor_edge_local_reviews", 0) or 0)

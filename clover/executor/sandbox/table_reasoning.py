@@ -17,7 +17,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from clover.config import ENABLE_CONTRACT_GATE, runtime_feature_enabled
 from clover.executor.context import NodeExecutionContext
 from clover.executor.handles import SandboxProjector, TableHandle, ValueHandle
 from clover.executor.handles.table import copy_frame as copy_table_frame
@@ -200,10 +199,6 @@ class TableReasoningSandboxPolicy:
             ),
             "operation_note": _operation_note(context.node),
             "output_contract": _output_contract(context.node),
-            "_contract_gate_enabled": runtime_feature_enabled(
-                context.slm_config,
-                ENABLE_CONTRACT_GATE,
-            ),
         }
         python_task = _python_function_task(
             node=context.node,
@@ -807,31 +802,6 @@ def _solve_action(
         )
 
     stdout = _bounded_stdout(state, stdout_buffer.getvalue())
-    if not _contract_gate_enabled(state):
-        return SandboxActionResult(
-            ok=True,
-            output=candidate,
-            accepted=True,
-            terminal=True,
-        )
-    contract_error = _validate_python_function_contract(candidate, state.python_task)
-    if contract_error is not None:
-        return SandboxActionResult(
-            ok=False,
-            observation={
-                "type": "contract_error",
-                "ok": False,
-                "error": {"message": contract_error},
-                "stdout": stdout,
-                "candidate_summary": _value_summary(candidate),
-                "feedback": _python_function_contract_feedback(
-                    state,
-                    contract_error,
-                    candidate,
-                ),
-            },
-        )
-
     candidate, validation_error = _normalize_candidate_output(candidate, state.task)
     if validation_error is None:
         return SandboxActionResult(
@@ -843,7 +813,7 @@ def _solve_action(
     return SandboxActionResult(
         ok=False,
         observation={
-            "type": "contract_error",
+            "type": "output_structure_error",
             "ok": False,
             "error": {"message": validation_error},
             "stdout": stdout,
@@ -942,16 +912,20 @@ def _rewrite_predicate_action(
             },
         )
 
-    if not _contract_gate_enabled(state):
+    candidate, validation_error = _normalize_candidate_output(result, state.task)
+    if validation_error is not None:
         return SandboxActionResult(
-            ok=True,
-            output=result,
-            accepted=True,
-            terminal=True,
+            ok=False,
+            observation={
+                "type": "output_structure_error",
+                "ok": False,
+                "error": {"message": validation_error},
+                "candidate_summary": _value_summary(candidate),
+                "feedback": _rewrite_predicate_feedback(state, new_predicate),
+            },
         )
 
-    candidate, validation_error = _normalize_candidate_output(result, state.task)
-    if validation_error is None and not _candidate_is_empty(candidate):
+    if not _candidate_is_empty(candidate):
         return SandboxActionResult(
             ok=True,
             output=candidate,
@@ -1040,29 +1014,6 @@ def _bounded_stdout(state: TableReasoningSandboxState, stdout: str) -> str:
     if len(stdout) > state.max_stdout_chars:
         return stdout[: state.max_stdout_chars] + "\n...[truncated]"
     return stdout
-
-
-def _validate_python_function_contract(
-    candidate: Any,
-    task: PythonFunctionTask,
-) -> str | None:
-    contract = task.contract
-    if contract.get("kind") != "dataframe":
-        return None
-    if not isinstance(candidate, pd.DataFrame):
-        return f"solve must return pandas.DataFrame, got {type(candidate).__name__}"
-    missing = [
-        column
-        for column in contract.get("columns", [])
-        if column not in candidate.columns
-    ]
-    if missing:
-        return f"solve result is missing required columns: {missing}"
-    if contract.get("single_row") and len(candidate) != 1:
-        return "solve must return one row"
-    if contract.get("non_empty") and candidate.empty:
-        return "solve returned empty DataFrame"
-    return None
 
 
 def _python_function_error_feedback(
@@ -1227,13 +1178,6 @@ def _run_python_action(
     created_keys = sorted(set(updated_keys) - before_keys)
     if "result" in state.workspace_locals:
         candidate = state.workspace_locals["result"]
-        if not _contract_gate_enabled(state):
-            return SandboxActionResult(
-                ok=True,
-                output=candidate,
-                accepted=True,
-                terminal=True,
-            )
         candidate, validation_error = _normalize_candidate_output(candidate, state.task)
         if validation_error is None:
             return SandboxActionResult(
@@ -1245,9 +1189,9 @@ def _run_python_action(
         return SandboxActionResult(
             ok=False,
             observation={
-                "type": "contract_error",
+                "type": "output_structure_error",
                 "ok": False,
-                "message": "The code created result, but it does not satisfy the output contract.",
+                "message": "The code created result, but it does not match the expected output structure.",
                 "error": {"message": validation_error},
                 "candidate_summary": _value_summary(state.workspace_locals["result"]),
                 "stdout": stdout,
@@ -1261,7 +1205,7 @@ def _run_python_action(
     return SandboxActionResult(
         ok=True,
         observation={
-            "type": "contract_error",
+            "type": "output_structure_error",
             "ok": False,
             "message": "The code ran, but no variable named result was created.",
             "stdout": stdout,
@@ -1422,19 +1366,12 @@ def _submit_result_action(
             },
         )
     candidate = state.workspace_locals[name]
-    if not _contract_gate_enabled(state):
-        return SandboxActionResult(
-            ok=True,
-            output=candidate,
-            accepted=True,
-            terminal=True,
-        )
     candidate, validation_error = _normalize_candidate_output(candidate, state.task)
     if validation_error is not None:
         return SandboxActionResult(
             ok=False,
             observation={
-                "type": "output_validation_error",
+                "type": "output_structure_error",
                 "ok": False,
                 "error": {"message": validation_error},
                 "candidate_summary": _value_summary(candidate),
@@ -1587,10 +1524,6 @@ def _normalize_candidate_output(
     except Exception as exc:  # noqa: BLE001 - validation report only.
         return candidate, f"Output is not JSON-ready: {exc}"
     return normalized, None
-
-
-def _contract_gate_enabled(state: TableReasoningSandboxState) -> bool:
-    return state.task.get("_contract_gate_enabled") is not False
 
 
 def _output_contract(node: dict[str, Any]) -> dict[str, Any]:

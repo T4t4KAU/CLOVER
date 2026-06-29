@@ -35,6 +35,7 @@ class SummarizeAblationSuiteTest(unittest.TestCase):
                 "no_contract": [True, True, True, False],
                 "end_review": [True, False, True, False],
                 "one_shot": [True, True, False, False],
+                "no_retry": [True, False, True, False],
                 "cloud_finalize": [False, True, False, True],
                 "static_only": [True, False, False, False],
                 "no_static": [True, True, False, False],

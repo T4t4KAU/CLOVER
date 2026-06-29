@@ -8,7 +8,7 @@ The TableBench experiment can run on either a fixed-size subset (default 100 cas
 
 - `bash benchmarks/run_ablation_suite.sh tablebench`: TableBench, restricted to `FactChecking` and `NumericalReasoning`.
 
-Sampling relies only on dataset metadata, question text, answer type, table shape, and cell representation. It never reads model predictions, execution traces, or correctness labels. Default manifests live in `benchmarks/ablation_cases/`, and all eleven variants reuse the same case set.
+Sampling relies only on dataset metadata, question text, answer type, table shape, and cell representation. It never reads model predictions, execution traces, or correctness labels. Default manifests live in `benchmarks/ablation_cases/`, and all variants reuse the same case set.
 
 The suite supports three selection policies:
 
@@ -34,7 +34,14 @@ bash benchmarks/run_ablation_suite.sh tablebench /path/to/edge-model
 CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablebench /path/to/edge-model
 ```
 
-The suite runs the following eleven variants:
+The default paper ablation runs the compact mechanism set:
+
+1. `full`: Full CLOVER.
+2. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family plus Cloud Synthesis as the terminal fallback.
+3. `static_only`: Disable the entire Edge family and Cloud Replan/Synthesis, leaving one Cloud planning pass plus Static Fast Path/Finalization.
+4. `no_retry`: Disable retry paths: node-level Edge Repair, Cloud Replan, and supervisor retry rounds (`max_retries=0`).
+
+Exploratory variants remain available for appendix/debug runs:
 
 1. `full`: Full CLOVER.
 2. `all_edge`: Disable Static Fast Path and route every statically executable node to the Edge Agent.
@@ -42,11 +49,12 @@ The suite runs the following eleven variants:
 4. `static`: Disable only node-level Edge Repair; keep terminal Edge Review.
 5. `no_contract`: Disable Edge Agent output contract verification.
 6. `end_review`: Disable node-level Edge Repair and Node Review; keep only terminal Edge Review.
-7. `one_shot`: Keep Cloud final synthesis but forbid Cloud from emitting follow-up SQL/DAG actions.
-8. `cloud_finalize`: Disable static and terminal Edge finalization; route everything to Cloud synthesis.
-9. `static_only`: Disable the entire Edge family and Cloud Replan/Synthesis, leaving one Cloud planning pass plus Static Fast Path/Finalization. Measures the upper bound of Static execution alone; cases that Static cannot finalize are expected to fail.
-10. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family (Agent/Repair/Review) plus Cloud Synthesis as the terminal fallback. Tests whether Edge can independently finalize when Static is unavailable.
-11. `no_closure_checker`: Keep all Full CLOVER routing/finalization components enabled but disable the Observable Closure Checker, measuring whether looser static finalization helps or hurts.
+7. `one_shot`: Keep Cloud final synthesis but forbid Cloud from emitting follow-up SQL/DAG actions. This is a narrower legacy probe; use `no_retry` for the paper retry-mechanism ablation.
+8. `no_retry`: Disable node-level Edge Repair, Cloud Replan, and supervisor retry rounds.
+9. `cloud_finalize`: Disable static and terminal Edge finalization; route everything to Cloud synthesis.
+10. `static_only`: Disable the entire Edge family and Cloud Replan/Synthesis, leaving one Cloud planning pass plus Static Fast Path/Finalization. Measures the upper bound of Static execution alone; cases that Static cannot finalize are expected to fail.
+11. `no_static`: Disable Static Fast Path and Static Finalization, keeping the full Edge family (Agent/Repair/Review) plus Cloud Synthesis as the terminal fallback. Tests whether Edge can independently finalize when Static is unavailable.
+12. `no_closure_checker`: Keep all Full CLOVER routing/finalization components enabled but disable the Observable Closure Checker, measuring whether looser static finalization helps or hurts.
 
 In `all_edge`, Edge output flows directly into the downstream DAG; static execution results serve only as a shadow reference for agreement-rate computation and never replace Edge output on disagreement. The summary report additionally reports Accuracy, Cloud calls, Edge calls, Edge tokens, total runtime, runtime failures, and the agreement rate between Edge output and the static reference.
 
@@ -62,10 +70,16 @@ CLOVER_EDGE_REVIEW_PROACTIVE=true
 
 Static execution triggers only when evidence is closed and size-bounded, including single-row multi-field selection, candidate selection over at most five rows, simple boolean combinations, short-list assembly, and value normalization for percentages, units, quotes, labels, or trailing parentheses. Edge output must reference fact IDs and replay through deterministic operations; on review failure, execution falls back to the original static or Cloud path. List questions involving superlatives, ranking, counting, or cross-row comparison do not enter proactive Edge assembly and remain on the deterministic or Cloud path.
 
-To reduce ordering bias, the eleven variants are reproducibly shuffled using the seed by default; the actual order is recorded in `variant_order.txt`. A fixed order can be specified via:
+The default `USER_VARIANT_ORDER` is the compact paper set:
 
 ```bash
-CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static,no_closure_checker
+full,no_static,static_only,no_retry
+```
+
+For exploratory runs, a fixed order can be specified via:
+
+```bash
+CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,no_retry,cloud_finalize,static_only,no_static,no_closure_checker
 ```
 
 Each experiment starts the vLLM server only once. Before each variant, a local-model warm-up is performed and excluded from the measured time. Results are written to:
@@ -74,7 +88,7 @@ Each experiment starts the vLLM server only once. Before each variant, a local-m
 benchmark/runs/<dataset>_ablation_<timestamp>/
 ```
 
-The `sanity_check.json` in that directory validates the fixed case set, fine-grained feature flags, the replan count for `w/o Cloud Replan`, and the terminal path for Cloud Finalization. After the eleven variants finish, the script prints the summary table to the terminal and generates:
+The `sanity_check.json` in that directory validates the fixed case set, fine-grained feature flags, disabled retry activity for `w/o Retry`, and the terminal path for Cloud Finalization. After the variants finish, the script prints the summary table to the terminal and generates:
 
 ```text
 ablation_summary.md
@@ -100,15 +114,48 @@ ablation_case_diagnostics.jsonl
 ablation_discordant_cases.csv
 ```
 
-The former records each case's correctness, answer source, retry, and error type across the eleven variants; the latter keeps only paired cases where Full and a variant disagree, making it easy to inspect why Contract Verification, Cloud Replan, or Observable Closure Checking produced reverse gains.
+The former records each case's correctness, answer source, retry, and error type across variants; the latter keeps only paired cases where Full and a variant disagree, making it easy to inspect why Static execution, Static-only execution, retry, or other mechanisms produced reverse gains.
 
-If the eleven runs are already complete and only the summary needs to be regenerated without rerunning:
+If the runs are already complete and only the summary needs to be regenerated without rerunning:
 
 ```bash
 python -m benchmarks.summarize_ablation_suite \
   --suite-root benchmark/runs/tablebench_ablation_<timestamp> \
   --dataset tablebench
 ```
+
+## Latest full TableBench ablation (relaxed Contract Gate)
+
+Run: `/root/autodl-tmp/CLOVER/benchmark/runs/tablebench_full_ablation_relaxed_contract_qwen25_14b_20260629_092745`
+
+### Experimental setup
+
+- Dataset: full TableBench evaluation split used by the current benchmark runner, 491 evaluated cases.
+- Model: `Qwen2.5-14B-Instruct` for both planner/synthesizer and local Edge roles.
+- Serving: local vLLM, single shared server because both Edge roles use the same model.
+- Decoding: temperature `0.0`; max model length `8192`; max generation tokens `2048`.
+- Validation: `remote_supervisor`; supervisor retry budget `3` for Full CLOVER.
+- Contract Gate: relaxed at execution time. Structural output normalization remains enabled so invalid, non-serializable, or empty outputs can still trigger generic repair.
+- Reported variants: Full CLOVER, `w/o Static`, `Static-Only`, and `w/o Retry`.
+
+`w/o Contract Verification` was run once as a sanity check and changed ACC by only `-0.61 pp` (`326/491`, `66.40%`), so it is omitted from the official ablation table.
+
+### Results
+
+| Experiment | Correct | ACC | Δ vs Full | Input Tokens | Output Tokens | Total Tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Full CLOVER | 329/491 | 67.01% | +0.00 pp | 2,598,629 | 70,058 | 2,668,687 |
+| w/o Static | 168/491 | 34.22% | -32.79 pp | 7,313,721 | 192,589 | 7,506,310 |
+| Static-Only | 271/491 | 55.19% | -11.81 pp | 1,922,676 | 35,513 | 1,958,189 |
+| w/o Retry | 312/491 | 63.54% | -3.46 pp | 2,223,980 | 45,228 | 2,269,208 |
+
+### Conclusion
+
+Static execution/finalization is the dominant contributor. Removing it drops ACC by `32.79 pp` and increases total token usage from `2.67M` to `7.51M`, showing that deterministic static paths are both more accurate and much cheaper than forcing the model to handle those operations.
+
+Static-only execution is strong but incomplete: it reaches `55.19%` ACC with the lowest token usage among the main variants, but still trails Full CLOVER by `11.81 pp`. This supports the design choice that static execution should be the backbone, while model-based Edge/Cloud recovery remains necessary for cases that static evidence cannot close.
+
+Retry is useful but secondary. Disabling retry reduces ACC by `3.46 pp` while also reducing token usage, so retry should remain enabled for final accuracy runs and can be disabled only for speed/cost-oriented debugging.
 
 ## Regenerating the Fixed Subset
 

@@ -34,8 +34,10 @@ USER_ABLATION_FULL_EVAL="false"                    # true: use the full dataset 
 USER_MAX_RETRIES="3"
 USER_VALIDATE_ONLY="false"         # true: validate settings/cases without running
 USER_ALLOW_NON_TABLEBENCH_ABLATION="false"  # Safety guard for current paper scope
-USER_VARIANT_ORDER=""              # Empty: deterministic shuffle using the seed
-                                    # Or: full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static,no_closure_checker
+USER_VARIANT_ORDER="full,no_static,static_only,no_retry"
+                                    # Main paper ablation; override for exploratory variants.
+                                    # Full set:
+                                    # full,all_edge,no_edge,static,no_contract,end_review,one_shot,no_retry,cloud_finalize,static_only,no_static,no_closure_checker
 
 # Optional explicit case IDs. Leave this empty to use the bundled fixed
 # 100-case manifest in benchmarks/ablation_cases.
@@ -62,15 +64,19 @@ DATASET:
 Current ablation reporting is restricted to TableBench. Historical/debug runs on
 other datasets require CLOVER_ALLOW_NON_TABLEBENCH_ABLATION=true.
 
-This runs eleven variants on one fixed manifest:
-  full, all_edge, no_edge, static, no_contract, end_review, one_shot, cloud_finalize, static_only, no_static, no_closure_checker
+By default this runs the compact paper ablation:
+  full, no_static, static_only, no_retry
+
+Set CLOVER_ABLATION_VARIANT_ORDER to run exploratory variants:
+  full, all_edge, no_edge, static, no_contract, end_review, one_shot, no_retry, cloud_finalize, static_only, no_static, no_closure_checker
 
 The internal names map to:
   all_edge       = All-Edge Routing / w/o Static Fast Path
   no_edge        = w/o Edge Agent (all local Edge paths disabled)
   static         = w/o Edge Repair (terminal Edge review remains enabled)
   end_review     = end-only Edge review
-  one_shot       = w/o Cloud Replan (Cloud final synthesis remains enabled)
+  one_shot       = w/o Cloud Replan only (legacy/exploratory)
+  no_retry       = w/o Retry (disable Edge repair, Cloud replan, and retry rounds)
   cloud_finalize = force final synthesis through Cloud
   static_only    = w/o Edge Agent + w/o Cloud Replan/Synthesis (Static upper bound)
   no_static      = w/o Static Fast Path + w/o Static Finalization (Edge-only finalization)
@@ -99,7 +105,7 @@ Useful environment variables:
   CLOVER_ALLOW_NON_TABLEBENCH_ABLATION=true  # explicit legacy/debug override
   CLOVER_EDGE1_MODEL_PATH=/path/to/model
   CLOVER_EDGE2_MODEL_PATH=/path/to/model  # optional; empty/default reuses EDGE1
-  CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static,no_closure_checker
+  CLOVER_ABLATION_VARIANT_ORDER=full,no_static,static_only,no_retry
   CLOVER_VLLM_WARMUP=true
   CLOVER_EDGE_REVIEW_PROACTIVE=true
 EOF
@@ -419,6 +425,7 @@ run_variant() {
   local static_fast_path="$9"
   local static_finalization="${10}"
   local closure_checker="${11:-true}"
+  local variant_max_retries="${12:-${MAX_RETRIES}}"
   local edge_review_mode="safe"
   if [[ "${edge_agent}" != "true" || "${terminal_edge_review}" != "true" ]]; then
     edge_review_mode="off"
@@ -440,7 +447,7 @@ run_variant() {
   CLOVER_EDGE_REVIEW_MODE="${edge_review_mode}" \
   CLOVER_EDGE1_MODEL_PATH="${EDGE1_MODEL_PATH}" \
   CLOVER_EDGE2_MODEL_PATH="${EDGE2_MODEL_PATH}" \
-  CLOVER_EDGE2_MAX_RETRIES="${MAX_RETRIES}" \
+  CLOVER_EDGE2_MAX_RETRIES="${variant_max_retries}" \
   CLOVER_TABLEFACT_DIRECT_VERIFIER=false \
   CLOVER_TABLE_DIRECT_PROBE=false \
   CLOVER_VLLM_PERSIST_SERVER=true \
@@ -479,6 +486,12 @@ run_named_variant() {
       ;;
     one_shot)
       run_variant one_shot true true true true true false true true true
+      ;;
+    no_retry)
+      # No-Retry: disable action-level Edge repair, Cloud replan, and
+      # supervisor retry rounds. Keep one planning/synthesis pass and static
+      # execution/finalization so this isolates retry-loop contribution.
+      run_variant no_retry true false true true true false true true true true 0
       ;;
     cloud_finalize)
       run_variant cloud_finalize true true false true true true true true false
@@ -536,6 +549,7 @@ variants = [
     "no_contract",
     "end_review",
     "one_shot",
+    "no_retry",
     "cloud_finalize",
     "static_only",
     "no_static",
@@ -558,6 +572,7 @@ expected = {
     "no_contract",
     "end_review",
     "one_shot",
+    "no_retry",
     "cloud_finalize",
     "static_only",
     "no_static",

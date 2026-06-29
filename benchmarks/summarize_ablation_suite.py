@@ -18,6 +18,7 @@ VARIANTS = (
     ("no_contract", "w/o Contract Verification"),
     ("end_review", "End-only Review"),
     ("one_shot", "w/o Cloud Replan"),
+    ("no_retry", "w/o Retry"),
     ("cloud_finalize", "Cloud Finalization"),
     ("static_only", "Static-Only"),
     ("no_static", "w/o Static"),

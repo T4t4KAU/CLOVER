@@ -412,7 +412,7 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(filter_trace["agent_loop"]["iterations"], 2)
         self.assertEqual(
             filter_trace["agent_loop"]["steps"][0]["observation_type"],
-            "contract_error",
+            "output_structure_error",
         )
         first_request = client.chat.completions.requests[0]
         first_prompt = first_request["messages"][-1]["content"]
