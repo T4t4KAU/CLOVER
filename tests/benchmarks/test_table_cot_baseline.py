@@ -207,6 +207,83 @@ class PureTableCotBaselineTest(unittest.TestCase):
         self.assertEqual(record["metric"], "accuracy")
         self.assertTrue(record["answer_correct"])
 
+    def test_mmqa_multitable_baseline_pipeline_with_mock_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "mmqa"
+            dataset_dir = root / "two_table" / "mmqa_tt_mock"
+            dataset_dir.mkdir(parents=True)
+            (dataset_dir / "table_1.csv").write_text(
+                "album_id,album,artist_id\na1,Blue,p1\n",
+                encoding="utf-8",
+            )
+            (dataset_dir / "table_2.csv").write_text(
+                "artist_id,artist\np1,Ada\n",
+                encoding="utf-8",
+            )
+            with (dataset_dir / "cases.jsonl").open("w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "case_id": "mmqa_tt_000001",
+                            "dataset_id": "mmqa_tt_mock",
+                            "question": "Which artist has the album Blue?",
+                            "answer": ["Ada"],
+                            "answer_raw": "Ada",
+                            "type": "string",
+                            "split": "two_table",
+                            "table_names": ["albums", "artists"],
+                            "source_files": ["table_1.csv", "table_2.csv"],
+                            "table_count": 2,
+                            "foreign_keys": [["albums.artist_id", "artists.artist_id"]],
+                            "primary_keys": ["albums.album_id", "artists.artist_id"],
+                        }
+                    )
+                    + "\n"
+                )
+            output = Path(tmpdir) / "run"
+            response = RemoteLLMResult(
+                text="Join albums.artist_id to artists.artist_id.\nFinal Answer: Ada",
+                response_payload={
+                    "usage": {
+                        "prompt_tokens": 40,
+                        "completion_tokens": 8,
+                        "total_tokens": 48,
+                    }
+                },
+                response_id="mock",
+                response_status="completed",
+                api_type="chat_completions",
+            )
+
+            with patch(
+                "benchmarks.table_cot_baseline.generate_remote_text",
+                return_value=response,
+            ):
+                summary = run_table_cot_baseline(
+                    dataset="mmqa",
+                    dataset_root=root,
+                    output_dir=output,
+                    remote_config={
+                        "provider": "local",
+                        "api_type": "chat_completions",
+                        "base_url": "http://localhost/v1",
+                        "model": "mock",
+                    },
+                    split="two_table",
+                    max_workers=1,
+                )
+
+            record = json.loads(
+                (output / "cases_index.jsonl").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(summary["stage"], "mmqa_pure_cot_baseline")
+        self.assertEqual(summary["correct"], 1)
+        self.assertEqual(summary["input_tokens"], 40)
+        self.assertEqual(summary["output_tokens"], 8)
+        self.assertEqual(record["metric"], "denotation_em")
+        self.assertTrue(record["answer_correct"])
+
     @staticmethod
     def _write_dataset(root: Path, *, cases: list[dict[str, object]]) -> None:
         dataset_dir = root / "table_1"
