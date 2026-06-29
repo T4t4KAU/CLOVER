@@ -1121,6 +1121,80 @@ class TableReasoningRuntimeTest(unittest.TestCase):
         self.assertEqual(result.profile["counters"]["cloud_replan_blocked"], 1)
         self.assertNotIn("cloud_replan_calls", result.profile["counters"])
 
+    def test_successful_execution_without_repair_signal_forces_final_answer(self) -> None:
+        item = SimpleNamespace(task=SimpleNamespace(retry_count=0))
+        observation = ExecutionResult(
+            ok=True,
+            answer={"answer_1": {"rows": [{"country": "France", "score": 100}]}},
+            outputs={"answer_1": {"rows": [{"country": "France", "score": 100}]}},
+            traces=[],
+            output_summaries={},
+        )
+
+        self.assertTrue(
+            table_pipeline._should_force_final_answer_for_query_synthesis(  # noqa: SLF001
+                batch=[item],
+                observation=observation,
+                allow_replan=True,
+                max_retries=1,
+            )
+        )
+
+        repair_observation = {
+            "ok": True,
+            "obs": [
+                {
+                    "op": "sql",
+                    "ok": True,
+                    "ev": {"route": "cloud_replan", "reason": "predicate_not_found"},
+                }
+            ],
+        }
+        self.assertFalse(
+            table_pipeline._should_force_final_answer_for_query_synthesis(  # noqa: SLF001
+                batch=[item],
+                observation=repair_observation,
+                allow_replan=True,
+                max_retries=1,
+            )
+        )
+
+    def test_closure_checker_accepts_single_cell_structured_static_answer(self) -> None:
+        task = SimpleNamespace(
+            answer_type="string",
+            question="Which country?",
+            metadata={},
+            answer_key="answer_1",
+        )
+
+        answer = table_pipeline._static_final_answer_from_value(  # noqa: SLF001
+            {"n": 1, "rows": [{"answer": "France"}]},
+            task=task,
+            source="format_answer",
+            local_slm_config={"enable_observable_closure_checker": True},
+        )
+
+        self.assertIsNotNone(answer)
+        self.assertEqual(answer.value, "France")
+        self.assertEqual(answer.reason, "typed_single_cell_string")
+
+    def test_closure_checker_still_rejects_whole_structured_rows(self) -> None:
+        task = SimpleNamespace(
+            answer_type="string",
+            question="Which country?",
+            metadata={},
+            answer_key="answer_1",
+        )
+
+        answer = table_pipeline._static_final_answer_from_value(  # noqa: SLF001
+            {"n": 1, "rows": [{"country": "France", "score": 100}]},
+            task=task,
+            source="format_answer",
+            local_slm_config={"enable_observable_closure_checker": True},
+        )
+
+        self.assertIsNone(answer)
+
     def test_analyze_profile_runs_evidence_sql_then_supervisor_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             table_path = _write_people_table(Path(tmpdir))

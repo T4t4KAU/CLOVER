@@ -21,15 +21,36 @@ VARIANTS = (
     ("cloud_finalize", "Cloud Finalization"),
     ("static_only", "Static-Only"),
     ("no_static", "w/o Static"),
+    ("no_closure_checker", "w/o Observable Closure Checker"),
 )
+
+
+def _selected_variants(suite_root: Path) -> list[tuple[str, str]]:
+    variant_by_name = dict(VARIANTS)
+    order_path = suite_root / "variant_order.txt"
+    if not order_path.is_file():
+        return list(VARIANTS)
+    variants = [
+        line.strip()
+        for line in order_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    unknown = [variant for variant in variants if variant not in variant_by_name]
+    duplicates = sorted({variant for variant in variants if variants.count(variant) > 1})
+    if unknown or duplicates or "full" not in variants:
+        raise ValueError(
+            "variant_order.txt must contain unique known variants and include full"
+        )
+    return [(variant, variant_by_name[variant]) for variant in variants]
 
 
 def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
     """Read all variant outputs and write JSON, CSV, and Markdown summaries."""
 
+    selected_variants = _selected_variants(suite_root)
     variant_data: dict[str, dict[str, Any]] = {}
     missing: list[Path] = []
-    for variant, display_name in VARIANTS:
+    for variant, display_name in selected_variants:
         run_dir = suite_root / f"{dataset}_{variant}"
         summary_path = run_dir / "run_summary.json"
         cases_path = run_dir / "cases_index.jsonl"
@@ -57,10 +78,11 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
             cases=variant_data[variant]["cases"],
             full_cases=full_cases,
         )
-        for variant, display_name in VARIANTS
+        for variant, display_name in selected_variants
     ]
-    full_accuracy = rows[0]["accuracy"]
-    full_row = rows[0]
+    row_by_variant = {row["variant"]: row for row in rows}
+    full_row = row_by_variant["full"]
+    full_accuracy = full_row["accuracy"]
     for row in rows:
         row["delta_vs_full_pp"] = (row["accuracy"] - full_accuracy) * 100.0
         row["remote_calls_delta_vs_full"] = row["remote_calls"] - full_row["remote_calls"]
@@ -77,23 +99,29 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
             full_row["estimated_remote_cost_usd"],
         )
 
-    row_by_variant = {row["variant"]: row for row in rows}
-    edge_substitution = _edge_substitution_summary(
-        full=full_row,
-        no_edge=row_by_variant["no_edge"],
+    edge_substitution = (
+        _edge_substitution_summary(full=full_row, no_edge=row_by_variant["no_edge"])
+        if "no_edge" in row_by_variant
+        else None
     )
-    edge_role_decomposition = _edge_role_decomposition(
-        full=full_row,
-        end_review=row_by_variant["end_review"],
-        no_edge=row_by_variant["no_edge"],
+    edge_role_decomposition = (
+        _edge_role_decomposition(
+            full=full_row,
+            end_review=row_by_variant["end_review"],
+            no_edge=row_by_variant["no_edge"],
+        )
+        if {"end_review", "no_edge"}.issubset(row_by_variant)
+        else None
     )
-    static_fast_path_ablation = _static_fast_path_ablation(
-        full=full_row,
-        all_edge=row_by_variant["all_edge"],
+    static_fast_path_ablation = (
+        _static_fast_path_ablation(full=full_row, all_edge=row_by_variant["all_edge"])
+        if "all_edge" in row_by_variant
+        else None
     )
     case_diagnostics, discordant_cases = _build_case_diagnostics(
         variant_data=variant_data,
         full_cases=full_cases,
+        variants=selected_variants,
     )
     selection_summary_path = suite_root / "cases.summary.json"
     selection_summary = (
@@ -107,7 +135,8 @@ def summarize_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any
         "suite_root": suite_root.as_posix(),
         "case_selection": selection_summary,
         "reference_variant": "full",
-        "total_cases": rows[0]["total_cases"],
+        "total_cases": full_row["total_cases"],
+        "variant_order": [variant for variant, _ in selected_variants],
         "variants": rows,
         "edge_substitution": edge_substitution,
         "edge_role_decomposition": edge_role_decomposition,
@@ -222,107 +251,124 @@ def render_markdown(report: dict[str, Any]) -> str:
         ]
     )
 
-    lines.extend(
-        [
-            "",
-            "## Edge-to-Cloud substitution",
-            "",
-            "| Metric | Full CLOVER | w/o Edge Agent | Change after disabling Edge |",
-            "| --- | ---: | ---: | ---: |",
-        ]
-    )
     edge = report["edge_substitution"]
-    edge_rows = (
-        (
-            "Accuracy",
-            _format_percent(edge["full_accuracy"]),
-            _format_percent(edge["no_edge_accuracy"]),
-            _format_pp(edge["accuracy_delta_pp"]),
-        ),
-        (
-            "Cloud calls",
-            str(edge["full_cloud_calls"]),
-            str(edge["no_edge_cloud_calls"]),
-            _format_signed_integer(edge["cloud_call_increase"]),
-        ),
-        (
-            "Cloud calls/query",
-            f"{edge['full_cloud_calls_per_query']:.3f}",
-            f"{edge['no_edge_cloud_calls_per_query']:.3f}",
-            _format_signed_float(edge["cloud_call_increase_per_query"], digits=3),
-        ),
-        (
-            "Cloud-call reduction from Edge",
-            _format_percent(edge["cloud_call_reduction_vs_no_edge"]),
-            "0.0%",
-            "Full vs w/o Edge",
-        ),
-        (
-            "Cloud synthesis calls",
-            str(edge["full_cloud_synthesis_calls"]),
-            str(edge["no_edge_cloud_synthesis_calls"]),
-            _format_signed_integer(edge["cloud_synthesis_increase"]),
-        ),
-        (
-            "Cloud replan calls",
-            str(edge["full_cloud_replan_calls"]),
-            str(edge["no_edge_cloud_replan_calls"]),
-            _format_signed_integer(edge["cloud_replan_increase"]),
-        ),
-        (
-            "Cloud tokens",
-            _format_integer(edge["full_remote_tokens"]),
-            _format_integer(edge["no_edge_remote_tokens"]),
-            _format_signed_integer(edge["remote_token_increase"]),
-        ),
-        (
-            "Estimated API cost",
-            _format_cost(edge["full_remote_cost_usd"]),
-            _format_cost(edge["no_edge_remote_cost_usd"]),
-            _format_signed_cost(edge["remote_cost_increase_usd"]),
-        ),
-        (
-            "Local SLM calls",
-            str(edge["full_local_slm_calls"]),
-            str(edge["no_edge_local_slm_calls"]),
-            _format_signed_integer(edge["local_slm_call_change"]),
-        ),
-    )
-    for metric, full_value, no_edge_value, change in edge_rows:
-        lines.append(f"| {metric} | {full_value} | {no_edge_value} | {change} |")
-    lines.extend(
-        [
-            "",
-            edge["interpretation"],
-            "",
-            "Full CLOVER recorded "
-            f"{edge['full_terminal_edge_hits']} terminal Edge hits and "
-            f"{edge['full_node_edge_successes']} successful node-level Edge runs. "
-            "These counts need not equal the Cloud-call increase exactly because a "
-            "node repair can change later execution and replanning paths.",
-            "",
-            "## Edge role decomposition",
-            "",
-            "| Edge role | Compared variants | Accuracy contribution " "| Cloud calls avoided |",
-            "| --- | --- | ---: | ---: |",
-        ]
-    )
-    for role in report["edge_role_decomposition"]:
-        lines.append(
-            "| {role} | {comparison} | {accuracy_text} | " "{cloud_calls_avoided:+d} |".format_map(
-                {
-                    **role,
-                    "accuracy_text": _format_pp(role["accuracy_contribution_pp"]),
-                }
-            )
+    if edge is not None:
+        lines.extend(
+            [
+                "",
+                "## Edge-to-Cloud substitution",
+                "",
+                "| Metric | Full CLOVER | w/o Edge Agent | Change after disabling Edge |",
+                "| --- | ---: | ---: | ---: |",
+            ]
         )
+        edge_rows = (
+            (
+                "Accuracy",
+                _format_percent(edge["full_accuracy"]),
+                _format_percent(edge["no_edge_accuracy"]),
+                _format_pp(edge["accuracy_delta_pp"]),
+            ),
+            (
+                "Cloud calls",
+                str(edge["full_cloud_calls"]),
+                str(edge["no_edge_cloud_calls"]),
+                _format_signed_integer(edge["cloud_call_increase"]),
+            ),
+            (
+                "Cloud calls/query",
+                f"{edge['full_cloud_calls_per_query']:.3f}",
+                f"{edge['no_edge_cloud_calls_per_query']:.3f}",
+                _format_signed_float(edge["cloud_call_increase_per_query"], digits=3),
+            ),
+            (
+                "Cloud-call reduction from Edge",
+                _format_percent(edge["cloud_call_reduction_vs_no_edge"]),
+                "0.0%",
+                "Full vs w/o Edge",
+            ),
+            (
+                "Cloud synthesis calls",
+                str(edge["full_cloud_synthesis_calls"]),
+                str(edge["no_edge_cloud_synthesis_calls"]),
+                _format_signed_integer(edge["cloud_synthesis_increase"]),
+            ),
+            (
+                "Cloud replan calls",
+                str(edge["full_cloud_replan_calls"]),
+                str(edge["no_edge_cloud_replan_calls"]),
+                _format_signed_integer(edge["cloud_replan_increase"]),
+            ),
+            (
+                "Cloud tokens",
+                _format_integer(edge["full_remote_tokens"]),
+                _format_integer(edge["no_edge_remote_tokens"]),
+                _format_signed_integer(edge["remote_token_increase"]),
+            ),
+            (
+                "Estimated API cost",
+                _format_cost(edge["full_remote_cost_usd"]),
+                _format_cost(edge["no_edge_remote_cost_usd"]),
+                _format_signed_cost(edge["remote_cost_increase_usd"]),
+            ),
+            (
+                "Local SLM calls",
+                str(edge["full_local_slm_calls"]),
+                str(edge["no_edge_local_slm_calls"]),
+                _format_signed_integer(edge["local_slm_call_change"]),
+            ),
+        )
+        for metric, full_value, no_edge_value, change in edge_rows:
+            lines.append(f"| {metric} | {full_value} | {no_edge_value} | {change} |")
+        lines.extend(
+            [
+                "",
+                edge["interpretation"],
+                "",
+                "Full CLOVER recorded "
+                f"{edge['full_terminal_edge_hits']} terminal Edge hits and "
+                f"{edge['full_node_edge_successes']} successful node-level Edge runs. "
+                "These counts need not equal the Cloud-call increase exactly because a "
+                "node repair can change later execution and replanning paths.",
+            ]
+        )
+
+    if report["edge_role_decomposition"] is not None:
+        lines.extend(
+            [
+                "",
+                "## Edge role decomposition",
+                "",
+                "| Edge role | Compared variants | Accuracy contribution "
+                "| Cloud calls avoided |",
+                "| --- | --- | ---: | ---: |",
+            ]
+        )
+        for role in report["edge_role_decomposition"]:
+            lines.append(
+                "| {role} | {comparison} | {accuracy_text} | "
+                "{cloud_calls_avoided:+d} |".format_map(
+                    {
+                        **role,
+                        "accuracy_text": _format_pp(role["accuracy_contribution_pp"]),
+                    }
+                )
+            )
+        lines.extend(
+            [
+                "",
+                "Terminal review contribution compares End-only Review against w/o "
+                "Edge Agent. Node repair contribution compares Full CLOVER against "
+                "End-only Review. These are paired mechanism contrasts, not additive "
+                "causal guarantees when execution paths interact.",
+            ]
+        )
+
+    static_fast_path = report["static_fast_path_ablation"]
+    if static_fast_path is None:
+        return "\n".join(lines) + "\n"
     lines.extend(
         [
-            "",
-            "Terminal review contribution compares End-only Review against w/o "
-            "Edge Agent. Node repair contribution compares Full CLOVER against "
-            "End-only Review. These are paired mechanism contrasts, not additive "
-            "causal guarantees when execution paths interact.",
             "",
             "## Static fast-path ablation",
             "",
@@ -330,7 +376,6 @@ def render_markdown(report: dict[str, Any]) -> str:
             "| --- | ---: | ---: | ---: |",
         ]
     )
-    static_fast_path = report["static_fast_path_ablation"]
     static_fast_path_rows = (
         (
             "Accuracy",
@@ -598,6 +643,7 @@ def _build_case_diagnostics(
     *,
     variant_data: dict[str, dict[str, Any]],
     full_cases: dict[tuple[str, str], dict[str, Any]],
+    variants: Sequence[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     all_records: list[dict[str, Any]] = []
     discordant: list[dict[str, Any]] = []
@@ -610,7 +656,7 @@ def _build_case_diagnostics(
             "variants": {},
         }
         full_correct = bool(full_record.get("answer_correct"))
-        for variant, display_name in VARIANTS:
+        for variant, display_name in variants:
             record = variant_data[variant]["cases"][key]
             correct = bool(record.get("answer_correct"))
             error = record.get("error")
@@ -995,7 +1041,11 @@ def _safe_divide(numerator: int | float, denominator: int | float) -> float:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite-root", type=Path, required=True)
-    parser.add_argument("--dataset", choices=("tablebench", "wikitq", "tablefact"), required=True)
+    parser.add_argument(
+        "--dataset",
+        choices=("tablebench", "wikitq", "tablefact", "mmqa"),
+        required=True,
+    )
     return parser
 
 

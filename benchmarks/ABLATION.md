@@ -1,10 +1,12 @@
 # CLOVER Ablation Suite
 
-The three dataset experiments are independent. Each can run on either a fixed-size subset (default 100 cases) or the full dataset:
+Current ablation reporting is restricted to TableBench. MMQA should be used for
+ordinary ACC/regression evaluation only, not for ablation conclusions, unless a
+future experiment explicitly re-opens that scope.
 
-- `bash benchmarks/run_ablation_suite.sh wikitq`: WikiTQ.
+The TableBench experiment can run on either a fixed-size subset (default 100 cases) or the full dataset:
+
 - `bash benchmarks/run_ablation_suite.sh tablebench`: TableBench, restricted to `FactChecking` and `NumericalReasoning`.
-- `bash benchmarks/run_ablation_suite.sh tablefact`: TableFact, restricted to `FactChecking` (the `simple` and `complex` subtypes).
 
 Sampling relies only on dataset metadata, question text, answer type, table shape, and cell representation. It never reads model predictions, execution traces, or correctness labels. Default manifests live in `benchmarks/ablation_cases/`, and all eleven variants reuse the same case set.
 
@@ -12,11 +14,11 @@ The suite supports three selection policies:
 
 - `representative`: original task-type stratified subset, used to report overall ACC/cost trends.
 - `edge_opportunity`: Edge-mechanism-enriched subset, used to test whether local semantic processing improves ACC, reduces Cloud calls, and how much node repair and terminal review each contribute.
-- `full_eval`: the full eligible dataset (TableBench 493 / WikiTQ 4344 / TableFact 1998), used for the final reported ablation numbers.
+- `full_eval`: the full eligible TableBench dataset (493 cases), used for the final reported ablation numbers.
 
 For the final paper, use `full_eval` so the ablation ACC matches the main results table. The 100-case subsets remain useful for quick iteration and the `mechanism-focused, outcome-blind` analysis.
 
-For WikiTQ, 85 cases come from field selection, value normalization, short-list assembly, and small candidate sets, while 15 are deterministic control questions. For TableBench, 70 cases come from local semantic opportunities and 30 are deterministic control questions. For TableFact, 70 cases come from field selection, value normalization, and small candidate sets, while 30 are deterministic control questions. Each manifest's `.summary.json` records the sampling basis explicitly and marks `uses_model_predictions=false` and `uses_answer_correctness=false`.
+For TableBench, 70 cases come from local semantic opportunities and 30 are deterministic control questions. Each manifest's `.summary.json` records the sampling basis explicitly and marks `uses_model_predictions=false` and `uses_answer_correctness=false`.
 
 In the paper, refer to the 100-case subset explicitly as the "mechanism-focused, outcome-blind subset". Do not treat ACC on this subset as an unbiased population ACC over the entire benchmark. If space permits, also report the `representative` subset as a robustness control.
 
@@ -26,14 +28,10 @@ In the paper, refer to the 100-case subset explicitly as the "mechanism-focused,
 conda activate clover
 
 # 100-case subset (default, for quick iteration):
-bash benchmarks/run_ablation_suite.sh wikitq /path/to/edge-model
 bash benchmarks/run_ablation_suite.sh tablebench /path/to/edge-model
-bash benchmarks/run_ablation_suite.sh tablefact /path/to/edge-model
 
 # Full dataset (for final reported numbers):
-CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh wikitq /path/to/edge-model
 CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablebench /path/to/edge-model
-CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablefact /path/to/edge-model
 ```
 
 The suite runs the following eleven variants:
@@ -108,15 +106,15 @@ If the eleven runs are already complete and only the summary needs to be regener
 
 ```bash
 python -m benchmarks.summarize_ablation_suite \
-  --suite-root benchmark/runs/wikitq_ablation_<timestamp> \
-  --dataset wikitq
+  --suite-root benchmark/runs/tablebench_ablation_<timestamp> \
+  --dataset tablebench
 ```
 
 ## Regenerating the Fixed Subset
 
 ```bash
 CLOVER_ABLATION_REGENERATE_MANIFEST=1 \
-bash benchmarks/run_ablation_suite.sh wikitq /path/to/edge-model
+bash benchmarks/run_ablation_suite.sh tablebench /path/to/edge-model
 ```
 
 Default parameters:
@@ -132,24 +130,15 @@ Run the representative control subset:
 
 ```bash
 CLOVER_ABLATION_SELECTION_POLICY=representative \
-bash benchmarks/run_ablation_suite.sh wikitq /path/to/edge-model
+bash benchmarks/run_ablation_suite.sh tablebench /path/to/edge-model
 ```
 
 The policies use different manifest filenames and never overwrite each other:
 
 ```text
-wikitq_representative_100_seed20260619.jsonl
-wikitq_edge_opportunity_100_seed20260619.jsonl
-wikitq_full_eval.jsonl
 tablebench_representative_100_seed20260619.jsonl
 tablebench_edge_opportunity_100_seed20260619.jsonl
 tablebench_full_eval.jsonl
-tablefact_representative_100_seed20260619.jsonl
-tablefact_edge_opportunity_100_seed20260619.jsonl
-tablefact_full_eval.jsonl
-mmqa_representative_100_seed20260619.jsonl
-mmqa_edge_opportunity_100_seed20260619.jsonl
-mmqa_full_eval.jsonl
 ```
 
 TableBench download/conversion is also fixed to keep only the two reasoning types. To regenerate from previously converted data:
@@ -178,25 +167,18 @@ CLOVER_DATASET_OVERWRITE=1 \
 bash benchmarks/download_datasets.sh --dataset mmqa --overwrite
 ```
 
-MMQA ablations use the same runner:
-
-```bash
-MMQA_SPLIT=two_table \
-bash benchmarks/run_ablation_suite.sh mmqa /path/to/edge-model
-```
-
 ## Cost-Accuracy Pareto (P0-2)
 
 Aggregate cost-accuracy pairs across CLOVER, baselines, and ablation variants for Pareto analysis:
 
 ```bash
 python -m benchmarks.summarize_cost_accuracy \
-  --dataset wikitq \
-  --ablation-suite benchmark/runs/wikitq_ablation_<timestamp> \
-  --clover-run benchmark/runs/wikitq_clover_<timestamp> \
-  --pure-cot-run benchmark/runs/wikitq_pure_cot_<timestamp> \
+  --dataset tablebench \
+  --ablation-suite benchmark/runs/tablebench_ablation_<timestamp> \
+  --clover-run benchmark/runs/tablebench_clover_<timestamp> \
+  --pure-cot-run benchmark/runs/tablebench_pure_cot_<timestamp> \
   --external-baselines benchmarks/external_baselines.json \
-  --output-dir benchmark/runs/pareto_wikitq
+  --output-dir benchmark/runs/pareto_tablebench
 ```
 
 Output: `cost_accuracy_pareto.{csv,md,json}` with per-query and per-1K-query cost, accuracy, Cloud/Edge calls, and total tokens.

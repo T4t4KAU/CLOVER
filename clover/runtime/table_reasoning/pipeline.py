@@ -4197,15 +4197,27 @@ def _static_final_answer_from_value(
         return None
     if answer_type in _STATIC_ACTION_NUMBER_TYPES:
         normalized = _normalize_number_answer(value)
+        if not _valid_static_number(normalized):
+            scalar = _first_observed_scalar(value)
+            if scalar is not _STATIC_ACTION_NO_ANSWER:
+                normalized = _normalize_number_answer(scalar)
         if _valid_static_number(normalized):
             return _StaticFinalAnswer(
                 value=normalized,
-                reason="typed_number",
+                reason=(
+                    "typed_number"
+                    if normalized == _normalize_number_answer(value)
+                    else "typed_single_cell_number"
+                ),
                 source=source,
             )
         return None
     if answer_type in _STATIC_ACTION_BOOLEAN_TYPES:
         normalized = _normalize_boolean_answer(value)
+        if not isinstance(normalized, bool):
+            scalar = _first_observed_scalar(value)
+            if scalar is not _STATIC_ACTION_NO_ANSWER:
+                normalized = _normalize_boolean_answer(scalar)
         if isinstance(normalized, bool):
             return _StaticFinalAnswer(
                 value=normalized,
@@ -4229,6 +4241,17 @@ def _static_final_answer_from_value(
                 reason="typed_string",
                 source=source,
             )
+        scalar = _first_observed_scalar(value)
+        if scalar is not _STATIC_ACTION_NO_ANSWER:
+            normalized = _normalize_answer_for_task(task, scalar)
+            if normalized is not None:
+                text = str(normalized).strip()
+                if text and not _looks_like_structured_row(text):
+                    return _StaticFinalAnswer(
+                        value=text,
+                        reason="typed_single_cell_string",
+                        source=source,
+                    )
         return None
     if value is not None:
         return _StaticFinalAnswer(value=value, reason="typed_value", source=source)
@@ -5083,8 +5106,11 @@ def _run_supervisor_synthesis(
                 logic_dag=logic_dag,
                 observation=synthesis_observation,
                 current_command=current_command,
-                force_final_answer=(
-                    not allow_replan or all(item.task.retry_count >= max_retries for item in batch)
+                force_final_answer=_should_force_final_answer_for_query_synthesis(
+                    batch=batch,
+                    observation=synthesis_observation,
+                    allow_replan=allow_replan,
+                    max_retries=max_retries,
                 ),
             )
             profiler.increment("supervisor_synthesis_calls")
@@ -5306,7 +5332,12 @@ def _run_one_supervisor_action_report_for_batch(
                 logic_dag={"task_type": item.task.task_type, "query_plans": []},
                 observation=synthesis_observation,
                 current_command=current_command,
-                force_final_answer=(not allow_replan or item.task.retry_count >= max_retries),
+                force_final_answer=_should_force_final_answer_for_action_report(
+                    task=item.task,
+                    observation=synthesis_observation,
+                    allow_replan=allow_replan,
+                    max_retries=max_retries,
+                ),
             )
             local_profiler.increment("supervisor_synthesis_calls")
             _record_remote_token_usage(
@@ -5333,6 +5364,65 @@ def _run_one_supervisor_action_report_for_batch(
             profiler=local_profiler,
             error=exc,
         )
+
+
+def _should_force_final_answer_for_query_synthesis(
+    *,
+    batch: list[LogicDagItem],
+    observation: Any,
+    allow_replan: bool,
+    max_retries: int,
+) -> bool:
+    """Avoid evidence-free Cloud replans after deterministic execution.
+
+    Replanning is useful when the runtime can point to a concrete failure
+    signal: SQL/execution failure, empty-result repair evidence, or an explicit
+    verifier packet.  When execution succeeded and no localized repair signal is
+    present, ask the Supervisor to synthesize an answer from current evidence
+    instead of proposing another SQL.  This keeps the static path dominant while
+    preserving repair for clear DAG failures.
+    """
+
+    if not allow_replan:
+        return True
+    if all(item.task.retry_count >= max_retries for item in batch):
+        return True
+    return not _has_cloud_replan_signal(observation)
+
+
+def _should_force_final_answer_for_action_report(
+    *,
+    task: TaskItem,
+    observation: Any,
+    allow_replan: bool,
+    max_retries: int,
+) -> bool:
+    if not allow_replan:
+        return True
+    if task.retry_count >= max_retries:
+        return True
+    return not _has_cloud_replan_signal(observation)
+
+
+def _has_cloud_replan_signal(observation: Any) -> bool:
+    if isinstance(observation, ExecutionResult):
+        return not observation.ok
+    if not isinstance(observation, dict):
+        return False
+    if observation.get("ok") is False:
+        return True
+    if _observation_requests_cloud_replan(observation):
+        return True
+    obs = observation.get("obs")
+    if isinstance(obs, list):
+        for item in obs:
+            if not isinstance(item, dict):
+                continue
+            if item.get("ok") is False:
+                return True
+            if item.get("err") is not None:
+                return True
+    return False
 
 
 def _run_supervisor_action_report(

@@ -128,6 +128,18 @@ VARIANT_FLAGS = {
         "enable_static_fast_path": False,
         "enable_static_finalization": False,
     },
+    "no_closure_checker": {
+        "enable_edge_agent": True,
+        "enable_edge_repair": True,
+        "enable_terminal_edge_review": True,
+        "enable_contract_gate": True,
+        "enable_node_review": True,
+        "enable_cloud_recovery": True,
+        "enable_cloud_replan": True,
+        "enable_cloud_synthesis": True,
+        "enable_static_fast_path": True,
+        "enable_static_finalization": True,
+    },
 }
 
 
@@ -135,10 +147,12 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
     """Validate variant flags, fixed cases, and key mechanism counters."""
 
     expected_cases = _manifest_case_keys(suite_root / "cases.jsonl")
+    selected_variants = _selected_variants(suite_root)
     checks: list[dict[str, Any]] = []
     failures: list[str] = []
 
-    for variant, expected_flags in VARIANT_FLAGS.items():
+    for variant in selected_variants:
+        expected_flags = VARIANT_FLAGS[variant]
         run_dir = suite_root / f"{dataset}_{variant}"
         summary_path = run_dir / "run_summary.json"
         if not summary_path.is_file():
@@ -338,6 +352,24 @@ def check_ablation_suite(*, suite_root: Path, dataset: str) -> dict[str, Any]:
     return report
 
 
+def _selected_variants(suite_root: Path) -> list[str]:
+    order_path = suite_root / "variant_order.txt"
+    if not order_path.is_file():
+        return list(VARIANT_FLAGS)
+    variants = [
+        line.strip()
+        for line in order_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    unknown = [variant for variant in variants if variant not in VARIANT_FLAGS]
+    duplicates = sorted({variant for variant in variants if variants.count(variant) > 1})
+    if unknown or duplicates or "full" not in variants:
+        raise ValueError(
+            "variant_order.txt must contain unique known variants and include full"
+        )
+    return variants
+
+
 def _record_check(
     checks: list[dict[str, Any]],
     failures: list[str],
@@ -379,7 +411,11 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite-root", type=Path, required=True)
-    parser.add_argument("--dataset", choices=("tablebench", "wikitq", "tablefact"), required=True)
+    parser.add_argument(
+        "--dataset",
+        choices=("tablebench", "wikitq", "tablefact", "mmqa"),
+        required=True,
+    )
     return parser
 
 

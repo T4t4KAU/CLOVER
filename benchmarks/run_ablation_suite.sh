@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Command-line arguments and environment variables still override these values.
 # =============================================================================
-USER_DATASET="wikitq"  # wikitq | tablebench | tablefact | mmqa
+USER_DATASET="tablebench"  # Current ablation target: tablebench
 USER_PYTHON_BIN="python"  # Use the python from the active conda/uv environment
 USER_EDGE1_MODEL_PATH="/root/autodl-tmp/models/Qwen2.5-3B-Instruct"
 USER_EDGE2_MODEL_PATH=""  # Empty: reuse EDGE1 model/server
@@ -33,6 +33,7 @@ USER_ABLATION_SELECTION_POLICY="edge_opportunity"  # representative | edge_oppor
 USER_ABLATION_FULL_EVAL="false"                    # true: use the full dataset (all eligible cases) instead of a fixed-size subset
 USER_MAX_RETRIES="3"
 USER_VALIDATE_ONLY="false"         # true: validate settings/cases without running
+USER_ALLOW_NON_TABLEBENCH_ABLATION="false"  # Safety guard for current paper scope
 USER_VARIANT_ORDER=""              # Empty: deterministic shuffle using the seed
                                     # Or: full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static,no_closure_checker
 
@@ -56,7 +57,10 @@ Usage:
   bash benchmarks/run_ablation_suite.sh [DATASET] [EDGE1_MODEL_PATH] [eval options...]
 
 DATASET:
-  tablebench | wikitq | tablefact | mmqa
+  tablebench
+
+Current ablation reporting is restricted to TableBench. Historical/debug runs on
+other datasets require CLOVER_ALLOW_NON_TABLEBENCH_ABLATION=true.
 
 This runs eleven variants on one fixed manifest:
   full, all_edge, no_edge, static, no_contract, end_review, one_shot, cloud_finalize, static_only, no_static, no_closure_checker
@@ -80,12 +84,9 @@ Examples:
   bash benchmarks/run_ablation_suite.sh
 
   # Override dataset and model temporarily:
-  bash benchmarks/run_ablation_suite.sh wikitq /models/Qwen2.5-3B-Instruct
   bash benchmarks/run_ablation_suite.sh tablebench /models/Qwen2.5-3B-Instruct
-  bash benchmarks/run_ablation_suite.sh tablefact /models/Qwen2.5-3B-Instruct
-  MMQA_SPLIT=two_table bash benchmarks/run_ablation_suite.sh mmqa /models/Qwen2.5-3B-Instruct
 
-  # Full-dataset ablation (TableBench 493 / WikiTQ 4344 / TableFact 1998):
+  # Full-dataset ablation (TableBench 493):
   CLOVER_ABLATION_FULL_EVAL=true bash benchmarks/run_ablation_suite.sh tablebench /models/Qwen2.5-3B-Instruct
 
 Useful environment variables:
@@ -95,6 +96,7 @@ Useful environment variables:
   CLOVER_ABLATION_SELECTION_POLICY=edge_opportunity
   CLOVER_ABLATION_REGENERATE_MANIFEST=1
   CLOVER_ABLATION_OUTPUT_ROOT=/path/to/output
+  CLOVER_ALLOW_NON_TABLEBENCH_ABLATION=true  # explicit legacy/debug override
   CLOVER_EDGE1_MODEL_PATH=/path/to/model
   CLOVER_EDGE2_MODEL_PATH=/path/to/model  # optional; empty/default reuses EDGE1
   CLOVER_ABLATION_VARIANT_ORDER=full,all_edge,no_edge,static,no_contract,end_review,one_shot,cloud_finalize,static_only,no_static,no_closure_checker
@@ -123,6 +125,13 @@ case "${DATASET}" in
     exit 2
     ;;
 esac
+
+ALLOW_NON_TABLEBENCH_ABLATION="${CLOVER_ALLOW_NON_TABLEBENCH_ABLATION:-${USER_ALLOW_NON_TABLEBENCH_ABLATION}}"
+if [[ "${DATASET}" != "tablebench" && "${ALLOW_NON_TABLEBENCH_ABLATION}" != "true" ]]; then
+  echo "Current ablation scope is TableBench only; got dataset=${DATASET}." >&2
+  echo "For historical/debug runs, set CLOVER_ALLOW_NON_TABLEBENCH_ABLATION=true explicitly." >&2
+  exit 2
+fi
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
@@ -507,7 +516,7 @@ if [[ -n "${VARIANT_ORDER_RAW}" ]]; then
   while IFS= read -r variant; do
     [[ -n "${variant}" ]] && VARIANT_ORDER+=("${variant}")
   done < <(
-    printf '%s' "${VARIANT_ORDER_RAW}" \
+    printf '%s\n' "${VARIANT_ORDER_RAW}" \
       | tr ',' '\n' \
       | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
   )
@@ -555,9 +564,12 @@ expected = {
     "no_closure_checker",
 }
 actual = sys.argv[1:]
-if len(actual) != len(expected) or set(actual) != expected:
+unknown = sorted(set(actual) - expected)
+duplicates = sorted({variant for variant in actual if actual.count(variant) > 1})
+if unknown or duplicates or "full" not in actual:
     raise SystemExit(
-        "Variant order must contain each variant exactly once: "
+        "Variant order must be a non-empty subset of variants, include full, "
+        "and contain no duplicates. Expected variants: "
         + ",".join(sorted(expected))
     )
 PY
