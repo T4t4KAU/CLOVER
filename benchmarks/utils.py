@@ -158,7 +158,7 @@ def build_brief_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "edge_tokens_per_q": _per_q(local_tokens),
         "calls_per_q": _per_q(remote_calls + local_calls),
         "api_cost_per_q_usd": _per_q(api_cost_usd),
-        # Legacy names: the global model may be cloud-hosted or local-hosted.
+        # Legacy metric names for the globally scoped model role.
         "cloud_model": global_model,
         "cloud_tokens": remote_tokens,
         "cloud_tokens_per_q": _per_q(remote_tokens),

@@ -1,8 +1,8 @@
-"""Local SLM client facade.
+"""Local-repair model client facade.
 
-The first SLM runtime can be a cloud OpenAI-compatible endpoint. This module
-keeps that choice outside NodeAgent code by loading the SLM config and reusing
-the shared Remote LLM client implementation.
+The paper configuration uses a locally deployed OpenAI-compatible endpoint.
+This module keeps endpoint details outside NodeAgent code by loading the local
+model config and reusing the shared client implementation.
 """
 
 from __future__ import annotations

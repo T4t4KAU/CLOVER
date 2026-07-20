@@ -144,7 +144,7 @@ class TableReasoningNodeAgent(BaseNodeAgent):
         """Return the most severe mismatch type across all roots.
 
         Priority: wrong_column > system_bug > not_found > format > quoting.
-        wrong_column triggers Cloud escalation; the remaining classes are
+        wrong_column triggers global replanning; the remaining classes are
         eligible for local repair.
         """
         analysis = self._compute_mismatch_analysis()
@@ -492,7 +492,7 @@ def _render_initial_agent_prompt(
         prompt
         + "\n\nAll-Edge ablation instruction:\n"
         + "- Implement the exact node operation shown in the file payload.\n"
-        + "- Do not reinterpret, repair, broaden, or revise the Cloud plan.\n"
+        + "- Do not reinterpret, repair, broaden, or revise the global plan.\n"
         + "- Use only the solve-function arguments and return a contract-valid result.\n"
         + "- Do not call a prebuilt deterministic table tool.\n"
     )

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clover-agent-runtime"
 version = "0.1.0"
-description = "A cloud-edge agent runtime for cost-efficient data reasoning."
+description = "Accurate and token-efficient tabular reasoning with locally deployable open-weight LLMs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

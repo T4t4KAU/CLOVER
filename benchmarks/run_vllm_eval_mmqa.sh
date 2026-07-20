@@ -13,7 +13,7 @@ set -euo pipefail
 #   MMQA_SPLIT=two_table bash benchmarks/run_vllm_eval_mmqa.sh
 #
 # Model/server settings are inherited from benchmarks/run_vllm_eval_clover.sh:
-#   CLOVER_EDGE_MODEL_PATH=/root/autodl-tmp/models/Qwen3.6-27B
+#   CLOVER_EDGE1_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-32B-Instruct
 #   CLOVER_EDGE1_GPUS=0
 #   CLOVER_EDGE1_PORT=8000
 #   CLOVER_EDGE1_MAX_MODEL_LEN=8192

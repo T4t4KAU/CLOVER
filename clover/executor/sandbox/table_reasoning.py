@@ -264,7 +264,7 @@ class TableReasoningSandboxPolicy:
             "observations": _compact_observations(observations),
             "output_contract": state.task.get("output_contract"),
         }
-        # Inject the original cloud SQL as a hint for the Edge Agent.
+        # Inject the global plan's SQL as a hint for node-local repair.
         source_sql = state.node.get("source_sql")
         if isinstance(source_sql, str) and source_sql.strip():
             world["source_sql"] = source_sql.strip()

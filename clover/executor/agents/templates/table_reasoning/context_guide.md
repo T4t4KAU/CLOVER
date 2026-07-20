@@ -2,7 +2,7 @@
 
 The `world` object in the file payload contains everything you need:
 
-- `source_sql`: the original cloud SQL this node was compiled from. Read it to understand the intended transformation.
+- `source_sql`: the global plan's SQL from which this node was compiled. Read it to understand the intended transformation.
 - `inputs`: one entry per solve argument. Each entry has:
   - `rows`: row count.
   - `cols`: column names.

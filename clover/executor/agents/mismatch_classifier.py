@@ -5,7 +5,7 @@ against actual column values. Used to route repair strategy:
 
 - quoting / format  -> SLM rewrites SQL predicate (lightweight, plan A)
 - not_found         -> SLM writes Python (flexible, plan B)
-- wrong_column or candidate column -> escalate to Cloud (plan C)
+- wrong_column or candidate column -> global replanning (plan C)
 - system_bug        -> SLM writes Python against the local dataframe
 """
 

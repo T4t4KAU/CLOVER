@@ -4,18 +4,31 @@
 
 # CLOVER
 
-CLOVER is a cost-efficient global-edge collaborative multi-agent system for data reasoning. It separates global reasoning, local planning, local execution, and result review into coordinated agents. The global model can be served either by a cloud API or by a local vLLM endpoint; Edge refers to the local task-level model role, not necessarily a different machine.
+CLOVER is a context-routed framework for accurate and token-efficient tabular
+reasoning with locally deployable open-weight language models. It compiles a
+generated SQL plan into an explicit execution graph, runs supported relational
+and arithmetic operations with a deterministic executor, and validates every
+intermediate result.
+
+When execution fails, CLOVER permits local repair only when the evidence,
+allowed modification, and validation procedure are confined to the failed
+node. Failures requiring changes to a source, dependency, join, or broader plan
+are routed to global replanning. The local and global roles differ in context
+and authority, not model size; the experiments use the same locally deployed
+model checkpoint for both roles, without cloud APIs.
 
 ## Highlights
 
-- Global-edge collaborative agent architecture.
-- Global reasoning with local task execution; the global model may be cloud-hosted or local-hosted.
-- Modular workflow stages for planning, execution, reporting, and retry.
-- Extensible design for multiple data reasoning task types.
+- Checked SQL-to-execution-graph compilation.
+- Deterministic execution for supported table operations.
+- Conservative node-local repair based on observable closure.
+- Global replanning for structural or cross-node failures.
+- One representation for single-table and multi-table questions.
+- Local deployment with Qwen2.5-14B-Instruct or Qwen2.5-32B-Instruct.
 
 ## Setup
 
-Using uv:
+Using `uv`:
 
 ```bash
 uv venv
@@ -23,7 +36,7 @@ source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
-Using conda:
+Using Conda:
 
 ```bash
 conda create -n clover python=3.10
@@ -31,195 +44,84 @@ conda activate clover
 pip install -r requirements.txt
 ```
 
-ModelScope dataset downloads are optional. Install the extra before using
-`CLOVER_DATASET_SOURCE=modelscope`:
+ModelScope dataset downloads are optional:
 
 ```bash
 pip install '.[modelscope]'
 ```
 
-Configure models with JSON files. Public templates are committed under
-`model_config/`, but real API keys should stay in environment variables.
+## Model configuration
 
-Global LLM config, for example `model_config/remote_llm_config.json`:
-
-```json
-{
-  "provider": "openai",
-  "api_type": "responses",
-  "api_key_env": "OPENAI_API_KEY",
-  "base_url": "https://api.openai.com/v1",
-  "model": "gpt-5.2",
-  "timeout": 180,
-  "max_retries": 2,
-  "max_output_tokens": 12000,
-  "temperature": 0
-}
-```
-
-DeepSeek Global LLM config, for example `model_config/deepseek_remote_llm_config.json`:
-
-```json
-{
-  "provider": "deepseek",
-  "api_type": "chat_completions",
-  "api_key_env": "DEEPSEEK_API_KEY",
-  "base_url": "https://api.deepseek.com",
-  "model": "deepseek-v4-pro",
-  "timeout": 180,
-  "max_retries": 2,
-  "max_tokens": 12000,
-  "temperature": 0
-}
-```
-
-Qwen2.5-Coder-7B-Instruct Local SLM config, for example `model_config/local_slm_config.json`:
-
-```json
-{
-  "provider": "local",
-  "api_type": "chat_completions",
-  "api_key": "EMPTY",
-  "base_url": "http://127.0.0.1:8000/v1",
-  "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
-  "timeout": 1800,
-  "max_retries": 2,
-  "max_tokens": 4096,
-  "temperature": 0
-}
-```
-
-Start a local OpenAI-compatible SLM server with either MLX or vLLM:
+The main experiment launcher starts a local OpenAI-compatible vLLM service and
+generates the runtime configuration automatically. By default, the planning
+and local-repair roles share one model service and checkpoint:
 
 ```bash
-bash benchmarks/start_mlx_openai_server.sh
-# or
-bash benchmarks/start_vllm_openai_server.sh
+CLOVER_EDGE1_MODEL_PATH=/models/Qwen2.5-14B-Instruct \
+CLOVER_EDGE1_GPUS=0 \
+bash benchmarks/run_vllm_eval_clover.sh tablebench --max-cases 50
 ```
 
-Both scripts default to `Qwen/Qwen2.5-Coder-7B-Instruct` at `http://127.0.0.1:8000/v1`,
-matching `model_config/local_slm_config.json`. Override the model with
-`CLOVER_LOCAL_MODEL`, `CLOVER_MLX_MODEL`, or `CLOVER_VLLM_MODEL`.
+Some internal configuration names retain `edge`, `cloud`, `remote`, or `SLM`
+for backward compatibility. They identify runtime roles or legacy options and
+do not imply cloud deployment, separate machines, or different model sizes.
+For the paper setting, point both semantic roles to the same local checkpoint.
 
-More design notes are available in `docs/architecture.md`,
-`docs/runtime_design.md`, `docs/benchmarking.md`, and
-`docs/model_configs.md`. Prompt templates are indexed in `docs/prompts.md`.
+## Prepare benchmark datasets
 
-Then set the API keys and config paths:
+Download and convert TableBench, WikiTQ, TabFact, and MMQA:
 
 ```bash
-export OPENAI_API_KEY=...
-export DEEPSEEK_API_KEY=...
-export CLOVER_GLOBAL_LLM_CONFIG=model_config/remote_llm_config.json
-export CLOVER_LOCAL_SLM_CONFIG=model_config/local_slm_config.json
+bash benchmarks/download_datasets.sh
 ```
 
-`CLOVER_REMOTE_LLM_CONFIG` and `--remote-llm-config` remain supported as
-legacy aliases for the Global model config.
-
-## Prepare Benchmark Datasets
-
-Download and convert the supported benchmark datasets into CLOVER's local eval
-layout:
+Prepare one dataset only:
 
 ```bash
-python -m benchmarks.download --datasets-root datasets
+bash benchmarks/download_datasets.sh \
+  --dataset tablebench \
+  --datasets-root datasets
 ```
 
-By default this prepares DataBench, non-visual TableBench, and the numerical
-FinanceBench subset. To prepare only TableBench:
+TableBench evaluation uses its non-visual reasoning cases. WikiTQ uses the
+`pristine-unseen-tables` split, TabFact uses `small-test`, and MMQA provides the
+dedicated two-table and three-table evaluations.
+
+## Run CLOVER evaluation
+
+Use the same launcher for all four datasets:
 
 ```bash
-python -m benchmarks.download --dataset tablebench --datasets-root datasets
+bash benchmarks/run_vllm_eval_clover.sh tablebench
+bash benchmarks/run_vllm_eval_clover.sh wikitq
+bash benchmarks/run_vllm_eval_clover.sh tablefact
+bash benchmarks/run_vllm_eval_mmqa.sh two_table
 ```
 
-TableBench visualization/chart-generation cases are excluded by default because
-CLOVER's TableBench eval targets non-visual table reasoning.
+Pass `--max-cases N` for a prefix smoke test or `--sample-size N` for a sampled
+run. Outputs are written below `benchmark/runs` unless overridden by the
+launcher settings.
 
-## Run Benchmark
+## Ablations
 
-Benchmark outputs are written under `benchmark/runs`. The shell wrappers read
-the model configs from `CLOVER_REMOTE_LLM_CONFIG` and `CLOVER_LOCAL_SLM_CONFIG`
-by default, and any extra CLI arguments are forwarded to `python -m benchmarks.eval`.
-Local execution concurrency is split into `--max-parallel-execution-units`,
-`--max-parallel-slm-node-jobs`, `--max-parallel-slm-sequences`, and
-`--max-pending-slm-sequences`. Use `--slm-scheduler fifo` to disable TPTT for
-an ablation run, or set `CLOVER_SLM_SCHEDULER=fifo` in the shell wrappers.
-
-### DataBench
-
-Run CLOVER on a small DataBench smoke test:
+The ablation suite evaluates the routing and recovery components of CLOVER:
 
 ```bash
-bash benchmarks/run_databench_eval.sh \
-  --databench-root datasets/databench \
-  --run-name databench_bench_smoke \
-  --max-cases 50
+bash benchmarks/run_ablation_suite.sh
 ```
 
-Run the DataBench Remote LLM baseline on the same split:
-
-```bash
-bash benchmarks/run_databench_remote_baseline.sh \
-  --databench-root datasets/databench \
-  --run-name databench_remote_baseline_smoke \
-  --max-cases 50
-```
-
-For the full DataBench run, remove `--max-cases`:
-
-```bash
-bash benchmarks/run_databench_eval.sh \
-  --databench-root datasets/databench \
-  --run-name databench_bench
-```
-
-### TableBench
-
-Run CLOVER on non-visual TableBench cases:
-
-```bash
-bash benchmarks/run_tablebench_eval.sh \
-  --tablebench-root datasets/tablebench \
-  --run-name tablebench_clover_smoke \
-  --max-cases 50
-```
-
-Run the TableBench Remote LLM baseline:
-
-```bash
-bash benchmarks/run_tablebench_remote_baseline.sh \
-  --tablebench-root datasets/tablebench \
-  --run-name tablebench_remote_baseline_smoke \
-  --max-cases 50
-```
-
-The TableBench baseline uses direct prediction (`DP`) by default. To run
-table chain-of-thought or program-of-thought baselines:
-
-```bash
-CLOVER_TABLEBENCH_INSTRUCTION_TYPE=TCoT \
-  bash benchmarks/run_tablebench_remote_baseline.sh \
-    --tablebench-root datasets/tablebench \
-    --run-name tablebench_tcot_baseline_smoke \
-    --max-cases 50
-
-CLOVER_TABLEBENCH_INSTRUCTION_TYPE=PoT \
-  bash benchmarks/run_tablebench_remote_baseline.sh \
-    --tablebench-root datasets/tablebench \
-    --run-name tablebench_pot_baseline_smoke \
-    --max-cases 50
-```
+See [benchmarks/ABLATION.md](benchmarks/ABLATION.md) for variant definitions and
+report-generation commands.
 
 ## Test
 
-Run the unit test suite from the repository root:
+Run the full unit test suite:
 
 ```bash
 ./run_tests.sh
 ```
 
-Run one or more specific test modules:
+Run selected modules:
 
 ```bash
 ./run_tests.sh tests.benchmarks.test_eval_runtime_grouping

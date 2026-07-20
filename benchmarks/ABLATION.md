@@ -4,7 +4,12 @@ Current ablation reporting is restricted to TableBench. MMQA should be used for
 ordinary ACC/regression evaluation only, not for ablation conclusions, unless a
 future experiment explicitly re-opens that scope.
 
-Terminology: `Global` denotes the planner/synthesizer/replan model role. It may be backed by a cloud API or by a local vLLM endpoint. Legacy config and counter names such as `remote_llm`, `remote_calls`, or `cloud_replan_calls` are retained for backward compatibility, but paper-facing reports should describe this role as Global rather than Cloud.
+Terminology: `Global` denotes the planning/replanning role and `Local` denotes
+node-confined repair. They use the same locally deployed model checkpoint in
+the paper experiments and differ only in visible context and modification
+authority. Legacy config and counter names such as `edge`, `remote_llm`,
+`remote_calls`, or `cloud_replan_calls` are retained for backward
+compatibility; paper-facing reports should use Global and Local.
 
 The TableBench experiment can run on either a fixed-size subset (default 100 cases) or the full dataset:
 

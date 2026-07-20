@@ -547,7 +547,7 @@ class PhysicalNodeBuilder:
             node_id = _required_string(node, "id", label="physical node")
             output = _required_string(node, "output", label=f"physical node {node_id}")
             # Propagate plan-level source_sql into each node so the Edge Agent
-            # sandbox can inject the original cloud SQL as a hint.
+            # sandbox can inject the global plan's SQL as a hint.
             if source_sql and "source_sql" not in node:
                 node = {**node, "source_sql": source_sql}
             unit_metadata = {

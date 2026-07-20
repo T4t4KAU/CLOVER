@@ -2,27 +2,23 @@
 set -euo pipefail
 
 # =============================================================================
-# Dual local vLLM launcher for CLOVER.
+# Local vLLM launcher for CLOVER.
 #
-# Starts EDGE1 and EDGE2 OpenAI-compatible vLLM servers and runs the selected
-# eval. No model_config JSON files are required — both configs are generated on
-# the fly from the model settings below. If EDGE1 and EDGE2 point to the same
-# model and no explicit EDGE2 port is set, the script reuses one server to avoid
-# wasting GPU memory.
+# Starts an OpenAI-compatible vLLM service and runs the selected evaluation.
+# No model_config JSON files are required: runtime configs are generated from
+# the settings below. The paper configuration uses the same checkpoint for the
+# node-local and global roles, and the launcher reuses one server by default.
 #
-#   EDGE1  -> local slm  (edge agent, table reasoning)
-#   EDGE2  -> local OpenAI-compatible supervisor/synthesis/repair model
+# EDGE1 and EDGE2 are legacy configuration labels. They denote restricted-
+# context local repair and broader-context planning/replanning, respectively;
+# they do not denote edge/cloud deployment or different model sizes.
 #
-# Demo: run the main experiment with two vLLM services:
+# Demo: run the paper-style local configuration:
 #   PYTHON_BIN=/root/miniconda3/envs/clover/bin/python \
 #   CLOVER_EDGE1_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-14B-Instruct \
-#   CLOVER_EDGE2_MODEL_PATH=/root/autodl-tmp/models/Qwen2.5-Coder-14B-Instruct \
 #   CLOVER_EDGE1_GPUS=0 \
-#   CLOVER_EDGE2_GPUS=0 \
 #   CLOVER_EDGE1_PORT=8000 \
-#   CLOVER_EDGE2_PORT=8001 \
 #   CLOVER_EDGE1_MAX_MODEL_LEN=8192 \
-#   CLOVER_EDGE2_MAX_MODEL_LEN=8192 \
 #   CLOVER_DISABLE_THINKING=true \
 #   CLOVER_EVAL_CONCURRENCY=16 \
 #   CLOVER_EDGE2_CONCURRENCY=8 \
@@ -46,7 +42,7 @@ set -euo pipefail
 # --- Dataset ---
 DATASET="${CLOVER_EVAL_DATASET:-tablebench}"  # tablebench | wikitq | tablefact | mmqa
 
-# --- EDGE1 model (local slm / edge agent) ----------------------------------
+# --- Node-local role (legacy label: EDGE1) ---------------------------------
 EDGE1_MODEL_PATH="${CLOVER_EDGE1_MODEL_PATH:-${CLOVER_EDGE_MODEL_PATH:-/root/autodl-tmp/models/Qwen2.5-14B-Instruct}}"
 EDGE1_GPUS="${CLOVER_EDGE1_GPUS:-${CLOVER_EDGE_GPUS:-0}}"  # comma-separated GPU ids, e.g. 0 or 0,1
 EDGE1_GPU_MEM_UTIL="${CLOVER_EDGE1_GPU_MEM_UTIL:-${CLOVER_EDGE_GPU_MEM_UTIL:-}}"
@@ -59,7 +55,7 @@ EDGE1_TENSOR_PARALLEL_SIZE="${CLOVER_EDGE1_TENSOR_PARALLEL_SIZE:-${CLOVER_EDGE_T
 EDGE1_TEMPERATURE="${CLOVER_EDGE1_TEMPERATURE:-0.3}"
 EDGE1_TOP_P="${CLOVER_EDGE1_TOP_P:-1.0}"
 
-# --- EDGE2 model (supervisor + synthesize / repair agent) -------------------
+# --- Global planning/replanning role (legacy label: EDGE2) -----------------
 EDGE2_MODEL_PATH="${CLOVER_EDGE2_MODEL_PATH:-${CLOVER_EDGE_MODEL_PATH:-${EDGE1_MODEL_PATH}}}"
 EDGE2_GPUS="${CLOVER_EDGE2_GPUS:-${CLOVER_EDGE_GPUS:-0}}"
 EDGE2_GPU_MEM_UTIL="${CLOVER_EDGE2_GPU_MEM_UTIL:-${CLOVER_EDGE_GPU_MEM_UTIL:-}}"
@@ -150,7 +146,8 @@ usage() {
 Usage:
   bash benchmarks/run_vllm_eval_clover.sh [DATASET] [eval options...]
 
-Starts EDGE1/EDGE2 local vLLM servers and runs the selected eval.
+Starts local vLLM service(s) and runs the selected evaluation. The paper
+configuration uses the same checkpoint for the local and global roles.
 All model/server/concurrency settings are configured at the top of this script
 or via CLOVER_* environment variables.
 
